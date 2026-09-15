@@ -76,10 +76,24 @@ pub struct SettingDescriptor {
 
 /// The working settings' descriptors (contracts/ui-surface.md "Working
 /// settings"), in the order they appear on their category screen. Every
-/// other category (Account, Playback, Controls, Plugins, Offline, Privacy &
-/// diagnostics, About) renders placeholder content only and so has no
-/// entries here.
+/// other category (Playback, Controls, Plugins, Offline, Privacy &
+/// diagnostics) renders placeholder content only and so has no entries
+/// here; About is descriptor-free by design even though it has real
+/// content (`about-product`/`about-version`/… are read-only, not
+/// searchable settings, plan.md "Project Structure").
 pub const DESCRIPTORS: &[SettingDescriptor] = &[
+    SettingDescriptor {
+        category: SettingsCategory::Account,
+        id: "account.recheck_subscription",
+        title_key: "account-recheck",
+        description_key: "account-recheck-desc",
+    },
+    SettingDescriptor {
+        category: SettingsCategory::Account,
+        id: "account.sign_out",
+        title_key: "account-sign-out",
+        description_key: "account-sign-out-desc",
+    },
     SettingDescriptor {
         category: SettingsCategory::Audio,
         id: "audio.output_device",
@@ -198,7 +212,6 @@ mod tests {
     #[test]
     fn placeholder_only_categories_contribute_no_descriptors() {
         for category in [
-            SettingsCategory::Account,
             SettingsCategory::Playback,
             SettingsCategory::Controls,
             SettingsCategory::Plugins,

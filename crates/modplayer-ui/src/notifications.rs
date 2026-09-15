@@ -12,29 +12,56 @@
 //! severity is also spelled out as text, not just an icon/colour.
 
 use egui::{Frame, Ui};
-use modplayer_core::{Notification, NotificationCenter, Severity, tr, tr_args};
+use modplayer_core::{Notification, NotificationAction, NotificationCenter, Severity, tr, tr_args};
 
-/// Draw every visible (non-dismissed) notification, newest first. Returns
-/// the id of the notification the user clicked Dismiss on this frame, if
-/// any — the caller applies it via `NotificationCenter::dismiss`.
+/// What the user did with the notification stack this frame, if anything
+/// (002-first-launch-and-sign-in contracts/ui-surface.md "notifications
+/// with actions").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NotificationInteraction {
+    /// The notification the user clicked Dismiss on, if any — the caller
+    /// applies it via `NotificationCenter::dismiss`.
+    pub dismissed: Option<u64>,
+    /// The notification whose action button the user clicked, and which
+    /// action it was (e.g. `session-expired`'s "Sign in") — the caller
+    /// reacts to it (starting US2 T071; this phase only renders the
+    /// button).
+    pub action_clicked: Option<(u64, NotificationAction)>,
+}
+
+/// Draw every visible (non-dismissed) notification, newest first: a
+/// severity icon+text, the message, an optional action button
+/// (`notification.action`), and Dismiss.
 ///
 /// Each item sits in an opaque popup-style frame: the caller floats this
 /// stack over the current screen, so without a background the text would
 /// collide with whatever is underneath (found by quickstart M4.2).
-pub fn show(ui: &mut Ui, center: &NotificationCenter) -> Option<u64> {
-    let mut dismissed = None;
+pub fn show(ui: &mut Ui, center: &NotificationCenter) -> NotificationInteraction {
+    let mut interaction = NotificationInteraction::default();
     for notification in center.visible() {
         Frame::popup(ui.style()).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(severity_label(notification.severity));
                 ui.label(message(notification));
+                if let Some(action) = notification.action
+                    && ui.button(tr(action_label_key(action))).clicked()
+                {
+                    interaction.action_clicked = Some((notification.id, action));
+                }
                 if ui.button(tr("notification-dismiss")).clicked() {
-                    dismissed = Some(notification.id);
+                    interaction.dismissed = Some(notification.id);
                 }
             });
         });
     }
-    dismissed
+    interaction
+}
+
+/// The Fluent key for an action's button label.
+fn action_label_key(action: NotificationAction) -> &'static str {
+    match action {
+        NotificationAction::SignIn => "notification-action-sign-in",
+    }
 }
 
 /// Severity icon (decorative) + the severity spelled out as text
@@ -78,9 +105,25 @@ mod tests {
             severity: Severity::Info,
             message_key: "no-output-devices",
             args: Vec::new(),
+            action: None,
             created_at: std::time::Instant::now(),
             dismissed: false,
         };
         assert_eq!(message(&notification), tr("no-output-devices"));
+    }
+
+    #[test]
+    fn action_label_key_resolves_a_fluent_key_for_every_action() {
+        assert_eq!(
+            action_label_key(NotificationAction::SignIn),
+            "notification-action-sign-in"
+        );
+    }
+
+    #[test]
+    fn default_interaction_is_empty() {
+        let interaction = NotificationInteraction::default();
+        assert_eq!(interaction.dismissed, None);
+        assert_eq!(interaction.action_clicked, None);
     }
 }

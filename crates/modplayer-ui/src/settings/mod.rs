@@ -7,17 +7,21 @@
 //! screens for Audio (T091), Appearance (T092), Language (T093) and
 //! Developer (T083); placeholder content for the rest.
 
+pub mod about;
+pub mod account;
 pub mod appearance;
 pub mod audio;
 pub mod developer;
 pub mod language;
 
 use egui::{Id, Key, TextEdit, Ui};
+use modplayer_account::{AccountEvent, AccountService};
 use modplayer_audio_io::OutputBackend;
 use modplayer_core::settings_registry::{self, SettingsCategory};
 use modplayer_core::{AudioSettings, PlaybackController, tr};
 
 use crate::device_check::DeviceCheckScreen;
+use crate::settings::about::AboutScreen;
 
 const SEARCH_BOX_ID: &str = "settings-search-box";
 
@@ -33,6 +37,7 @@ pub struct SettingsScreen {
     search_query: String,
     focus_target: Option<&'static str>,
     cached_settings: AudioSettings,
+    about: AboutScreen,
 }
 
 impl SettingsScreen {
@@ -45,6 +50,7 @@ impl SettingsScreen {
             search_query: String::new(),
             focus_target: None,
             cached_settings: controller.settings_store().load().settings,
+            about: AboutScreen::default(),
         }
     }
 }
@@ -52,12 +58,16 @@ impl SettingsScreen {
 /// Draw the Settings screen (category list, search box and results, then
 /// the selected category's content), applying every change directly to
 /// `controller`. Returns a fresh `DeviceCheckScreen` the frame the Audio
-/// category's "Test output device" button is clicked.
+/// category's "Test output device" button is clicked, plus any
+/// `AccountEvent`s the Account category's Sign in/Sign out commands raised
+/// this frame (US3 T085/T086/T087) for the caller to map to notifications/
+/// screens.
 pub fn show<B: OutputBackend>(
     ui: &mut Ui,
     controller: &mut PlaybackController<B>,
+    account: &mut AccountService,
     screen: &mut SettingsScreen,
-) -> Option<DeviceCheckScreen> {
+) -> (Option<DeviceCheckScreen>, Vec<AccountEvent>) {
     let search_id = Id::new(SEARCH_BOX_ID);
     let focus_search_box = ui.input(|input| input.modifiers.command && input.key_pressed(Key::F));
     if focus_search_box {
@@ -101,28 +111,34 @@ pub fn show<B: OutputBackend>(
 
     let focus = screen.focus_target.take();
     match screen.category {
-        SettingsCategory::Audio => audio::show(ui, controller, &mut screen.cached_settings, focus),
+        SettingsCategory::Audio => (
+            audio::show(ui, controller, &mut screen.cached_settings, focus),
+            Vec::new(),
+        ),
         SettingsCategory::Appearance => {
             appearance::show(ui, controller, &mut screen.cached_settings, focus);
-            None
+            (None, Vec::new())
         }
         SettingsCategory::Language => {
             language::show(ui, focus);
-            None
+            (None, Vec::new())
         }
         SettingsCategory::Developer => {
             developer::show(ui, controller);
-            None
+            (None, Vec::new())
         }
-        SettingsCategory::Account
-        | SettingsCategory::Playback
+        SettingsCategory::Account => (None, account::show(ui, account)),
+        SettingsCategory::About => {
+            about::show(ui, &mut screen.about);
+            (None, Vec::new())
+        }
+        SettingsCategory::Playback
         | SettingsCategory::Controls
         | SettingsCategory::Plugins
         | SettingsCategory::Offline
-        | SettingsCategory::PrivacyDiagnostics
-        | SettingsCategory::About => {
+        | SettingsCategory::PrivacyDiagnostics => {
             ui.label(tr("placeholder-settings-category"));
-            None
+            (None, Vec::new())
         }
     }
 }

@@ -13,11 +13,41 @@
 
 use modplayer_engine::{BufferPreset, CeilingDb, DeviceId, SafeVolume, Theme, VolumePercent};
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 /// Current on-disk schema version (contracts/settings-file.md).
 pub const SCHEMA_VERSION: u32 = 1;
 
-/// The persisted audio + appearance settings (DM-20 subset).
+/// Device-scoped record of the user's first-launch disclosure
+/// acknowledgement (002-first-launch-and-sign-in data-model.md §1.1,
+/// DM-27). `None` (or an absent `[disclosure]` section on disk) means
+/// never acknowledged; sign-out and revocation never touch it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisclosureAcknowledgement {
+    /// Equals `modplayer_account::DISCLOSURE_BUNDLE_VERSION` at the time
+    /// of acknowledgement. The welcome screen re-shows whenever this
+    /// stops matching the current bundle version.
+    pub acknowledged_version: u32,
+    /// Set once per acknowledgement; informational only.
+    pub acknowledged_at: OffsetDateTime,
+}
+
+impl DisclosureAcknowledgement {
+    /// Build an acknowledgement of `version`, timestamped now (UTC). The
+    /// welcome screen's acknowledge action (`modplayer-ui::welcome`) is the
+    /// only caller — kept here rather than in `modplayer-ui` so that crate
+    /// does not need its own `time` dependency just to stamp one field.
+    pub fn now(version: u32) -> Self {
+        Self {
+            acknowledged_version: version,
+            acknowledged_at: OffsetDateTime::now_utc(),
+        }
+    }
+}
+
+/// The persisted audio + appearance settings (DM-20 subset), plus the
+/// device-scoped disclosure acknowledgement (DM-27).
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioSettings {
     pub output_device: Option<DeviceId>,
@@ -27,6 +57,7 @@ pub struct AudioSettings {
     pub safe_volume: SafeVolume,
     pub master_volume: VolumePercent,
     pub theme: Theme,
+    pub disclosure: Option<DisclosureAcknowledgement>,
     pub schema_version: u32,
 }
 
@@ -40,6 +71,7 @@ impl Default for AudioSettings {
             safe_volume: SafeVolume::default(),
             master_volume: VolumePercent::new(80),
             theme: Theme::default(),
+            disclosure: None,
             schema_version: SCHEMA_VERSION,
         }
     }
@@ -75,6 +107,8 @@ pub struct RawSettings {
     pub audio: RawAudio,
     #[serde(default)]
     pub appearance: RawAppearance,
+    #[serde(default)]
+    pub disclosure: RawDisclosure,
 }
 
 fn default_schema_version() -> u32 {
@@ -87,6 +121,7 @@ impl Default for RawSettings {
             schema_version: SCHEMA_VERSION,
             audio: RawAudio::default(),
             appearance: RawAppearance::default(),
+            disclosure: RawDisclosure::default(),
         }
     }
 }
@@ -175,6 +210,18 @@ fn default_theme() -> String {
     "system".to_string()
 }
 
+/// The `[disclosure]` section (002-first-launch-and-sign-in
+/// contracts/account-session.md). `acknowledged_version = 0`/absent means
+/// never acknowledged; `acknowledged_at` is only meaningful once
+/// `acknowledged_version >= 1`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RawDisclosure {
+    #[serde(default)]
+    pub acknowledged_version: u32,
+    #[serde(default)]
+    pub acknowledged_at: Option<String>,
+}
+
 impl RawSettings {
     /// Serialize `settings` to its wire form.
     pub fn from_settings(settings: &AudioSettings) -> Self {
@@ -206,6 +253,18 @@ impl RawSettings {
                     Theme::Dark => "dark",
                 }
                 .to_string(),
+            },
+            disclosure: match settings.disclosure {
+                Some(ack) => RawDisclosure {
+                    acknowledged_version: ack.acknowledged_version,
+                    // A timestamp that refuses to format is a
+                    // programming error (`OffsetDateTime`'s own range is
+                    // always representable in RFC 3339), not a reason to
+                    // fail the whole settings save; informational field
+                    // only (data-model.md §1.1).
+                    acknowledged_at: ack.acknowledged_at.format(&Rfc3339).ok(),
+                },
+                None => RawDisclosure::default(),
             },
         }
     }
@@ -239,6 +298,22 @@ impl RawSettings {
 
         let output_device = self.audio.output_device.and_then(DeviceId::new);
 
+        // `acknowledged_version == 0` means never acknowledged
+        // (data-model.md §1.1); an unparseable/absent timestamp on an
+        // otherwise-acknowledged record still counts as acknowledged
+        // (the timestamp is informational only) and falls back to the
+        // Unix epoch rather than losing the acknowledgement.
+        let disclosure =
+            (self.disclosure.acknowledged_version > 0).then(|| DisclosureAcknowledgement {
+                acknowledged_version: self.disclosure.acknowledged_version,
+                acknowledged_at: self
+                    .disclosure
+                    .acknowledged_at
+                    .as_deref()
+                    .and_then(|raw| OffsetDateTime::parse(raw, &Rfc3339).ok())
+                    .unwrap_or(OffsetDateTime::UNIX_EPOCH),
+            });
+
         let settings = AudioSettings {
             output_device,
             device_confirmed: self.audio.device_confirmed,
@@ -250,6 +325,7 @@ impl RawSettings {
             },
             master_volume: VolumePercent::from_i64(self.audio.master_volume),
             theme,
+            disclosure,
             schema_version: self.schema_version,
         };
 
@@ -313,6 +389,52 @@ mod tests {
         assert_eq!(
             invalid,
             vec![InvalidField::BufferPreset, InvalidField::Theme]
+        );
+    }
+
+    #[test]
+    fn absent_disclosure_section_means_never_acknowledged() {
+        let (settings, invalid) = RawSettings::default().into_settings();
+        assert!(invalid.is_empty());
+        assert_eq!(settings.disclosure, None);
+    }
+
+    #[test]
+    fn acknowledged_disclosure_round_trips() {
+        let settings = AudioSettings {
+            disclosure: Some(DisclosureAcknowledgement {
+                acknowledged_version: 1,
+                acknowledged_at: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(3600),
+            }),
+            ..AudioSettings::default()
+        };
+        let raw = RawSettings::from_settings(&settings);
+        let (round_tripped, invalid) = raw.into_settings();
+        assert!(invalid.is_empty());
+        assert_eq!(round_tripped, settings);
+    }
+
+    #[test]
+    fn acknowledged_version_zero_is_never_acknowledged_even_with_a_timestamp() {
+        let mut raw = RawSettings::default();
+        raw.disclosure.acknowledged_version = 0;
+        raw.disclosure.acknowledged_at = Some("2026-09-15T13:00:00Z".to_string());
+        let (settings, _invalid) = raw.into_settings();
+        assert_eq!(settings.disclosure, None);
+    }
+
+    #[test]
+    fn unparseable_acknowledged_at_still_counts_as_acknowledged() {
+        let mut raw = RawSettings::default();
+        raw.disclosure.acknowledged_version = 1;
+        raw.disclosure.acknowledged_at = Some("not a timestamp".to_string());
+        let (settings, _invalid) = raw.into_settings();
+        assert_eq!(
+            settings.disclosure,
+            Some(DisclosureAcknowledgement {
+                acknowledged_version: 1,
+                acknowledged_at: OffsetDateTime::UNIX_EPOCH,
+            })
         );
     }
 }

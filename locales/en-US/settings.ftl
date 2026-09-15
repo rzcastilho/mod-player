@@ -18,6 +18,11 @@ settings-cat-about = About
 settings-search = Search settings
 placeholder-settings-category = This category has no settings yet in this update.
 
+account-recheck = Re-check subscription
+account-recheck-desc = Ask Spotify again whether this account currently has Premium.
+account-sign-out = Sign out
+account-sign-out-desc = Remove your sign-in credential and account details from this device.
+
 setting-output-device = Output device
 setting-output-device-desc = The audio device ModPlayer sends sound to.
 setting-buffer-preset = Buffer preset
