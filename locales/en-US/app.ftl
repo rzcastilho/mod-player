@@ -30,3 +30,9 @@ severity-critical = Critical
 severity-warning = Warning
 severity-info = Info
 notification-dismiss = Dismiss
+notification-action-sign-in = Sign in
+
+# 002-first-launch-and-sign-in: placeholder launch-gate content until the
+# real Welcome (US1) and Sign-in (US2) screens land.
+launch-gate-placeholder-welcome = Welcome screen coming soon.
+launch-gate-placeholder-sign-in = Sign-in screen coming soon.

@@ -10,5 +10,7 @@ publish = false
 modplayer-ui = { path = "../modplayer-ui", version = "0.1.0" }
 modplayer-core = { path = "../modplayer-core", version = "0.1.0" }
 modplayer-audio-io = { path = "../modplayer-audio-io", version = "0.1.0" }
+modplayer-account = { path = "../modplayer-account", version = "0.1.0" }
+modplayer-secure-store = { path = "../modplayer-secure-store", version = "0.1.0" }
 eframe.workspace = true
 anyhow.workspace = true

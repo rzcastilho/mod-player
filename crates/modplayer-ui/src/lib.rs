@@ -14,11 +14,16 @@ pub mod app;
 pub mod device_check;
 pub mod notifications;
 pub mod now_playing;
+pub mod privacy_notice;
 pub mod settings;
 pub mod shell;
+pub mod sign_in;
 pub mod theme;
+pub mod welcome;
 pub mod widgets;
 
 pub use app::App;
 pub use device_check::DeviceCheckScreen;
 pub use shell::{Section, Shell};
+pub use sign_in::SignInScreen;
+pub use welcome::WelcomeScreen;

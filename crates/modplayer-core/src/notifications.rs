@@ -28,14 +28,26 @@ pub enum Severity {
     Info,
 }
 
+/// An action a notification's button performs when clicked
+/// (002-first-launch-and-sign-in contracts/account-session.md "Events",
+/// contracts/ui-surface.md). `SignIn` navigates to the sign-in step (e.g.
+/// `RefreshFailing`'s `signin-again`, `SessionExpired`, `SessionRevoked`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationAction {
+    SignIn,
+}
+
 /// A single raised notification. `message_key` is a Fluent key, never raw
 /// text (FR-021); `args` are Fluent placeholder values (e.g. `{ $device }`).
+/// `action`, when set, is rendered as an extra button alongside Dismiss
+/// (e.g. `session-expired`'s "Sign in").
 #[derive(Debug, Clone)]
 pub struct Notification {
     pub id: u64,
     pub severity: Severity,
     pub message_key: &'static str,
     pub args: Vec<(&'static str, String)>,
+    pub action: Option<NotificationAction>,
     pub created_at: Instant,
     pub dismissed: bool,
 }
@@ -64,6 +76,39 @@ impl NotificationCenter {
         message_key: &'static str,
         args: Vec<(&'static str, String)>,
     ) -> u64 {
+        self.raise_full(severity, message_key, args, None)
+    }
+
+    /// Raise a notification with no arguments but an action button (e.g.
+    /// `session-expired`'s "Sign in"). Returns its id.
+    pub fn raise_with_action(
+        &mut self,
+        severity: Severity,
+        message_key: &'static str,
+        action: NotificationAction,
+    ) -> u64 {
+        self.raise_full(severity, message_key, Vec::new(), Some(action))
+    }
+
+    /// Raise a notification with both Fluent placeholder arguments and an
+    /// action button. Returns its id.
+    pub fn raise_with_args_and_action(
+        &mut self,
+        severity: Severity,
+        message_key: &'static str,
+        args: Vec<(&'static str, String)>,
+        action: NotificationAction,
+    ) -> u64 {
+        self.raise_full(severity, message_key, args, Some(action))
+    }
+
+    fn raise_full(
+        &mut self,
+        severity: Severity,
+        message_key: &'static str,
+        args: Vec<(&'static str, String)>,
+        action: Option<NotificationAction>,
+    ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         self.items.push_front(Notification {
@@ -71,6 +116,7 @@ impl NotificationCenter {
             severity,
             message_key,
             args,
+            action,
             created_at: Instant::now(),
             dismissed: false,
         });
@@ -94,6 +140,18 @@ impl NotificationCenter {
     pub fn dismiss(&mut self, id: u64) {
         if let Some(item) = self.items.iter_mut().find(|n| n.id == id) {
             item.dismissed = true;
+        }
+    }
+
+    /// Dismiss every visible notification with the given `message_key`
+    /// (e.g. `RefreshRecovered` dismissing the `signin-again` warning
+    /// `RefreshFailing` raised — contracts/account-session.md "Events").
+    /// A no-op when none match.
+    pub fn dismiss_by_key(&mut self, message_key: &str) {
+        for item in self.items.iter_mut().filter(|n| !n.dismissed) {
+            if item.message_key == message_key {
+                item.dismissed = true;
+            }
         }
     }
 
@@ -161,6 +219,48 @@ mod tests {
         let mut center = NotificationCenter::new();
         center.raise(Severity::Info, "key");
         center.dismiss(9999);
+        assert_eq!(center.visible().count(), 1);
+    }
+
+    #[test]
+    fn plain_raise_has_no_action() {
+        let mut center = NotificationCenter::new();
+        center.raise(Severity::Info, "key");
+        assert_eq!(center.visible().next().and_then(|n| n.action), None);
+    }
+
+    #[test]
+    fn raise_with_action_attaches_the_action() {
+        let mut center = NotificationCenter::new();
+        center.raise_with_action(
+            Severity::Critical,
+            "session-expired",
+            NotificationAction::SignIn,
+        );
+        assert_eq!(
+            center.visible().next().and_then(|n| n.action),
+            Some(NotificationAction::SignIn)
+        );
+    }
+
+    #[test]
+    fn dismiss_by_key_dismisses_every_matching_visible_notification() {
+        let mut center = NotificationCenter::new();
+        center.raise(Severity::Warning, "signin-again");
+        center.raise(Severity::Info, "unrelated");
+        center.raise(Severity::Warning, "signin-again");
+
+        center.dismiss_by_key("signin-again");
+
+        let remaining: Vec<_> = center.visible().map(|n| n.message_key).collect();
+        assert_eq!(remaining, vec!["unrelated"]);
+    }
+
+    #[test]
+    fn dismiss_by_key_is_a_no_op_when_nothing_matches() {
+        let mut center = NotificationCenter::new();
+        center.raise(Severity::Info, "key");
+        center.dismiss_by_key("no-such-key");
         assert_eq!(center.visible().count(), 1);
     }
 }

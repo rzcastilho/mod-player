@@ -6,5 +6,7 @@
 mod model;
 mod store;
 
-pub use model::{AudioSettings, InvalidField, RawSettings, SCHEMA_VERSION};
+pub use model::{
+    AudioSettings, DisclosureAcknowledgement, InvalidField, RawSettings, SCHEMA_VERSION,
+};
 pub use store::{CONFIG_DIR_ENV, LoadOutcome, SaveError, SettingsStore, SettingsWarning};

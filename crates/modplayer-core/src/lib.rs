@@ -16,6 +16,6 @@ pub mod settings_registry;
 pub use controller::{ActiveDevice, PlaybackController};
 pub use device_policy::{DeviceResolution, DeviceWarning};
 pub use i18n::{tr, tr_args};
-pub use notifications::{Notification, NotificationCenter, Severity};
-pub use settings::{AudioSettings, SettingsStore};
+pub use notifications::{Notification, NotificationAction, NotificationCenter, Severity};
+pub use settings::{AudioSettings, DisclosureAcknowledgement, SettingsStore};
 pub use settings_registry::{SettingDescriptor, SettingsCategory};

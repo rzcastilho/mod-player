@@ -11,7 +11,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use modplayer_core::settings::{AudioSettings, SettingsStore, SettingsWarning};
+use modplayer_core::settings::{
+    AudioSettings, DisclosureAcknowledgement, SettingsStore, SettingsWarning,
+};
 use modplayer_engine::{BufferPreset, VolumePercent};
 
 /// A minimal self-cleaning temp directory (no `tempfile` dependency).
@@ -55,6 +57,34 @@ fn round_trip_defaults() {
     let outcome = store.load();
     assert_eq!(outcome.settings, settings);
     assert_eq!(outcome.warning, None);
+}
+
+#[test]
+fn disclosure_acknowledgement_round_trips_through_the_file() {
+    // 002-first-launch-and-sign-in DM-27: the `[disclosure]` section must
+    // survive a real save/load through `settings.toml` on disk, not just
+    // the in-memory `RawSettings` conversion (`settings/model.rs`'s own
+    // unit tests already cover that half).
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let settings = AudioSettings {
+        disclosure: Some(DisclosureAcknowledgement {
+            acknowledged_version: 1,
+            acknowledged_at: time::OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(3600),
+        }),
+        ..AudioSettings::default()
+    };
+    assert!(store.save(&settings).is_ok());
+
+    let outcome = store.load();
+    assert_eq!(outcome.settings, settings);
+    assert_eq!(outcome.warning, None);
+
+    let on_disk = fs::read_to_string(store.path()).unwrap_or_default();
+    assert!(
+        on_disk.contains("[disclosure]") && on_disk.contains("acknowledged_version = 1"),
+        "settings.toml must persist the [disclosure] section, got:\n{on_disk}"
+    );
 }
 
 #[test]
