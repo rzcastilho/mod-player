@@ -1,0 +1,10 @@
+[package]
+name = "modplayer-audio-source-synthetic"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+modplayer-audio-source = { path = "../modplayer-audio-source", version = "0.1.0" }

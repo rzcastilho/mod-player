@@ -1,0 +1,15 @@
+[package]
+name = "modplayer-ui"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+modplayer-core = { path = "../modplayer-core", version = "0.1.0" }
+modplayer-audio-io = { path = "../modplayer-audio-io", version = "0.1.0" }
+modplayer-engine = { path = "../modplayer-engine", version = "0.1.0" }
+eframe.workspace = true
+egui.workspace = true
+fluent-templates.workspace = true
