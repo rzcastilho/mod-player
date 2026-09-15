@@ -1,0 +1,21 @@
+# 001-mvp / 008 — Effect Chain and Built-In Effect Nodes
+
+**Source:** [FR-6.1 Engine](../../ModPlayer-Software-Specification.md#fr-61-engine), [FR-6.2 Effect chain](../../ModPlayer-Software-Specification.md#fr-62-effect-chain), [FR-6.3 Built-in effect nodes](../../ModPlayer-Software-Specification.md#fr-63-built-in-effect-nodes), [FR-6.4 Metering](../../ModPlayer-Software-Specification.md#fr-64-metering), [FR-6.5 Audio access boundary](../../ModPlayer-Software-Specification.md#fr-65-audio-access-boundary), [DM-17 EffectNode](../../ModPlayer-Software-Specification.md#dm-17-effectnode), [DM-18 EffectChain](../../ModPlayer-Software-Specification.md#dm-18-effectchain), [DM-20 AudioSettings](../../ModPlayer-Software-Specification.md#dm-20-audiosettings), [Part 9 § 3 Real-time path](../../ModPlayer-Software-Specification.md#real-time-path) (AR-3, AR-4), [Part 9 § 5 Key flows](../../ModPlayer-Software-Specification.md#5-key-flows) (5.2), [J-8 — Reorder and resolve effect chain and transport focus](../../ModPlayer-Software-Specification.md#j-8--reorder-and-resolve-effect-chain-and-transport-focus-jtbd-13), [EC § 5 Audio engine and effects](../../ModPlayer-Software-Specification.md#5-audio-engine-and-effects), [NFR § 1 Performance and latency](../../ModPlayer-Software-Specification.md#1-performance-and-latency) (NFR-1.1, 1.8, 1.14, 1.15), [NFR § 8 Observability (local)](../../ModPlayer-Software-Specification.md#8-observability-local), [§ 7 Hard constraints](../../ModPlayer-Software-Specification.md#7-hard-constraints) (C-2, C-4, C-5), [§ 4 Jobs-to-be-done](../../ModPlayer-Software-Specification.md#4-jobs-to-be-done) (JTBD-2, JTBD-3)
+
+**Prerequisites:** Assumes the engine and limiter from 001-mvp/001-walking-skeleton and playback from 001-mvp/003-streaming-playback-and-queue.
+
+## Prompt
+
+> Let a user change how a song sounds in real time — slow it down without changing pitch, transpose it without changing speed, shape its tone — through an ordered chain of host-implemented effect nodes that a later plugin tier will parameterize.
+>
+> The chain sits between the decoder and the output limiter and holds at least 16 nodes. The Effect Chain panel lists nodes in processing order, each labeled with its type and owner (host for now), with a bypass toggle, a drag handle, and a per-node CPU-load indicator plus a whole-chain figure. Reorder, bypass, add, and remove take effect at the next buffer boundary with a short crossfade where needed, never a glitch. Processing runs at the source sample rate; conversion to the device rate happens only at output.
+>
+> Built-in nodes and their parameters: pitch shift (semitones −12..+12 fractional, formant preservation on/off), time stretch (ratio 0.25..2.0, quality mode performance/quality; combined with pitch shift into a single resampler stage when both are present), gain (−60..+12 dB, mute), equalizer (up to 8 bands with frequency, gain, Q, peak/shelf type), high-pass/low-pass filter (cutoff, resonance capped below self-oscillation the limiter cannot catch), and stereo tools (width 0..2, balance, mono sum with phase invert, channel swap). All parameters are automatable with sample-accurate scheduling at buffer resolution and smoothing that avoids zipper noise; out-of-range values clamp and the clamped value is returned. Peak and RMS meters pre- and post-chain, and a low-resolution spectrum (32–128 bands), are published to the UI.
+>
+> Hard boundary: no component can write decoded audio to a file, socket, or any interface outside the engine.
+>
+> Acceptance: when the user drags the time-stretch ratio from 1.0 to 0.6 during playback, the change is audible within 20 ms at p95 and pitch is unchanged. When total processing exceeds the real-time budget, the most expensive non-host node is bypassed and a warning names it; audio never drops out silently. When the user reorders EQ before time stretch, the swap happens at a buffer boundary with no click. When tempo is set to 25% or pitch to +12, the node UI notes that quality mode auto-switched. Chain plus host processing stays under 50% of one core at the performance buffer preset with pitch shift, time stretch, and an 8-band EQ active.
+
+## Scope boundary
+
+Does not cover plugin-owned nodes, the custom buffer processor, chain presets, or the detected-key display — only host-owned nodes and the chain UI.

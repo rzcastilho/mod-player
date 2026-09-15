@@ -1,0 +1,19 @@
+# 001-mvp / 011 — Plugin UI Contributions: Panels, Overlays, Actions, Settings, Notifications
+
+**Source:** [Part 5 § 6.5 UI](../../ModPlayer-Software-Specification.md#65-ui), [Part 5 § 7 UI contribution rules](../../ModPlayer-Software-Specification.md#7-ui-contribution-rules), [FR-7.4 Conflicts and ordering](../../ModPlayer-Software-Specification.md#fr-74-conflicts-and-ordering) (FR-7.4.1, 7.4.2), [FR-11.1 Settings](../../ModPlayer-Software-Specification.md#fr-111-settings) (FR-11.1.3), [FR-14.1 Notifications](../../ModPlayer-Software-Specification.md#fr-141-notifications) (FR-14.1.3), [§ 4 Now-playing view and waveform](../../ModPlayer-Software-Specification.md#4-now-playing-view-and-waveform) (FR-4.1.3 overlays), [Part 9 § 3 User interface layer](../../ModPlayer-Software-Specification.md#user-interface-layer), [EC § 6 Plugins](../../ModPlayer-Software-Specification.md#6-plugins) (EC-6.8, 6.9, 6.19), [NFR § 4 Security](../../ModPlayer-Software-Specification.md#4-security) (NFR-4.7), [NFR § 6 Accessibility](../../ModPlayer-Software-Specification.md#6-accessibility) (NFR-6.3), [§ 3 Edge users](../../ModPlayer-Software-Specification.md#3-edge-users)
+
+**Prerequisites:** Assumes the plugin runtime from 001-mvp/009-plugin-runtime-and-permissions and the shortcut map from 001-mvp/007-keyboard-actions-and-shortcuts.
+
+## Prompt
+
+> Let a plugin show the user something and give them controls — a panel, drawings on the waveform, keyboard shortcuts, a settings page, a notification — while the host stays in charge of rendering, theming, accessibility, and safety. Plugins never inject markup, styles, or scripts into the host; everything is declarative.
+>
+> With `ui.panel` a plugin registers a layout built from host widgets: label, button, toggle, slider, knob, list, text, marker list, meter. The host renders it, applies the active theme tokens, and makes every widget keyboard-operable with an accessible name taken from the plugin's label; a widget without a label is refused at registration with the widget path reported. Panels are always attributed with the plugin's name and icon, can be docked or floated, and can be closed or disabled by the user. Plugins update widget values through the API and receive interaction events back.
+>
+> With `ui.overlay` a plugin draws lines, regions, labels, and glyphs on the waveform in track-time coordinates; the host re-projects them on zoom and scroll. With `ui.shortcuts` a plugin registers actions (trigger or continuous) with default bindings, namespaced by plugin identifier so identifiers cannot collide; the host owns binding and conflict handling, and delivers `action_invoked` with the source (keyboard, UI, later MIDI) and value. Plugin shortcuts appear in the central shortcut map; a conflict with a host or another plugin's binding leaves the plugin's shortcut inactive until the user resolves it, with bundled plugins winning by default over community ones. With `ui.settings` a plugin registers a declarative settings schema the host renders inside Settings and persists, sending `settings_changed`. With `ui.notify` a plugin posts non-blocking notifications, attributed to it and rate-limited to 6 per minute.
+>
+> Acceptance: when a plugin registers a panel with a slider labeled "Tempo", a screen-reader user hears "Tempo, slider" and can adjust it by keyboard. When a plugin requests the `L` shortcut already used by the host's loop toggle, the map flags the conflict and the plugin's binding stays inactive. When a plugin posts a seventh notification within a minute, it receives `rate_limited`. When the user switches from light to dark theme, plugin panels update without any plugin code running.
+
+## Scope boundary
+
+Does not cover detaching panels to a second display, the developer console, or the permission approval sheet — only the contribution surface itself.
