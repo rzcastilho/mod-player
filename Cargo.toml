@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+cpal = "0.18"
+rtrb = "0.4"
+eframe = { version = "0.36", features = ["accesskit"] }
+egui = "0.36"
+fluent-templates = "0.15"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+directories = "6"
+thiserror = "2"
+anyhow = "1"
+assert_no_alloc = "1.1"

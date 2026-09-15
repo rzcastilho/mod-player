@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+#![forbid(unsafe_code)]
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+
+//! The `AudioSource` trait: the single sanctioned seam through which sample
+//! data enters the ModPlayer real-time engine (Constitution Principle IV).
+//!
+//! See `specs/001-walking-skeleton/contracts/audio-source.md`.
+
+/// A producer of interleaved stereo `f32` frames at its own fixed sample rate.
+///
+/// Real-time contract: `fill` and `seek` are called from the audio callback
+/// and MUST NOT allocate, lock, block, log, or perform I/O.
+pub trait AudioSource: Send + 'static {
+    /// Sample rate of the frames produced by `fill`. Constant for the
+    /// lifetime of the value.
+    fn sample_rate(&self) -> u32;
+
+    /// Total length in frames of the current material, if finite. `None`
+    /// means "unbounded / streaming" (no implementor this slice).
+    fn len_frames(&self) -> Option<u64>;
+
+    /// Current read position in frames (`0 <= pos < len` when finite).
+    fn position(&self) -> u64;
+
+    /// Move the read position. Wraps modulo `len_frames` when finite.
+    fn seek(&mut self, frame: u64);
+
+    /// Write exactly `out.len() / 2` stereo frames into `out` (interleaved
+    /// L,R), advancing `position` by that many frames (wrapping at
+    /// `len_frames`). Must fill the whole slice; silence is written
+    /// explicitly.
+    fn fill(&mut self, out: &mut [f32]);
+}

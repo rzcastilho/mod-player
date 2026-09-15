@@ -1,0 +1,10 @@
+device-check-device-list = Choose your output device
+buffer-preset-performance = Performance
+buffer-preset-balanced = Balanced
+buffer-preset-safe = Safe
+device-check-play-tone = Play test tone
+device-check-question = Did you hear that?
+device-check-yes = Yes
+device-check-no = No, try another
+device-check-skip = Skip for now
+device-check-no-devices = No output devices were found. Connect a device and reopen this screen from Settings › Audio.

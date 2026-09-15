@@ -1,0 +1,11 @@
+# Real-time-safety gate: `unwrap`/`expect` are only permitted in `tests/` and `main.rs`.
+# `cargo clippy` cannot scope disallowed-methods by path, so this list is enforced by
+# convention + code review (see CODEOWNERS + PULL_REQUEST_TEMPLATE.md's "Real-time
+# safety" section) and by `#[deny(clippy::unwrap_used, clippy::expect_used)]` at the
+# crate root of every library crate, allowed back on in `#[cfg(test)]` modules.
+disallowed-methods = [
+    { path = "std::option::Option::unwrap", reason = "no unwrap/expect outside tests and main; return a Result or use a typed default" },
+    { path = "std::option::Option::expect", reason = "no unwrap/expect outside tests and main; return a Result or use a typed default" },
+    { path = "std::result::Result::unwrap", reason = "no unwrap/expect outside tests and main; return a Result or use a typed default" },
+    { path = "std::result::Result::expect", reason = "no unwrap/expect outside tests and main; return a Result or use a typed default" },
+]

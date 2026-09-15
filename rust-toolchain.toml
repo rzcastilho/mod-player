@@ -1,0 +1,7 @@
+[toolchain]
+# NOTE: eframe/egui 0.36.x (pinned in the workspace per plan.md's Technical
+# Context) raised their MSRV to 1.95 after this plan's research.md was
+# written against rustc 1.93. Pinned here to 1.95.0 (the toolchain actually
+# available) so `cargo build --workspace` succeeds; `rust-version` in the
+# workspace manifest is bumped to match.
+channel = "1.95.0"
