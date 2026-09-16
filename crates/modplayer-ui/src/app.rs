@@ -17,14 +17,23 @@
 use std::time::{Duration, Instant};
 
 use egui::{Align2, Area, CentralPanel, Id, OpenUrl, Panel, Ui, vec2};
-use modplayer_account::{AccountEvent, AccountService, LaunchStep, SessionState, Tier, next_step};
+use modplayer_account::{
+    AccountEvent, AccountService, LaunchStep, ReadOutcome, RequestId, SessionState, Tier,
+    UPGRADE_URL, next_step,
+};
 use modplayer_audio_io::OutputBackend;
-use modplayer_core::{NotificationAction, PlaybackController, Severity, tr};
+use modplayer_audio_source::SourceHost;
+use modplayer_core::{
+    ActiveState, Intent, NotRegisteredReason, NotificationAction, PlaybackController,
+    STATUS_PAGE_URL, Severity, tr,
+};
 
 use crate::device_check::DeviceCheckScreen;
 use crate::settings::SettingsScreen;
+use crate::settings::developer::PlayFromAccountOutcome;
 use crate::shell::{Section, Shell};
 use crate::sign_in::{self, SignInScreen, TierResult};
+use crate::ticker::Ticker;
 use crate::welcome::{self, WelcomeScreen};
 use crate::{notifications, now_playing, settings, theme};
 
@@ -35,9 +44,12 @@ const REPAINT_INTERVAL: Duration = Duration::from_millis(33);
 /// state (selected nav section, the Settings screen's own state, an open
 /// Device Check overlay if any), and the account service that gates
 /// everything ahead of it.
-pub struct App<B: OutputBackend> {
-    controller: PlaybackController<B>,
+pub struct App<B: OutputBackend, H: SourceHost> {
+    controller: PlaybackController<B, H>,
     account: AccountService,
+    /// Background repaint thread (research R12, FR-008/SC-010): keeps
+    /// `tick()` running while minimized/hidden/backgrounded.
+    ticker: Ticker,
     /// Cached from `settings.disclosure` at construction (data-model.md
     /// §1.1). Only the welcome screen's acknowledge action
     /// (`show_welcome`) updates it afterwards, the same frame it records
@@ -59,16 +71,23 @@ pub struct App<B: OutputBackend> {
     /// launch gate: `settings::show` hands one back regardless of
     /// confirmation state).
     device_check: Option<DeviceCheckScreen>,
+    /// The in-flight `request_playback_state()` for the transfer banner's
+    /// "Playing on <device>" name (US3 T077, FR-016/019, research R3),
+    /// `None` when nothing is outstanding. Re-requested every frame the
+    /// controller is `Inactive` with no name yet — covers both the launch
+    /// check ("another device is already active") and a reconnect after a
+    /// later `BecameInactive`.
+    pending_device_name_request: Option<RequestId>,
 }
 
-impl<B: OutputBackend> App<B> {
+impl<B: OutputBackend, H: SourceHost> App<B, H> {
     /// Construct the app around an already-`launch()`ed `controller` and
     /// `account`. Applies the persisted theme to `cc.egui_ctx` before
     /// returning, so it is set before `ui()` ever paints
     /// (contracts/ui-surface.md "Theme").
     pub fn new(
         cc: &eframe::CreationContext<'_>,
-        mut controller: PlaybackController<B>,
+        mut controller: PlaybackController<B, H>,
         account: AccountService,
     ) -> Self {
         theme::apply(&cc.egui_ctx, controller.theme());
@@ -99,15 +118,26 @@ impl<B: OutputBackend> App<B> {
             );
         }
 
+        // A relaunch resumes an already-`Active`/`Premium` session with no
+        // `AccountEvent::TierChecked` of its own (that only fires during a
+        // live sign-in flow, T061/contracts/ui-surface.md §6 "Launch"), so
+        // the permission has to be set here too, from whatever `launch()`
+        // already resolved.
+        apply_account_permission(&mut controller, &account);
+
+        let ticker = Ticker::spawn(cc.egui_ctx.clone());
+
         Self {
             controller,
             account,
+            ticker,
             disclosure_acknowledged_version,
             welcome: WelcomeScreen::default(),
             sign_in: SignInScreen::default(),
             shell: Shell::default(),
             settings,
             device_check,
+            pending_device_name_request: None,
         }
     }
 
@@ -124,12 +154,14 @@ impl<B: OutputBackend> App<B> {
     }
 }
 
-impl<B: OutputBackend> eframe::App for App<B> {
+impl<B: OutputBackend, H: SourceHost> eframe::App for App<B, H> {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         // Retry any pending commands, drain device events (US3 of 001),
         // and age out Info notifications — once per frame.
         self.controller.tick();
         self.controller.notifications_mut().tick(Instant::now());
+        self.ticker
+            .set_playing(self.controller.transport_state().intent == Intent::Playing);
 
         let ctx = ui.ctx().clone();
         // Repaint at ≥ 30 Hz (plan.md "Device watcher thread"): the peak
@@ -145,6 +177,27 @@ impl<B: OutputBackend> eframe::App for App<B> {
         for event in account_events {
             self.handle_account_event(&ctx, event);
         }
+        // "Play from account" replies come from the source's session (Stage
+        // 2, spec Amendment 2026-09-16), not the Web API — drain and route
+        // them the same way the old `ReadResult` path did.
+        for (request_id, result) in self.controller.take_account_tracks() {
+            match self
+                .settings
+                .handle_account_tracks_result(request_id, &result)
+            {
+                PlayFromAccountOutcome::Ready(tracks) => {
+                    self.controller.queue_replace(tracks);
+                    self.controller.play();
+                }
+                PlayFromAccountOutcome::Failed => {
+                    self.controller
+                        .notifications_mut()
+                        .raise(Severity::Warning, "play-from-account-failed");
+                }
+                PlayFromAccountOutcome::Ignored => {}
+            }
+        }
+        self.request_other_device_name_if_needed();
 
         Panel::left(Id::new("shell-nav-rail")).show(ui, |ui| {
             self.shell.nav_rail(ui);
@@ -161,13 +214,27 @@ impl<B: OutputBackend> eframe::App for App<B> {
         if let Some(id) = interaction.dismissed {
             self.controller.notifications_mut().dismiss(id);
         }
-        // A notification action button click (e.g. `signin-again`'s "Sign
-        // in", US2 T071): every `NotificationAction` variant currently
-        // means "start a fresh sign-in attempt".
-        if let Some((id, NotificationAction::SignIn)) = interaction.action_clicked {
-            self.controller.notifications_mut().dismiss(id);
-            for event in self.account.start_sign_in() {
-                self.handle_account_event(&ctx, event);
+        // A notification action button click (US2 T071, US4 T090): route
+        // by which action it was — `open_url` only ever happens here, from
+        // the UI (design note 10).
+        if let Some((id, action)) = interaction.action_clicked {
+            match action {
+                NotificationAction::SignIn => {
+                    self.controller.notifications_mut().dismiss(id);
+                    for event in self.account.start_sign_in() {
+                        self.handle_account_event(&ctx, event);
+                    }
+                }
+                NotificationAction::OpenStatusPage => {
+                    ctx.open_url(OpenUrl::new_tab(STATUS_PAGE_URL));
+                }
+                NotificationAction::RetrySource => {
+                    self.controller.notifications_mut().dismiss(id);
+                    self.controller.retry_source();
+                }
+                NotificationAction::OpenUpgradePage => {
+                    ctx.open_url(OpenUrl::new_tab(UPGRADE_URL));
+                }
             }
         }
 
@@ -180,9 +247,18 @@ impl<B: OutputBackend> eframe::App for App<B> {
             LaunchStep::Main => self.show_main(ui),
         });
     }
+
+    /// Closing the window quits (FR-008): stop, release the source's
+    /// resources (deregistering the Connect device) and drop the stream —
+    /// no tray/background mode. The workspace's `eframe` dependency does
+    /// not enable the `glow` feature (default renderer is `wgpu`), so
+    /// `on_exit` takes no context parameter.
+    fn on_exit(&mut self) {
+        self.controller.shutdown();
+    }
 }
 
-impl<B: OutputBackend> App<B> {
+impl<B: OutputBackend, H: SourceHost> App<B, H> {
     /// The Welcome/Decline/Privacy-Notice launch gate (US1, contracts/
     /// ui-surface.md "Welcome"): draws whichever sub-view `self.welcome`
     /// is on, and updates the cached acknowledged version the moment
@@ -224,13 +300,23 @@ impl<B: OutputBackend> App<B> {
                 // The "Checking your account" sub-state renders directly
                 // from `SessionState::Checking`; no notification needed.
             }
-            AccountEvent::TierChecked(tier) => match tier {
-                Tier::Premium => {}
-                Tier::Free => self.sign_in.set_tier_result(TierResult::Free),
-                Tier::Unknown => self.sign_in.set_tier_result(TierResult::Unknown),
-            },
+            AccountEvent::TierChecked(tier) => {
+                match tier {
+                    Tier::Premium => {}
+                    Tier::Free => self.sign_in.set_tier_result(TierResult::Free),
+                    Tier::Unknown => self.sign_in.set_tier_result(TierResult::Unknown),
+                }
+                apply_account_permission(&mut self.controller, &self.account);
+            }
             AccountEvent::TierCheckFailed => {
+                // No notification: with session-sourced tier (spec Amendment
+                // 2026-09-16) the public `/v1/me` check is best-effort and
+                // 429s on every launch with a Keymaster token, so a failure
+                // is expected, not an error. The Account panel already shows
+                // "tier: Unknown / Never checked online" inline; the session
+                // is the real tier authority.
                 self.sign_in.set_tier_result(TierResult::Unknown);
+                apply_account_permission(&mut self.controller, &self.account);
             }
             AccountEvent::RefreshFailing => {
                 self.controller.notifications_mut().raise_with_action(
@@ -245,6 +331,9 @@ impl<B: OutputBackend> App<B> {
                     .dismiss_by_key("signin-again");
             }
             AccountEvent::SignedOut { categories } => {
+                // Design note 7: deregister the Connect device *before*
+                // processing 002's own report of the sign-out.
+                self.controller.clear_for_sign_out();
                 let joined = categories
                     .iter()
                     .map(|key| tr(key))
@@ -271,12 +360,63 @@ impl<B: OutputBackend> App<B> {
                 );
             }
             AccountEvent::SessionRevoked => {
+                // Design note 7, same ordering as `SignedOut` above.
+                self.controller.clear_for_sign_out();
                 self.controller.notifications_mut().raise_with_action(
                     Severity::Critical,
                     "session-revoked",
                     NotificationAction::SignIn,
                 );
             }
+            AccountEvent::ReadResult { request_id, result } => {
+                self.handle_read_result(request_id, &result);
+            }
+        }
+    }
+
+    /// Route an `AccountEvent::ReadResult` to the Settings › Developer
+    /// screen's "Play from account" state (T063, contracts/account-read-
+    /// delta.md §3) — queues and plays the tracks on success, or raises the
+    /// `play-from-account-failed` notification on a definitive non-
+    /// `Forbidden` failure (the `Forbidden`/empty cases are already shown
+    /// inline by the screen itself) — or, when it is instead the transfer
+    /// banner's own in-flight request, to the controller's `Inactive`
+    /// device name (US3 T077).
+    fn handle_read_result(
+        &mut self,
+        request_id: modplayer_account::RequestId,
+        result: &ReadOutcome,
+    ) {
+        if self.pending_device_name_request == Some(request_id) {
+            self.pending_device_name_request = None;
+            if let ReadOutcome::PlaybackState(outcome) = result {
+                // `Ok(None)`/`Err(_)` leave the name `None`: the banner
+                // falls back to a generic "another device" (Complexity
+                // Tracking: "graceful fallback").
+                let name = outcome
+                    .as_ref()
+                    .ok()
+                    .and_then(|summary| summary.as_ref())
+                    .and_then(|summary| summary.device_name.clone());
+                self.controller.set_other_device_name(name);
+            }
+        }
+        // "Play from account" no longer arrives via `ReadResult` — it is
+        // sourced from the session and drained in `ui()` (Stage 2).
+    }
+
+    /// Fetch the other Connect device's name (US3 T077, FR-016/019,
+    /// research R3) whenever the controller is `Inactive` with no name
+    /// known yet and nothing is already in flight — covers both the
+    /// launch-time check ("another device is already active", ui-surface
+    /// §6 "Launch") and a later reconnect after `BecameInactive`.
+    fn request_other_device_name_if_needed(&mut self) {
+        let needs_name = matches!(
+            self.controller.active_state(),
+            ActiveState::Inactive { other_device: None }
+        );
+        if needs_name && self.pending_device_name_request.is_none() {
+            self.pending_device_name_request = Some(self.account.request_playback_state());
         }
     }
 
@@ -328,5 +468,115 @@ impl<B: OutputBackend> App<B> {
                 }
             }
         }
+    }
+}
+
+/// `controller.set_playback_permitted(..)` from the account session's
+/// current view (T061, contracts/ui-surface.md §6 "App wiring").
+///
+/// Session-sourced tier (spec Amendment 2026-09-16): the public `/v1/me`
+/// tier check returns a blanket 429 with a Keymaster token, so tier stays
+/// `Unknown` for real Premium users and can no longer gate registration.
+/// Permission to *attempt* registration therefore follows from being signed
+/// in; the receiver session is the tier authority — a successful
+/// registration (`SourceEvent::Registered`) enables the transport, and a
+/// `PremiumAccountRequired` rejection (`SourceEvent::TierRejected`) disables
+/// it with "Premium required" (FR-027). A definitive `Free` (only possible
+/// when a working Web API reported it) still blocks up front.
+fn apply_account_permission<B: OutputBackend, H: SourceHost>(
+    controller: &mut PlaybackController<B, H>,
+    account: &AccountService,
+) {
+    match permission_decision(account.state(), account.tier()) {
+        None => controller.set_playback_permitted(true, None),
+        Some(reason) => controller.set_playback_permitted(false, Some(reason)),
+    }
+}
+
+/// Pure core of [`apply_account_permission`]: `None` permits the registration
+/// attempt, `Some(reason)` disables the transport with that inline reason.
+/// Session-sourced tier (spec Amendment 2026-09-16) — a signed-in account is
+/// permitted to *attempt* registration whenever its tier is not a definitive
+/// `Free`, because `Unknown` (the Keymaster 429 case) can no longer be
+/// distinguished from `Premium` up front; the session confirms it.
+fn permission_decision(state: &SessionState, tier: Tier) -> Option<NotRegisteredReason> {
+    match state {
+        SessionState::SignedOut { .. } => Some(NotRegisteredReason::SignedOut),
+        SessionState::Active | SessionState::Expired | SessionState::Checking { .. } => {
+            if tier == Tier::Free {
+                Some(NotRegisteredReason::PremiumRequired)
+            } else {
+                None
+            }
+        }
+        // `Authorizing`, `StoreUnreadable`: not in a state to attempt yet.
+        _ => Some(NotRegisteredReason::SubscriptionNotVerified),
+    }
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use super::permission_decision;
+    use modplayer_account::{SessionState, Tier};
+    use modplayer_core::NotRegisteredReason;
+
+    #[test]
+    fn signed_in_unknown_tier_permits_registration() {
+        // The Keymaster-429 case: real Premium users read as `Unknown`, and
+        // must still be allowed to register so the session can confirm tier.
+        assert_eq!(
+            permission_decision(&SessionState::Active, Tier::Unknown),
+            None
+        );
+        assert_eq!(
+            permission_decision(&SessionState::Expired, Tier::Unknown),
+            None
+        );
+        assert_eq!(
+            permission_decision(&SessionState::Checking { attempt_id: 1 }, Tier::Unknown),
+            None
+        );
+    }
+
+    #[test]
+    fn signed_in_premium_permits_registration() {
+        assert_eq!(
+            permission_decision(&SessionState::Active, Tier::Premium),
+            None
+        );
+    }
+
+    #[test]
+    fn definitive_free_blocks_with_premium_required() {
+        assert_eq!(
+            permission_decision(&SessionState::Active, Tier::Free),
+            Some(NotRegisteredReason::PremiumRequired)
+        );
+    }
+
+    #[test]
+    fn signed_out_blocks_with_signed_out_reason() {
+        assert_eq!(
+            permission_decision(&SessionState::SignedOut { note: None }, Tier::Unknown),
+            Some(NotRegisteredReason::SignedOut)
+        );
+    }
+
+    #[test]
+    fn not_yet_attemptable_states_block_as_not_verified() {
+        assert_eq!(
+            permission_decision(&SessionState::StoreUnreadable, Tier::Unknown),
+            Some(NotRegisteredReason::SubscriptionNotVerified)
+        );
+        assert_eq!(
+            permission_decision(
+                &SessionState::Authorizing {
+                    attempt_id: 1,
+                    resumed: false
+                },
+                Tier::Unknown
+            ),
+            Some(NotRegisteredReason::SubscriptionNotVerified)
+        );
     }
 }

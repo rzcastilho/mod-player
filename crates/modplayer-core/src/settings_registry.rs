@@ -76,11 +76,14 @@ pub struct SettingDescriptor {
 
 /// The working settings' descriptors (contracts/ui-surface.md "Working
 /// settings"), in the order they appear on their category screen. Every
-/// other category (Playback, Controls, Plugins, Offline, Privacy &
-/// diagnostics) renders placeholder content only and so has no entries
-/// here; About is descriptor-free by design even though it has real
-/// content (`about-product`/`about-version`/… are read-only, not
-/// searchable settings, plan.md "Project Structure").
+/// other category (Controls, Plugins, Offline, Privacy & diagnostics)
+/// renders placeholder content only and so has no entries here; About is
+/// descriptor-free by design even though it has real content
+/// (`about-product`/`about-version`/… are read-only, not searchable
+/// settings, plan.md "Project Structure"). Playback's screen itself lands
+/// with US1 (T062); the `device_name` descriptor is registered now so it
+/// is searchable from the start (003-streaming-playback-and-queue
+/// contracts/transport-and-queue.md §5).
 pub const DESCRIPTORS: &[SettingDescriptor] = &[
     SettingDescriptor {
         category: SettingsCategory::Account,
@@ -129,6 +132,12 @@ pub const DESCRIPTORS: &[SettingDescriptor] = &[
         id: "audio.test_output_device",
         title_key: "setting-test-output-device",
         description_key: "setting-test-output-device-desc",
+    },
+    SettingDescriptor {
+        category: SettingsCategory::Playback,
+        id: "playback.device_name",
+        title_key: "setting-device-name",
+        description_key: "setting-device-name-desc",
     },
     SettingDescriptor {
         category: SettingsCategory::Appearance,
@@ -212,7 +221,6 @@ mod tests {
     #[test]
     fn placeholder_only_categories_contribute_no_descriptors() {
         for category in [
-            SettingsCategory::Playback,
             SettingsCategory::Controls,
             SettingsCategory::Plugins,
             SettingsCategory::Offline,

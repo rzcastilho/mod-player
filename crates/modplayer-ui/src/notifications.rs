@@ -30,8 +30,10 @@ pub struct NotificationInteraction {
 }
 
 /// Draw every visible (non-dismissed) notification, newest first: a
-/// severity icon+text, the message, an optional action button
-/// (`notification.action`), and Dismiss.
+/// severity icon+text, the message, up to `MAX_NOTIFICATION_ACTIONS`
+/// action buttons (`notification.actions`, e.g. `stream-source-
+/// unavailable`'s **Open status page** + **Retry**, US4 T090), and
+/// Dismiss.
 ///
 /// Each item sits in an opaque popup-style frame: the caller floats this
 /// stack over the current screen, so without a background the text would
@@ -43,10 +45,10 @@ pub fn show(ui: &mut Ui, center: &NotificationCenter) -> NotificationInteraction
             ui.horizontal(|ui| {
                 ui.label(severity_label(notification.severity));
                 ui.label(message(notification));
-                if let Some(action) = notification.action
-                    && ui.button(tr(action_label_key(action))).clicked()
-                {
-                    interaction.action_clicked = Some((notification.id, action));
+                for action in &notification.actions {
+                    if ui.button(tr(action_label_key(*action))).clicked() {
+                        interaction.action_clicked = Some((notification.id, *action));
+                    }
                 }
                 if ui.button(tr("notification-dismiss")).clicked() {
                     interaction.dismissed = Some(notification.id);
@@ -57,10 +59,17 @@ pub fn show(ui: &mut Ui, center: &NotificationCenter) -> NotificationInteraction
     interaction
 }
 
-/// The Fluent key for an action's button label.
+/// The Fluent key for an action's button label. `app.rs`'s notification-
+/// area handler (US4 T090) dispatches each variant: `SignIn` starts a
+/// fresh sign-in attempt (US2 T071); `OpenStatusPage`/`OpenUpgradePage`
+/// open `modplayer_core::STATUS_PAGE_URL`/`modplayer_account::UPGRADE_URL`
+/// (design note 10); `RetrySource` re-initialises the source.
 fn action_label_key(action: NotificationAction) -> &'static str {
     match action {
         NotificationAction::SignIn => "notification-action-sign-in",
+        NotificationAction::OpenStatusPage => "action-status-page",
+        NotificationAction::RetrySource => "action-retry",
+        NotificationAction::OpenUpgradePage => "action-open-upgrade-page",
     }
 }
 
@@ -106,6 +115,7 @@ mod tests {
             message_key: "no-output-devices",
             args: Vec::new(),
             action: None,
+            actions: Vec::new(),
             created_at: std::time::Instant::now(),
             dismissed: false,
         };

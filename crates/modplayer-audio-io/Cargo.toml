@@ -8,10 +8,14 @@ publish = false
 
 [dependencies]
 modplayer-engine = { path = "../modplayer-engine", version = "0.1.0" }
+# `OutputBackend::open` is generic over `AudioSource` (003-streaming-
+# playback-and-queue, contracts/transport-and-queue.md §1: `Processor`
+# stays generic over whichever `SourceHost::Rt` is in play, not just the
+# built-in synthetic source) — no longer dev-only.
+modplayer-audio-source = { path = "../modplayer-audio-source", version = "0.1.0" }
 modplayer-audio-source-synthetic = { path = "../modplayer-audio-source-synthetic", version = "0.1.0" }
 cpal.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-modplayer-audio-source = { path = "../modplayer-audio-source", version = "0.1.0" }
 rtrb.workspace = true

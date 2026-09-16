@@ -11,6 +11,7 @@
 //! gain and before the limiter (US1 T045).
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use modplayer_audio_source::AudioSource;
 use modplayer_audio_source_synthetic::TestTone;
@@ -22,6 +23,13 @@ use crate::limiter::Limiter;
 use crate::output_stage::{MAX_FRAMES, OutputStage};
 use crate::shared::RtShared;
 use crate::types::{CeilingDb, Transport, VolumePercent};
+
+/// Upper bound on guard frames a single render can hand forward to the
+/// next as unconsumed, not-yet-fully-output raw material (engine-delta.md
+/// §2). Comfortably above the actual worst case (`required_source_frames`'s
+/// "+1" interpolation guard rounds to at most a couple of frames of
+/// leftover), so the carry never has to truncate a real leftover.
+const MAX_GUARD: usize = 8;
 
 /// Constructor input for `Processor`, built by the controller from its
 /// shadow state (data-model.md §3.3).
@@ -59,6 +67,13 @@ pub struct Processor<S: AudioSource> {
     /// Preallocated stereo mix buffer at source rate, sized for
     /// `OutputStage::MAX_FRAMES` frames so no render call ever allocates.
     scratch: Vec<f32>,
+    /// Fully-processed (gain/tone/limiter already applied) guard frames the
+    /// output stage did not consume last render, prepended to this
+    /// render's buffer instead of re-fetching them from the source
+    /// (engine-delta.md §2: a ring-buffer source cannot un-consume
+    /// frames). `carry_len` of `carry`'s `2 * MAX_GUARD` samples are live.
+    carry: [f32; MAX_GUARD * 2],
+    carry_len: usize,
 }
 
 impl<S: AudioSource> Processor<S> {
@@ -97,6 +112,8 @@ impl<S: AudioSource> Processor<S> {
             limiter: Limiter::new(config.ceiling),
             output_stage,
             scratch: vec![0.0; scratch_len.max(2)],
+            carry: [0.0; MAX_GUARD * 2],
+            carry_len: 0,
         }
     }
 
@@ -122,10 +139,17 @@ impl<S: AudioSource> Processor<S> {
                 Command::Stop => {
                     self.transport = Transport::Stopped;
                     self.source.seek(0);
+                    self.carry_len = 0;
                 }
                 // (Re)starts the tone from its fade-in, independent of
                 // transport (contracts/engine-commands.md).
                 Command::PlayTestTone => self.tone = Some(TestTone::new(self.source_rate)),
+                // Seeking invalidates any carried guard frames — they were
+                // decoded from the pre-seek position (engine-delta.md §1).
+                Command::Seek(frame) => {
+                    self.source.seek(frame);
+                    self.carry_len = 0;
+                }
             }
         }
     }
@@ -133,6 +157,12 @@ impl<S: AudioSource> Processor<S> {
     /// Render one device buffer. `out` is interleaved with
     /// `device_channels` channels and `out.len() / device_channels`
     /// frames. Real-time safe: no allocation, lock, I/O, or logging.
+    ///
+    /// Note on FR-025(b) under resampling (engine-delta.md §2): a command
+    /// pushed between two renders still takes effect from this render's
+    /// first *freshly processed* sample; the (at most `MAX_GUARD`,
+    /// sub-millisecond) carried prefix was already fully processed last
+    /// render and is reused verbatim rather than reprocessed.
     pub fn render(&mut self, out: &mut [f32]) {
         self.drain_commands();
 
@@ -142,21 +172,31 @@ impl<S: AudioSource> Processor<S> {
         let scratch = &mut self.scratch[..needed * 2];
 
         let playing = self.transport == Transport::Playing;
+
+        // Prepend last render's leftover guard frames (already fully
+        // processed) and ask the source for only the remainder — a
+        // streaming (ring-buffer) source cannot un-consume frames, so this
+        // replaces the old rewind-by-`seek` (engine-delta.md §2).
+        let carried = self.carry_len.min(needed);
+        if carried > 0 {
+            scratch[..carried * 2].copy_from_slice(&self.carry[..carried * 2]);
+        }
+        let fresh = &mut scratch[carried * 2..needed * 2];
         if playing {
-            self.source.fill(scratch);
+            self.source.fill(fresh);
         } else {
-            scratch.fill(0.0);
+            fresh.fill(0.0);
         }
 
-        for sample in scratch.iter_mut() {
+        for sample in fresh.iter_mut() {
             *sample *= self.master_gain;
         }
 
         if let Some(tone) = &mut self.tone {
-            let still_playing = tone.render_add(scratch);
+            let still_playing = tone.render_add(fresh);
             if !still_playing {
                 self.tone = None;
-                // Direct field access (not `self.push_event`): `scratch`
+                // Direct field access (not `self.push_event`): `fresh`
                 // above already holds a disjoint mutable borrow of
                 // `self.scratch`, and only a same-struct field-level borrow
                 // (not a `&mut self` method call) can coexist with it.
@@ -164,32 +204,33 @@ impl<S: AudioSource> Processor<S> {
             }
         }
 
-        self.limiter.process(scratch);
+        self.limiter.process(fresh);
 
         let peak = scratch.iter().fold(0.0f32, |max, &s| max.max(s.abs()));
         self.shared.set_peak(peak);
 
         let consumed = self.output_stage.process(scratch, needed, out, out_frames);
 
-        // The source was fetched `needed` frames ahead of what the output
-        // stage actually consumed (guard frame(s) for interpolation
-        // lookahead); roll its position back so the next `render` call
-        // resumes exactly where playback left off.
-        if playing && consumed < needed {
-            let leftover = (needed - consumed) as u64;
-            let rewound = match self.source.len_frames() {
-                Some(len) if len > 0 => {
-                    let current = self.source.position();
-                    (current + len - (leftover % len)) % len
-                }
-                _ => self.source.position().saturating_sub(leftover),
-            };
-            self.source.seek(rewound);
+        // Save whatever the output stage did not consume (interpolation
+        // guard frame(s)) so next render can reuse it instead of
+        // re-fetching from the source.
+        let leftover = (needed - consumed).min(MAX_GUARD);
+        if leftover > 0 {
+            self.carry[..leftover * 2]
+                .copy_from_slice(&scratch[consumed * 2..consumed * 2 + leftover * 2]);
         }
+        self.carry_len = leftover;
 
         self.shared.advance_clock(consumed as u64);
+        let now = Instant::now();
         if playing {
-            self.shared.set_position_frames(self.source.position());
+            let published = self.source.position().saturating_sub(leftover as u64);
+            self.shared.set_position_frames(published);
+            self.shared
+                .write_anchor(published, now, true, consumed as u32);
+        } else {
+            self.shared
+                .write_anchor(self.shared.position_frames(), now, false, consumed as u32);
         }
     }
 }

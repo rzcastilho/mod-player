@@ -13,8 +13,11 @@ use serde::Deserialize;
 use ureq::Agent;
 use ureq::http::Response;
 
+use modplayer_audio_source::{Availability, TrackId, TrackRef};
+
 use crate::auth_service::{
-    AuthError, AuthorizationService, ClientConfig, Profile, REDIRECT_PATH, TokenSet,
+    AuthError, AuthorizationService, ClientConfig, PlaybackStateSummary, Profile, REDIRECT_PATH,
+    TokenSet,
 };
 use crate::pending::PendingAuthorization;
 use crate::pkce;
@@ -41,11 +44,28 @@ const BUDGET: Duration = Duration::from_secs(30);
 pub const DEFAULT_CONFIG: ClientConfig = ClientConfig {
     client_id: DEFAULT_CLIENT_ID,
     redirect_path: REDIRECT_PATH,
-    scopes: &["streaming", "user-read-private", "user-read-email"],
+    scopes: &[
+        "streaming",
+        "user-read-private",
+        "user-read-email",
+        // 003 (contracts/account-read-delta.md §2): "Play from account", the
+        // transfer banner's device name, and the launch-time active-
+        // elsewhere check. Existing sessions keep working; these calls
+        // return `Forbidden` until the user signs in again.
+        "user-read-recently-played",
+        "user-library-read",
+        "user-read-playback-state",
+    ],
     authorize_url: "https://accounts.spotify.com/authorize",
     token_url: "https://accounts.spotify.com/api/token",
     profile_url: "https://api.spotify.com/v1/me",
 };
+
+/// Base URL for the Web API read endpoints added in 003 (contracts/
+/// account-read-delta.md §1). Not part of `ClientConfig` — these three
+/// calls are specific to this implementation, the way `profile_url` covers
+/// only 002's single read.
+const WEB_API_BASE: &str = "https://api.spotify.com/v1";
 
 /// Resolve the effective client id: [`CLIENT_ID_ENV`] if set and
 /// non-empty, else [`DEFAULT_CLIENT_ID`].
@@ -220,6 +240,78 @@ impl AuthorizationService for SpotifyAuthorizationService {
             other => Err(AuthError::Service(format!("http-{other}"))),
         }
     }
+
+    fn fetch_recently_played(
+        &self,
+        access_token: &str,
+        limit: u8,
+    ) -> Result<Vec<TrackRef>, AuthError> {
+        let limit = limit.clamp(1, 50);
+        let url = format!("{WEB_API_BASE}/me/player/recently-played?limit={limit}");
+        let body = self.get_web_api(&url, access_token)?;
+        Ok(parse_track_items(&body))
+    }
+
+    fn fetch_saved_tracks(
+        &self,
+        access_token: &str,
+        limit: u8,
+    ) -> Result<Vec<TrackRef>, AuthError> {
+        let limit = limit.clamp(1, 50);
+        let url = format!("{WEB_API_BASE}/me/tracks?limit={limit}");
+        let body = self.get_web_api(&url, access_token)?;
+        Ok(parse_track_items(&body))
+    }
+
+    fn fetch_playback_state(
+        &self,
+        access_token: &str,
+    ) -> Result<Option<PlaybackStateSummary>, AuthError> {
+        let url = format!("{WEB_API_BASE}/me/player");
+        let response = self.execute(|| {
+            self.agent
+                .get(&url)
+                .header("Authorization", format!("Bearer {access_token}"))
+                .call()
+        })?;
+        let status = response.status().as_u16();
+        match status {
+            204 => Ok(None),
+            200 => {
+                let body = read_body(response)?;
+                Ok(Some(parse_playback_state_response(&body)))
+            }
+            401 => Err(AuthError::Rejected),
+            403 => Err(AuthError::Forbidden),
+            429 => Err(AuthError::Transient),
+            500..=599 => Err(AuthError::Transient),
+            other => Err(AuthError::Service(format!("http-{other}"))),
+        }
+    }
+}
+
+impl SpotifyAuthorizationService {
+    /// GET `url` with a bearer token, mapping the read-endpoint status
+    /// table shared by `fetch_recently_played`/`fetch_saved_tracks`
+    /// (contracts/account-read-delta.md §1). `fetch_playback_state` has its
+    /// own caller since it also needs the `204` branch.
+    fn get_web_api(&self, url: &str, access_token: &str) -> Result<String, AuthError> {
+        let response = self.execute(|| {
+            self.agent
+                .get(url)
+                .header("Authorization", format!("Bearer {access_token}"))
+                .call()
+        })?;
+        let status = response.status().as_u16();
+        match status {
+            200 => read_body(response),
+            401 => Err(AuthError::Rejected),
+            403 => Err(AuthError::Forbidden),
+            429 => Err(AuthError::Transient),
+            500..=599 => Err(AuthError::Transient),
+            other => Err(AuthError::Service(format!("http-{other}"))),
+        }
+    }
 }
 
 /// A transport-level failure (DNS/TCP/TLS/timeout — never a status code,
@@ -326,6 +418,168 @@ fn tier_from_product(product: Option<&str>) -> Tier {
     }
 }
 
+#[derive(Deserialize)]
+struct ArtistObject {
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ImageObject {
+    #[serde(default)]
+    url: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AlbumObject {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    images: Vec<ImageObject>,
+}
+
+/// The Spotify "track object" shape shared by the recently-played and
+/// saved-tracks item wrappers (contracts/account-read-delta.md §1 mapping
+/// table).
+#[derive(Deserialize)]
+struct TrackObject {
+    #[serde(default)]
+    uri: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    duration_ms: Option<i64>,
+    #[serde(default)]
+    is_playable: Option<bool>,
+    #[serde(default)]
+    is_local: Option<bool>,
+    #[serde(default)]
+    artists: Vec<ArtistObject>,
+    #[serde(default)]
+    album: Option<AlbumObject>,
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
+}
+
+/// A recently-played item (`PlayHistoryObject`) or a saved-track item
+/// (`SavedTrackObject`) — both wrap the track under a `track` key.
+#[derive(Deserialize)]
+struct TrackItemWrapper {
+    track: Option<TrackObject>,
+}
+
+#[derive(Deserialize)]
+struct TrackItemsResponse {
+    #[serde(default)]
+    items: Vec<TrackItemWrapper>,
+}
+
+/// Map one Web API track object to a [`TrackRef`] (contracts/
+/// account-read-delta.md §1: "`id ← uri` (fallback
+/// `spotify:track:{id}`) ... `availability ← is_playable == false ?
+/// Unavailable : Available` (missing `is_playable` = Available)").
+/// `None` for a local-file/podcast item, or one whose id cannot be
+/// represented as a [`TrackId`] (empty/non-ASCII/too long).
+fn track_ref_from_object(track: TrackObject) -> Option<TrackRef> {
+    if track.is_local == Some(true) {
+        return None;
+    }
+    if matches!(track.kind.as_deref(), Some("episode")) {
+        return None;
+    }
+    let uri = track
+        .uri
+        .filter(|uri| !uri.is_empty())
+        .or_else(|| track.id.as_ref().map(|id| format!("spotify:track:{id}")))?;
+    let id = TrackId::new(uri).ok()?;
+    let artists = track
+        .artists
+        .into_iter()
+        .filter_map(|artist| artist.name)
+        .collect();
+    let album = track.album.as_ref().and_then(|album| album.name.clone());
+    let artwork_url = track
+        .album
+        .and_then(|album| album.images.into_iter().next())
+        .and_then(|image| image.url);
+    let duration_ms = track.duration_ms.unwrap_or(0).max(0) as u32;
+    let availability = if track.is_playable == Some(false) {
+        Availability::Unavailable
+    } else {
+        Availability::Available
+    };
+    Some(TrackRef::new(
+        id,
+        track.name.unwrap_or_default(),
+        artists,
+        album,
+        artwork_url,
+        duration_ms,
+        availability,
+    ))
+}
+
+/// Parse a recently-played or saved-tracks `200` body into a de-duplicated
+/// (by track id, first occurrence kept), local-file/podcast-filtered
+/// `Vec<TrackRef>` (contracts/account-read-delta.md §1/§4). A malformed
+/// body parses as an empty list rather than failing the whole call — the
+/// caller (`AccountService`) already falls back to saved tracks on an
+/// empty recently-played result.
+fn parse_track_items(body: &str) -> Vec<TrackRef> {
+    let Ok(parsed) = serde_json::from_str::<TrackItemsResponse>(body) else {
+        return Vec::new();
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut tracks = Vec::new();
+    for item in parsed.items {
+        let Some(track) = item.track.and_then(track_ref_from_object) else {
+            continue;
+        };
+        if seen.insert(track.id.clone()) {
+            tracks.push(track);
+        }
+    }
+    tracks
+}
+
+#[derive(Deserialize)]
+struct DeviceObject {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PlaybackStateResponse {
+    #[serde(default)]
+    device: Option<DeviceObject>,
+    #[serde(default)]
+    is_playing: bool,
+}
+
+/// Parse a `200` `/v1/me/player` body into a [`PlaybackStateSummary`]
+/// (contracts/account-read-delta.md §1). A malformed body maps to an
+/// "unknown device, not playing" summary rather than failing the call —
+/// there is no reasonable retry for a body Spotify itself sent as `200`.
+fn parse_playback_state_response(body: &str) -> PlaybackStateSummary {
+    let parsed =
+        serde_json::from_str::<PlaybackStateResponse>(body).unwrap_or(PlaybackStateResponse {
+            device: None,
+            is_playing: false,
+        });
+    PlaybackStateSummary {
+        device_name: parsed
+            .device
+            .as_ref()
+            .and_then(|device| device.name.clone()),
+        device_id: parsed.device.and_then(|device| device.id),
+        is_playing: parsed.is_playing,
+    }
+}
+
 /// RFC 3986 percent-encoding for a single query value (unreserved:
 /// `A-Za-z0-9-_.~`). `ureq`'s own encoder is private, and pulling in a
 /// dedicated URL crate for one query-string builder would be the kind of
@@ -354,7 +608,14 @@ mod tests {
         assert_eq!(DEFAULT_CONFIG.redirect_path, "/login");
         assert_eq!(
             DEFAULT_CONFIG.scopes,
-            &["streaming", "user-read-private", "user-read-email"]
+            &[
+                "streaming",
+                "user-read-private",
+                "user-read-email",
+                "user-read-recently-played",
+                "user-library-read",
+                "user-read-playback-state",
+            ]
         );
         assert_eq!(
             DEFAULT_CONFIG.authorize_url,
@@ -512,5 +773,74 @@ mod tests {
         let profile = parse_profile_response(r#"{"id":"user-1"}"#).expect("parse");
         assert_eq!(profile.tier, Tier::Unknown);
         assert_eq!(profile.display_name, None);
+    }
+
+    /// contracts/account-read-delta.md §1/§4: real recently-played response
+    /// shape with a local-file item (skipped) and a duplicate track id
+    /// (de-duplicated, first occurrence kept).
+    #[test]
+    fn parse_track_items_skips_local_files_and_dedupes_by_id() {
+        let body = r#"{
+            "items": [
+                { "track": { "uri": "spotify:track:aaa", "name": "First", "duration_ms": 1000,
+                              "artists": [{"name": "Artist A"}], "album": {"name": "Album",
+                              "images": [{"url": "https://img/a.jpg"}]}, "type": "track" } },
+                { "track": { "uri": "spotify:local:x:y:Local+Song:120", "name": "Local Song",
+                              "is_local": true, "duration_ms": 5000, "artists": [], "type": "track" } },
+                { "track": { "uri": "spotify:track:aaa", "name": "First (dup)", "duration_ms": 1000,
+                              "artists": [{"name": "Artist A"}], "type": "track" } },
+                { "track": { "uri": "spotify:episode:zzz", "name": "A Podcast", "duration_ms": 2000,
+                              "type": "episode" } }
+            ]
+        }"#;
+
+        let tracks = parse_track_items(body);
+
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].id.as_str(), "spotify:track:aaa");
+        assert_eq!(tracks[0].title, "First");
+        assert_eq!(tracks[0].artists, vec!["Artist A".to_string()]);
+        assert_eq!(tracks[0].album, Some("Album".to_string()));
+        assert_eq!(tracks[0].artwork_url, Some("https://img/a.jpg".to_string()));
+    }
+
+    #[test]
+    fn parse_track_items_marks_non_playable_as_unavailable() {
+        let body = r#"{"items":[{"track":{"uri":"spotify:track:bbb","name":"T",
+            "is_playable": false, "duration_ms": 1000, "type": "track"}}]}"#;
+        let tracks = parse_track_items(body);
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].availability, Availability::Unavailable);
+    }
+
+    #[test]
+    fn parse_track_items_missing_uri_falls_back_to_id() {
+        let body = r#"{"items":[{"track":{"id":"ccc","name":"T","duration_ms":1000,
+            "type":"track"}}]}"#;
+        let tracks = parse_track_items(body);
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].id.as_str(), "spotify:track:ccc");
+    }
+
+    #[test]
+    fn parse_track_items_malformed_body_is_empty() {
+        assert!(parse_track_items("not json").is_empty());
+    }
+
+    #[test]
+    fn parse_playback_state_response_maps_device_fields() {
+        let summary = parse_playback_state_response(
+            r#"{"device":{"id":"dev-1","name":"Kitchen Speaker"},"is_playing":true}"#,
+        );
+        assert_eq!(summary.device_id, Some("dev-1".to_string()));
+        assert_eq!(summary.device_name, Some("Kitchen Speaker".to_string()));
+        assert!(summary.is_playing);
+    }
+
+    #[test]
+    fn parse_playback_state_response_malformed_body_defaults_to_not_playing() {
+        let summary = parse_playback_state_response("not json");
+        assert_eq!(summary.device_id, None);
+        assert!(!summary.is_playing);
     }
 }

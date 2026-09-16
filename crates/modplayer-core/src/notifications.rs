@@ -20,6 +20,36 @@ pub const KEY_DEVICE_AVAILABLE_AGAIN: &str = "device-available-again";
 pub const KEY_NO_OUTPUT_DEVICES: &str = "no-output-devices";
 pub const KEY_DEVICE_APPEARED: &str = "device-appeared";
 
+/// FR-026: a queue item the source reported unavailable was skipped
+/// (003-streaming-playback-and-queue, contracts/transport-and-queue.md §2
+/// rule T14, data-model.md §9). `{ $title }`.
+pub const KEY_QUEUE_ITEM_SKIPPED_UNAVAILABLE: &str = "queue-item-skipped-unavailable";
+
+/// FR-018: the 5 s "take over playback here" request timed out with no
+/// `BecameActive` from the service (003-streaming-playback-and-queue,
+/// contracts/transport-and-queue.md §2 rule T19, data-model.md §9).
+pub const KEY_TRANSFER_REQUEST_FAILED: &str = "transfer-request-failed";
+
+/// FR-021/SC-009: a transient source failure has not recovered within
+/// 30 s (003-streaming-playback-and-queue, contracts/transport-and-
+/// queue.md §2 rule T20, data-model.md §9). Auto-cleared on `Health(Ok)`.
+pub const KEY_STREAM_RECONNECT_WARNING: &str = "stream-reconnect-warning";
+
+/// FR-020/SC-009: the source is unavailable and no client update is
+/// required — critical, with **Open status page** + **Retry** actions
+/// (rule T21, data-model.md §9).
+pub const KEY_STREAM_SOURCE_UNAVAILABLE: &str = "stream-source-unavailable";
+
+/// FR-020/SC-009: the source is unavailable because this client's
+/// protocol version was rejected — critical, with **Open status page**
+/// only (rule T21, data-model.md §9).
+pub const KEY_STREAM_SOURCE_UPDATE_REQUIRED: &str = "stream-source-update-required";
+
+/// FR-027/SC-013: the account tier was rejected/downgraded after the
+/// current track finished (rule T22, data-model.md §9), with an **Open
+/// upgrade page** action.
+pub const KEY_SUBSCRIPTION_DOWNGRADED: &str = "subscription-downgraded";
+
 /// Notification severity (data-model.md §6.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -30,17 +60,27 @@ pub enum Severity {
 
 /// An action a notification's button performs when clicked
 /// (002-first-launch-and-sign-in contracts/account-session.md "Events",
-/// contracts/ui-surface.md). `SignIn` navigates to the sign-in step (e.g.
-/// `RefreshFailing`'s `signin-again`, `SessionExpired`, `SessionRevoked`).
+/// contracts/ui-surface.md; 003-streaming-playback-and-queue data-model.md
+/// §9). `SignIn` navigates to the sign-in step (e.g. `RefreshFailing`'s
+/// `signin-again`, `SessionExpired`, `SessionRevoked`). `OpenStatusPage`/
+/// `OpenUpgradePage` open `links::STATUS_PAGE_URL`/`modplayer_account::
+/// UPGRADE_URL` (UI-only, design note 10); `RetrySource` sends
+/// `SourceCommand::Retry`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotificationAction {
     SignIn,
+    OpenStatusPage,
+    RetrySource,
+    OpenUpgradePage,
 }
 
 /// A single raised notification. `message_key` is a Fluent key, never raw
 /// text (FR-021); `args` are Fluent placeholder values (e.g. `{ $device }`).
 /// `action`, when set, is rendered as an extra button alongside Dismiss
-/// (e.g. `session-expired`'s "Sign in").
+/// (e.g. `session-expired`'s "Sign in"); `actions` is the same list in
+/// full (data-model.md §9: up to 2, e.g. `stream-source-unavailable`'s
+/// "Open status page" + "Retry") — `action` is always `actions.first()`,
+/// kept for the UI code that only ever rendered a single button.
 #[derive(Debug, Clone)]
 pub struct Notification {
     pub id: u64,
@@ -48,9 +88,14 @@ pub struct Notification {
     pub message_key: &'static str,
     pub args: Vec<(&'static str, String)>,
     pub action: Option<NotificationAction>,
+    pub actions: Vec<NotificationAction>,
     pub created_at: Instant,
     pub dismissed: bool,
 }
+
+/// The most action buttons a single notification renders alongside
+/// Dismiss (data-model.md §9).
+pub const MAX_NOTIFICATION_ACTIONS: usize = 2;
 
 /// Newest-first collection of notifications.
 #[derive(Debug, Default)]
@@ -76,7 +121,7 @@ impl NotificationCenter {
         message_key: &'static str,
         args: Vec<(&'static str, String)>,
     ) -> u64 {
-        self.raise_full(severity, message_key, args, None)
+        self.raise_full(severity, message_key, args, Vec::new())
     }
 
     /// Raise a notification with no arguments but an action button (e.g.
@@ -87,7 +132,7 @@ impl NotificationCenter {
         message_key: &'static str,
         action: NotificationAction,
     ) -> u64 {
-        self.raise_full(severity, message_key, Vec::new(), Some(action))
+        self.raise_full(severity, message_key, Vec::new(), vec![action])
     }
 
     /// Raise a notification with both Fluent placeholder arguments and an
@@ -99,7 +144,22 @@ impl NotificationCenter {
         args: Vec<(&'static str, String)>,
         action: NotificationAction,
     ) -> u64 {
-        self.raise_full(severity, message_key, args, Some(action))
+        self.raise_full(severity, message_key, args, vec![action])
+    }
+
+    /// Raise a notification with up to `MAX_NOTIFICATION_ACTIONS` action
+    /// buttons (data-model.md §9, e.g. `stream-source-unavailable`'s
+    /// "Open status page" + "Retry"). Extra actions beyond the cap are
+    /// dropped. Returns its id.
+    pub fn raise_with_actions(
+        &mut self,
+        severity: Severity,
+        message_key: &'static str,
+        args: Vec<(&'static str, String)>,
+        mut actions: Vec<NotificationAction>,
+    ) -> u64 {
+        actions.truncate(MAX_NOTIFICATION_ACTIONS);
+        self.raise_full(severity, message_key, args, actions)
     }
 
     fn raise_full(
@@ -107,7 +167,7 @@ impl NotificationCenter {
         severity: Severity,
         message_key: &'static str,
         args: Vec<(&'static str, String)>,
-        action: Option<NotificationAction>,
+        actions: Vec<NotificationAction>,
     ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
@@ -116,7 +176,8 @@ impl NotificationCenter {
             severity,
             message_key,
             args,
-            action,
+            action: actions.first().copied(),
+            actions,
             created_at: Instant::now(),
             dismissed: false,
         });

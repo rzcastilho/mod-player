@@ -68,6 +68,50 @@ fn render_never_allocates() {
         if i % 19 == 0 {
             let _ = command_tx.push(Command::Play);
         }
+        // Command::Seek (engine-delta.md §1) and the leftover-carry write
+        // (engine-delta.md §2) it interacts with must stay allocation-free
+        // too.
+        if i % 23 == 0 {
+            let _ = command_tx.push(Command::Seek((i as u64) * 37));
+        }
+
+        assert_no_alloc(|| {
+            processor.render(&mut out);
+        });
+    }
+}
+
+/// Same shape as `render_never_allocates`, but with the device rate
+/// different from the source rate so the output stage actually resamples
+/// and the leftover-carry path (engine-delta.md §2) is exercised on every
+/// buffer, not just when a guard frame happens to be left over at a
+/// passthrough rate (which never leaves one).
+#[test]
+fn render_never_allocates_with_resampling_and_carry() {
+    let (mut command_tx, command_rx) = RingBuffer::<Command>::new(256);
+    let (event_tx, _event_rx) = RingBuffer::<modplayer_engine::Event>::new(256);
+    let shared = Arc::new(RtShared::new());
+    let config = ProcessorConfig {
+        source_rate: 44_100,
+        device_rate: 48_000,
+        device_channels: 2,
+        max_frames: 256,
+        transport: Transport::Stopped,
+        position_frames: 0,
+        master_volume: VolumePercent::new(80),
+        ceiling: CeilingDb::default(),
+        shared,
+    };
+    let mut processor = Processor::new(config, SyntheticSource::new(44_100), command_rx, event_tx);
+
+    let _ = command_tx.push(Command::Play);
+
+    let mut out = vec![0.0f32; 256 * 2];
+
+    for i in 0..1000u32 {
+        if i % 23 == 0 {
+            let _ = command_tx.push(Command::Seek((i as u64) * 37));
+        }
 
         assert_no_alloc(|| {
             processor.render(&mut out);

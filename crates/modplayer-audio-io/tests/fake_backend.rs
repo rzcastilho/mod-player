@@ -170,13 +170,10 @@ fn take_processor_detaches_without_events() {
     let _ = backend.open(&id, BufferPreset::Balanced, processor_for(44_100));
 
     let taken = backend.take_processor();
-    assert!(taken.is_some());
+    assert!(taken);
     assert!(
         backend.events().try_recv().is_err(),
         "take_processor must not emit events"
     );
-    assert!(
-        backend.take_processor().is_none(),
-        "second take must find nothing"
-    );
+    assert!(!backend.take_processor(), "second take must find nothing");
 }

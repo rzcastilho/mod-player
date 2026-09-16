@@ -29,6 +29,10 @@ pub enum Command {
     Stop,
     /// (Re)start the test tone from its fade-in, independent of transport.
     PlayTestTone,
+    /// Seek the source to `frame` at the next buffer boundary
+    /// (engine-delta.md §1); position atomics reflect it after that
+    /// render.
+    Seek(u64),
 }
 
 const _: () = assert!(

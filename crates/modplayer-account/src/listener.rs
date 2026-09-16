@@ -64,10 +64,24 @@ pub struct ListenerConfig {
     pub deadline: OffsetDateTime,
 }
 
+/// Developer override for the loopback port (companion to
+/// `spotify::CLIENT_ID_ENV`): a BYO Developer-Dashboard app must register
+/// an exact redirect URI, so its port cannot be ephemeral.
+pub const PORT_ENV: &str = "MODPLAYER_OAUTH_PORT";
+
 /// Bind a fresh ephemeral loopback port for a new attempt
-/// (contracts/authorization-service.md "PKCE flow" step 2).
+/// (contracts/authorization-service.md "PKCE flow" step 2), or the
+/// [`PORT_ENV`] port when set.
 pub fn bind_ephemeral() -> std::io::Result<TcpListener> {
-    TcpListener::bind(("127.0.0.1", 0))
+    TcpListener::bind(("127.0.0.1", resolve_port(std::env::var(PORT_ENV).ok())))
+}
+
+/// Pure core of the [`PORT_ENV`] lookup: a parseable non-zero `u16`
+/// wins, anything else means ephemeral (`0`).
+fn resolve_port(env_value: Option<String>) -> u16 {
+    env_value
+        .and_then(|value| value.trim().parse::<u16>().ok())
+        .unwrap_or(0)
 }
 
 /// Re-bind the specific port recorded for a resumed attempt (research R2:
@@ -327,6 +341,16 @@ mod tests {
     use std::io::BufRead;
     use std::io::BufReader;
     use std::net::SocketAddr;
+
+    #[test]
+    fn resolve_port_honours_a_valid_override_and_falls_back_to_ephemeral() {
+        assert_eq!(resolve_port(Some("8888".to_string())), 8888);
+        assert_eq!(resolve_port(Some(" 8888 ".to_string())), 8888);
+        assert_eq!(resolve_port(None), 0);
+        assert_eq!(resolve_port(Some(String::new())), 0);
+        assert_eq!(resolve_port(Some("not-a-port".to_string())), 0);
+        assert_eq!(resolve_port(Some("70000".to_string())), 0);
+    }
 
     fn config(state: &str, deadline: OffsetDateTime) -> ListenerConfig {
         ListenerConfig {

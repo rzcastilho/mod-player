@@ -19,12 +19,15 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use modplayer_audio_io::{BackendEvent, OpenStream, OutputBackend, OutputDeviceInfo};
-use modplayer_audio_source::AudioSource;
-use modplayer_audio_source_synthetic::SyntheticSource;
+use modplayer_audio_source::{
+    AccountReadError, AudioSource, Program, Repeat, SourceCommand, SourceEvent, SourceHealth,
+    SourceHost, TrackId, TrackRef,
+};
 use modplayer_engine::{
-    BufferPreset, CeilingDb, Command, DeviceId, Event, NegotiatedBuffer, Processor,
+    BufferPreset, CeilingDb, Command, DeviceId, Event, NegotiatedBuffer, PositionClock, Processor,
     ProcessorConfig, RtShared, SampleRate, Theme, Transport, VolumePercent,
 };
 use rtrb::{Consumer, Producer, RingBuffer};
@@ -32,13 +35,37 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use crate::device_policy::{self, DeviceLostOutcome, DeviceResolution, DeviceWarning};
 use crate::notifications::{
     KEY_DEVICE_APPEARED, KEY_DEVICE_AVAILABLE_AGAIN, KEY_DEVICE_LOST, KEY_DEVICE_MISSING_AT_LAUNCH,
-    KEY_NO_OUTPUT_DEVICES, NotificationCenter, Severity,
+    KEY_NO_OUTPUT_DEVICES, KEY_QUEUE_ITEM_SKIPPED_UNAVAILABLE, NotificationCenter, Severity,
 };
-use crate::settings::{AudioSettings, SettingsStore, SettingsWarning};
+use crate::queue::{
+    AdvanceReason, Origin, PlaybackChange, Queue, QueueChange, QueueItem, QueueItemId, QueueMode,
+    XorShiftRng,
+};
+use crate::settings::{
+    AudioSettings, DeviceName, DeviceNameError, SettingsStore, SettingsWarning,
+    generate_connect_device_id,
+};
+use crate::transport::{
+    self, ActiveState, Effect, Input, Intent, NotRegisteredReason, PendingTransferCommand,
+    QueueChangeOrigin, QueueOp, TimerCommand, TimerKind, TransportState,
+};
 
 /// Capacity of the command/event SPSC queues opened for each stream
 /// (contracts/engine-commands.md).
 const QUEUE_CAPACITY: usize = 256;
+
+/// `sync_program`'s debounce window (contracts/transport-and-queue.md §3):
+/// at most one `LoadProgram` send per this interval, the last mutation
+/// before it elapses wins.
+const PROGRAM_SEND_DEBOUNCE: Duration = Duration::from_millis(250);
+
+/// The "take over playback here" transfer request timeout (contracts/
+/// transport-and-queue.md §2 rule T19, design note 6).
+const TRANSFER_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The transient-health reconnect-warning timeout (contracts/transport-
+/// and-queue.md §2 rule T20, US4, design note 6).
+const RECONNECT_WARNING_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The active output device, if any (data-model.md §5.2).
 pub struct ActiveDevice {
@@ -53,12 +80,106 @@ pub struct ActiveDevice {
     reappearance_notified: bool,
 }
 
-/// Single authority for playback shadow state, built on top of an injected
-/// `OutputBackend` (`CpalBackend` in production, `FakeBackend` in tests).
-pub struct PlaybackController<B: OutputBackend> {
-    backend: B,
+/// One row of `queue_view()`'s projection (contracts/transport-and-
+/// queue.md §1, contracts/ui-surface.md §2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueueRow {
+    pub uid: QueueItemId,
+    pub title: String,
+    pub artist: String,
+    pub origin: Origin,
+    pub unavailable: bool,
+    pub is_current: bool,
+}
 
-    transport: Transport,
+/// The Queue panel's projection of `Queue` (T066): the effective order,
+/// current item first, history excluded, plus the mode toggles it also
+/// needs to render (contracts/transport-and-queue.md §1).
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueueView {
+    pub items: Vec<QueueRow>,
+    pub shuffle: bool,
+    pub repeat: Repeat,
+}
+
+/// A `sync_program`-computed send waiting out the debounce window
+/// (contracts/transport-and-queue.md §3). Everything but `generation`
+/// (assigned only once the send actually happens, in `flush_pending_
+/// program`) is fixed at the moment `sync_program` last recomputed it.
+#[derive(Debug, Clone, PartialEq)]
+struct PendingProgram {
+    order: Vec<TrackId>,
+    cursor_index: u32,
+    position_ms: u32,
+    start_playing: bool,
+    repeat_all: bool,
+    repeat_one: bool,
+}
+
+/// Single authority for playback shadow state, built on top of an injected
+/// `OutputBackend` (`CpalBackend` in production, `FakeBackend` in tests)
+/// and an injected `SourceHost` (`SyntheticHost` in production before a
+/// real source is wired up, `ScriptedHost` in tests, `ConnectSource` from
+/// US1 on — research R10). `Processor<H::Rt>` stays monomorphic (no trait
+/// object on the real-time path); only this controller and `open_stream_on`
+/// know about `H`.
+pub struct PlaybackController<B: OutputBackend, H: SourceHost> {
+    backend: B,
+    source_host: H,
+
+    /// The host-owned play queue (data-model.md §2.2) and transport
+    /// reducer state (data-model.md §3.1). Wiring `play()`/`pause()`/etc.
+    /// through `transport::reduce` against these lands with US1 (T047);
+    /// this phase holds them and drives `tick()`'s source-event mirror
+    /// (T11/T12) through the reducer already.
+    queue: Queue,
+    transport_state: TransportState,
+    queue_rng: XorShiftRng,
+    /// Monotonically increasing program-send generation (contracts/
+    /// transport-and-queue.md §3).
+    program_generation: u64,
+    /// The `(order, cursor_index, repeat_all, repeat_one)` of the last
+    /// `Program` `sync_program` actually sent, so a mutation that leaves
+    /// those fields unchanged sends nothing (contracts/transport-and-
+    /// queue.md §3). `None` before the first send.
+    last_sent_program_key: Option<(Vec<TrackId>, u32, bool, bool)>,
+    /// A `sync_program`-computed send still waiting out the debounce
+    /// window (§3: "debounced to at most one send per 250 ms, the last
+    /// wins") — overwritten, not queued, by every further `sync_program`
+    /// call before it flushes.
+    pending_program: Option<PendingProgram>,
+    /// When `sync_program` last actually sent a `LoadProgram` — `None`
+    /// before the first send, so that one always goes out immediately.
+    last_program_sent_at: Option<Instant>,
+    /// The current stream's source sample rate, captured at `attach()`
+    /// time — needed to convert `Effect::SeekTo`'s milliseconds to frames.
+    /// `0` before any stream has ever been opened.
+    source_sample_rate: u32,
+    /// Injectable wall clock (design note 6): `Instant::now` in
+    /// production, a fixed/advancing fake in tests (`set_clock`), so the
+    /// 5 s transfer timer (T19) and the 30 s transient timer (US4) land
+    /// testable without sleeping.
+    now: Arc<dyn Fn() -> Instant + Send + Sync>,
+    /// The 5 s transfer-request timer's deadline (T17/T19), `None` unless
+    /// `ActiveState::TransferRequested`. Checked every `tick()` against
+    /// `self.now()` rather than a background thread, matching how
+    /// `flush_pending_program`'s debounce is already polled.
+    transfer_timer_deadline: Option<Instant>,
+    /// The 30 s reconnect-warning timer's deadline (T20, US4), `None`
+    /// unless `SourceHealth::Transient` is currently in effect. Checked
+    /// every `tick()` the same way as `transfer_timer_deadline`.
+    reconnect_timer_deadline: Option<Instant>,
+
+    /// `[playback] device_name` shadow state (FR-001); `None` = use the
+    /// default name (`device_name()` computes it).
+    device_name: Option<DeviceName>,
+    /// `[playback] connect_device_id` shadow state (research R8):
+    /// generated once and persisted on the very first launch that needs
+    /// one.
+    device_id: String,
+    /// Whether `Initialize` has been sent and not yet followed by a
+    /// `Deregister` (`set_playback_permitted`'s de-dup guard).
+    registered_or_pending: bool,
     master_volume: VolumePercent,
     ceiling: CeilingDb,
     preset: BufferPreset,
@@ -87,31 +208,71 @@ pub struct PlaybackController<B: OutputBackend> {
 
     settings_store: SettingsStore,
     notifications: NotificationCenter,
+    /// Monotonic id for `request_account_tracks` so a reply can be matched
+    /// to its request (Stage 2 "Play from account" over the session).
+    next_account_read_id: u64,
+    /// `SourceEvent::AccountTracks` replies drained from the source but not
+    /// yet handed to the UI via `take_account_tracks`.
+    pending_account_tracks: Vec<(u64, Result<Vec<TrackRef>, AccountReadError>)>,
 }
 
-impl<B: OutputBackend> PlaybackController<B> {
-    /// Construct a controller wired to `backend`, seeding shadow state
-    /// from `settings_store` (any load warning is raised as a
-    /// notification). No stream is opened yet.
-    pub fn new(backend: B, settings_store: SettingsStore) -> Self {
+impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
+    /// Construct a controller wired to `backend` and `source_host`,
+    /// seeding shadow state from `settings_store` (any load warning is
+    /// raised as a notification). No stream is opened yet; `source_host`
+    /// is not sent `Initialize` here (that is `set_playback_permitted`'s
+    /// job, driven by account state).
+    pub fn new(backend: B, source_host: H, settings_store: SettingsStore) -> Self {
         let mut notifications = NotificationCenter::new();
         let outcome = settings_store.load();
         if let Some(warning) = outcome.warning {
             notifications.raise(severity_for(&warning), warning.message_key());
         }
-        Self::from_settings(backend, settings_store, &outcome.settings, notifications)
+        let needs_device_id_persisted = outcome.settings.connect_device_id.is_none();
+        let mut controller = Self::from_settings(
+            backend,
+            source_host,
+            settings_store,
+            &outcome.settings,
+            notifications,
+        );
+        // First launch that ever needed a device id (research R8): persist
+        // it now so every subsequent launch (and every other controller)
+        // sees the same stable id.
+        if needs_device_id_persisted {
+            let device_id = controller.device_id.clone();
+            controller.persist_settings(|settings| settings.connect_device_id = Some(device_id));
+        }
+        controller
     }
 
     fn from_settings(
         backend: B,
+        source_host: H,
         settings_store: SettingsStore,
         settings: &AudioSettings,
         notifications: NotificationCenter,
     ) -> Self {
         Self {
             backend,
-            // App launch is always Stopped, regardless of persisted state (FR-015).
-            transport: Transport::Stopped,
+            source_host,
+            queue: Queue::new(),
+            transport_state: TransportState::default(),
+            queue_rng: XorShiftRng::seeded(),
+            program_generation: 0,
+            last_sent_program_key: None,
+            pending_program: None,
+            last_program_sent_at: None,
+            source_sample_rate: 0,
+            now: Arc::new(Instant::now),
+            transfer_timer_deadline: None,
+            reconnect_timer_deadline: None,
+            device_name: settings.device_name.clone(),
+            device_id: settings
+                .connect_device_id
+                .clone()
+                .unwrap_or_else(generate_connect_device_id),
+            registered_or_pending: false,
             // Safe-volume startup clamp (US2 T061, FR-011): the effective
             // volume at launch is `SafeVolume::apply(stored)`; the stored
             // (possibly uncapped) value only comes back when the user
@@ -130,7 +291,33 @@ impl<B: OutputBackend> PlaybackController<B> {
             shared: Arc::new(RtShared::new()),
             settings_store,
             notifications,
+            next_account_read_id: 0,
+            pending_account_tracks: Vec::new(),
         }
+    }
+
+    /// Current transport-reducer shadow state (data-model.md §3.1).
+    pub fn transport_state(&self) -> &TransportState {
+        &self.transport_state
+    }
+
+    /// The host-owned play queue (data-model.md §2.2).
+    pub fn queue(&self) -> &Queue {
+        &self.queue
+    }
+
+    /// The injected wall clock's current reading (design note 6);
+    /// `Instant::now()` in production. Timers that consult it (5 s
+    /// transfer, 30 s transient) land with US3/US4.
+    pub fn now(&self) -> Instant {
+        (self.now)()
+    }
+
+    /// Replace the wall clock `tick()`'s timers (T19's 5 s transfer
+    /// timeout) read against (design note 6) — production never calls
+    /// this; tests inject a fake/advancing clock instead of sleeping.
+    pub fn set_clock(&mut self, now: impl Fn() -> Instant + Send + Sync + 'static) {
+        self.now = Arc::new(now);
     }
 
     /// The shared real-time atomics — created once, never replaced.
@@ -138,9 +325,170 @@ impl<B: OutputBackend> PlaybackController<B> {
         &self.shared
     }
 
-    /// Current transport shadow state.
+    /// Current transport shadow state, derived from the reducer's
+    /// `Intent` (data-model.md §3.1) — kept for callers that only need
+    /// the coarse `Stopped`/`Playing`/`Paused` engine-facing value; new
+    /// code should prefer `transport_state().intent`.
     pub fn transport(&self) -> Transport {
-        self.transport
+        self.engine_transport()
+    }
+
+    fn engine_transport(&self) -> Transport {
+        match self.transport_state.intent {
+            Intent::Stopped => Transport::Stopped,
+            Intent::Playing => Transport::Playing,
+            Intent::Paused => Transport::Paused,
+        }
+    }
+
+    /// Connect device status (data-model.md §3.1, FR-016/018/019/027).
+    pub fn active_state(&self) -> &ActiveState {
+        &self.transport_state.active
+    }
+
+    /// Whether the transport controls should be enabled this frame
+    /// (contracts/transport-and-queue.md §1): a device is open, the
+    /// source is not in an unrecoverable state, and the device is
+    /// currently registered with the service.
+    pub fn transport_enabled(&self) -> bool {
+        self.active_device.is_some()
+            && !matches!(
+                self.transport_state.health,
+                SourceHealth::Unavailable { .. }
+            )
+            && !matches!(
+                self.transport_state.active,
+                ActiveState::NotRegistered { .. }
+            )
+    }
+
+    /// The Fluent key for the inline reason transport is disabled, if any
+    /// (contracts/transport-and-queue.md §1).
+    pub fn disabled_reason(&self) -> Option<&'static str> {
+        if self.active_device.is_none() {
+            return Some("status-no-device");
+        }
+        if let ActiveState::NotRegistered { reason } = &self.transport_state.active {
+            return Some(match reason {
+                NotRegisteredReason::PremiumRequired => "status-premium-required",
+                NotRegisteredReason::SubscriptionNotVerified => "status-subscription-not-verified",
+                NotRegisteredReason::SignedOut => "status-signed-out",
+                NotRegisteredReason::Unknown => "status-not-registered",
+            });
+        }
+        if matches!(
+            self.transport_state.health,
+            SourceHealth::Unavailable { .. }
+        ) {
+            return Some("status-source-unavailable");
+        }
+        None
+    }
+
+    /// Current playback position, derived from the audio clock at >= 60 Hz
+    /// (engine-delta.md §3, FR-006) — safe to call every frame. `Stopped`
+    /// (T5) always reads zero: the engine only republishes its anchor on a
+    /// *playing* render, so the shadow `intent` is authoritative for the
+    /// stopped case rather than waiting for one more render to catch up.
+    pub fn position(&self) -> Duration {
+        if self.transport_state.intent == Intent::Stopped {
+            return Duration::ZERO;
+        }
+        PositionClock::now(&self.shared, self.source_sample_rate.max(1))
+    }
+
+    /// The queue's current item, if any.
+    pub fn current_track(&self) -> Option<&QueueItem> {
+        self.queue.current()
+    }
+
+    /// The effective Connect device name: the user's custom name, or the
+    /// service/platform default when none is set (FR-001).
+    pub fn device_name(&self) -> String {
+        match &self.device_name {
+            Some(name) => name.as_str().to_string(),
+            None => default_device_name(),
+        }
+    }
+
+    /// Validate, persist, and (if registered) apply a new device name
+    /// (contracts/transport-and-queue.md §5, FR-001). An empty/whitespace
+    /// `input` restores the default.
+    pub fn set_device_name(&mut self, input: &str) -> Result<(), DeviceNameError> {
+        let parsed = DeviceName::parse(input)?;
+        self.device_name = parsed.clone();
+        self.persist_settings(|settings| settings.device_name = parsed.clone());
+        if self.registered_or_pending {
+            self.source_host
+                .command(SourceCommand::SetDeviceName(self.device_name()));
+        }
+        Ok(())
+    }
+
+    /// Called by `App` from 002's session state (contracts/transport-and-
+    /// queue.md §1): `true` sends `Initialize` once; `false` sends
+    /// `Deregister` once and disables transport with `reason` inline.
+    pub fn set_playback_permitted(&mut self, permitted: bool, reason: Option<NotRegisteredReason>) {
+        if permitted {
+            if !self.registered_or_pending {
+                self.registered_or_pending = true;
+                self.source_host.command(SourceCommand::Initialize {
+                    device_name: self.device_name(),
+                    device_id: self.device_id.clone(),
+                });
+            }
+        } else {
+            if self.registered_or_pending {
+                self.registered_or_pending = false;
+                self.source_host.command(SourceCommand::Deregister);
+            }
+            self.transport_state.active = ActiveState::NotRegistered {
+                reason: reason.unwrap_or(NotRegisteredReason::Unknown),
+            };
+        }
+    }
+
+    /// Ask the source to tear down and re-run `Initialize` after
+    /// `Unavailable` (contracts/audio-source-host.md §2).
+    pub fn retry_source(&mut self) {
+        self.source_host.command(SourceCommand::Retry);
+    }
+
+    /// Sign-out ordering (design note 7): stop, clear the queue, and
+    /// deregister — called by `App` *before* it processes 002's
+    /// `SignedOut`/`SessionRevoked` report.
+    pub fn clear_for_sign_out(&mut self) {
+        self.stop();
+        self.queue = Queue::new();
+        if self.registered_or_pending {
+            self.registered_or_pending = false;
+            self.source_host.command(SourceCommand::Deregister);
+        }
+        self.transport_state.active = ActiveState::NotRegistered {
+            reason: NotRegisteredReason::SignedOut,
+        };
+    }
+
+    /// Login refused for a non-Premium account (FR-027, rule T22): the
+    /// current item, if any is playing, finishes before the device
+    /// disables and deregisters (`transport::reduce`'s `downgrade_pending`
+    /// bookkeeping) — immediate when nothing is currently playing.
+    pub fn on_tier_rejected(&mut self) {
+        self.dispatch(Input::TierRejected);
+    }
+
+    /// The account tier dropped to Free (FR-027). See `on_tier_rejected`'s
+    /// doc comment — same finish-then-disable rule (T22).
+    pub fn on_tier_free(&mut self) {
+        self.on_tier_rejected();
+    }
+
+    /// `App::on_exit` (design note 8, FR-008): stop, release the source's
+    /// resources, and drop the stream.
+    pub fn shutdown(&mut self) {
+        self.stop();
+        self.source_host.command(SourceCommand::Shutdown);
+        self.stream = None;
     }
 
     /// Current master-volume shadow state.
@@ -279,6 +627,11 @@ impl<B: OutputBackend> PlaybackController<B> {
         self.master_volume = volume;
         self.push_command_retrying(Command::SetMasterVolume(volume));
         self.persist_settings(|settings| settings.master_volume = volume);
+        if self.registered_or_pending {
+            self.source_host.command(SourceCommand::SetVolume(
+                modplayer_audio_source::VolumePercent::new(volume.value()),
+            ));
+        }
     }
 
     /// Update limiter-ceiling shadow state, enqueue `SetCeiling` (retrying
@@ -290,34 +643,571 @@ impl<B: OutputBackend> PlaybackController<B> {
         self.persist_settings(|settings| settings.limiter_ceiling_db = ceiling);
     }
 
-    /// Transition transport shadow state to `Playing` and enqueue `Play`
-    /// (spec US2 acceptance 6; contracts/engine-commands.md).
+    /// `play` per the transport reducer's rules T1-T3
+    /// (contracts/transport-and-queue.md §2): starts the current queue
+    /// item (loading the program first if the source doesn't already
+    /// have it loaded), resumes from pause, or is a no-op while buffering.
     pub fn play(&mut self) {
-        self.transport = Transport::Playing;
-        self.push_command_retrying(Command::Play);
+        let has_current = self.queue.current().is_some();
+        let track_loaded_in_source = self.transport_state.track_len_ms.is_some();
+        let buffer_ready = self.source_host.buffer_status().ready;
+        self.dispatch(Input::Play {
+            has_current,
+            track_loaded_in_source,
+            buffer_ready,
+        });
     }
 
-    /// Transition transport shadow state to `Paused` and enqueue `Pause`.
+    /// `pause` per rule T4.
     pub fn pause(&mut self) {
-        self.transport = Transport::Paused;
-        self.push_command_retrying(Command::Pause);
+        self.dispatch(Input::Pause);
     }
 
-    /// Transition transport shadow state to `Stopped` and enqueue `Stop`.
+    /// `stop` per rule T5: position resets to 0; the current item, queue,
+    /// and Connect active status are retained.
     pub fn stop(&mut self) {
-        self.transport = Transport::Stopped;
-        self.push_command_retrying(Command::Stop);
+        self.dispatch(Input::Stop);
+    }
+
+    /// `seek` per rules T6-T8: clamps at the track end (advancing per
+    /// FR-014 rather than overshooting).
+    pub fn seek(&mut self, position: Duration) {
+        let position_ms = u32::try_from(position.as_millis()).unwrap_or(u32::MAX);
+        let buffer_ready = self.source_host.buffer_status().ready;
+        self.dispatch(Input::Seek {
+            position_ms,
+            buffer_ready,
+        });
+    }
+
+    /// `skip_forward` per rule T9.
+    pub fn skip_forward(&mut self) {
+        self.dispatch(Input::SkipForward);
+    }
+
+    /// `skip_back` per rule T10: restarts the current item past the 3 s
+    /// threshold (`Queue::skip_back`'s own rule), otherwise moves to the
+    /// previous item.
+    pub fn skip_back(&mut self) {
+        let position_ms = u32::try_from(self.position().as_millis()).unwrap_or(0);
+        self.dispatch(Input::SkipBack { position_ms });
+    }
+
+    /// **Play here** (contracts/transport-and-queue.md §1, FR-018): ask the
+    /// service to make this device the active one. Only meaningful while
+    /// `ActiveState::Inactive` (the banner that offers this button is only
+    /// shown then); a no-op otherwise (rule T17).
+    pub fn play_here(&mut self) {
+        self.dispatch(Input::PlayHere);
+    }
+
+    /// The other Connect device's name, once known (T77, research R3):
+    /// updates the `Inactive` banner's `other_device` field. A no-op
+    /// unless the device is currently `Inactive` — a name that arrives
+    /// after the device became active again (or before `BecameInactive`
+    /// even landed) has nothing to attach to.
+    pub fn set_other_device_name(&mut self, name: Option<String>) {
+        if let ActiveState::Inactive { other_device } = &mut self.transport_state.active {
+            *other_device = name;
+        }
+    }
+
+    /// Replace the queue's context (contracts/transport-and-queue.md §1),
+    /// e.g. Settings › Developer's "Play from account" (T063): seeds a
+    /// current item so a following `play()` has something to load, and
+    /// syncs the program to the source (T067).
+    pub fn queue_replace(&mut self, tracks: Vec<modplayer_audio_source::TrackRef>) {
+        self.queue.replace_context(tracks);
+        self.sync_program();
+    }
+
+    /// Move an existing item to the tail of the play-next block (FR-011,
+    /// FIFO; contracts/transport-and-queue.md §1).
+    pub fn queue_play_next(&mut self, uid: QueueItemId) {
+        self.queue.ensure_host_driven();
+        self.queue.play_next(uid);
+        self.sync_program();
+    }
+
+    /// Append a brand-new track directly to the tail of the play-next
+    /// block.
+    pub fn queue_play_next_track(&mut self, track: modplayer_audio_source::TrackRef) {
+        self.queue.ensure_host_driven();
+        self.queue.play_next_track(track);
+        self.sync_program();
+    }
+
+    /// Move `uid` one slot earlier in the effective order (FR-012).
+    pub fn queue_move_up(&mut self, uid: QueueItemId) {
+        self.queue.ensure_host_driven();
+        self.queue.move_up(uid);
+        self.sync_program();
+    }
+
+    /// Move `uid` one slot later in the effective order (FR-012).
+    pub fn queue_move_down(&mut self, uid: QueueItemId) {
+        self.queue.ensure_host_driven();
+        self.queue.move_down(uid);
+        self.sync_program();
+    }
+
+    /// Move `uid` to `to_effective_index` (0 = current; the current item
+    /// itself never moves) — the drag-reorder target index (FR-012).
+    pub fn queue_reorder(&mut self, uid: QueueItemId, to_effective_index: usize) {
+        self.queue.ensure_host_driven();
+        self.queue.reorder(uid, to_effective_index);
+        self.sync_program();
+    }
+
+    /// Remove `uid` from wherever it is (FR-012). Removing the current
+    /// item skips forward past it.
+    pub fn queue_remove(&mut self, uid: QueueItemId) {
+        self.queue.ensure_host_driven();
+        self.queue.remove(uid);
+        self.sync_program();
+    }
+
+    /// Turn shuffle on/off (FR-013).
+    pub fn set_shuffle(&mut self, on: bool) {
+        self.queue.ensure_host_driven();
+        self.queue.set_shuffle(on, &mut self.queue_rng);
+        self.sync_program();
+    }
+
+    /// Set the repeat mode (FR-013/014).
+    pub fn set_repeat(&mut self, mode: Repeat) {
+        self.queue.ensure_host_driven();
+        self.queue.set_repeat(mode);
+        self.sync_program();
+    }
+
+    /// The Queue panel's projection of the queue (T066, contracts/
+    /// transport-and-queue.md §1): the effective order, current item
+    /// first, history excluded.
+    pub fn queue_view(&self) -> QueueView {
+        let current_uid = self.queue.current().map(|item| item.uid);
+        let items = self
+            .queue
+            .effective_order()
+            .into_iter()
+            .map(|item| QueueRow {
+                uid: item.uid,
+                title: item.track.title.clone(),
+                artist: item.track.artists.join(", "),
+                origin: item.origin,
+                unavailable: item.unavailable,
+                is_current: Some(item.uid) == current_uid,
+            })
+            .collect();
+        QueueView {
+            items,
+            shuffle: self.queue.shuffle_enabled(),
+            repeat: self.queue.repeat(),
+        }
+    }
+
+    /// Recompute the `Program` from the queue's current effective order
+    /// and, when it differs from the last one actually sent (order,
+    /// cursor, repeat flags — contracts/transport-and-queue.md §3), queue
+    /// it for `flush_pending_program` — which sends immediately if the
+    /// debounce window has elapsed, or on a later `tick()` otherwise. A
+    /// no-op while the queue is `SourceDriven` or empty. Near the wrap of
+    /// a shuffled `repeat == All` cycle, sends the wrap preview
+    /// (`Queue::wrap_preview`) instead of the (otherwise single-item)
+    /// effective order, so the source can preload the next cycle's first
+    /// item gaplessly.
+    fn sync_program(&mut self) {
+        if self.queue.mode() != QueueMode::HostDriven {
+            return;
+        }
+        let Some(queue_program) = self.queue.program() else {
+            self.pending_program = None;
+            return;
+        };
+        let (order, cursor_index) = if queue_program.order.len() <= 1 {
+            match self.queue.wrap_preview(&mut self.queue_rng) {
+                Some(order) => (order, 0),
+                None => (queue_program.order, queue_program.cursor_index),
+            }
+        } else {
+            (queue_program.order, queue_program.cursor_index)
+        };
+        let position_ms = u32::try_from(self.position().as_millis()).unwrap_or(u32::MAX);
+        let start_playing = self.transport_state.intent == Intent::Playing;
+        let repeat_all = self.queue.repeat() == Repeat::All;
+        let repeat_one = self.queue.repeat() == Repeat::One;
+
+        let unchanged = self.last_sent_program_key.as_ref().is_some_and(
+            |(sent_order, sent_cursor, sent_all, sent_one)| {
+                *sent_order == order
+                    && *sent_cursor == cursor_index
+                    && *sent_all == repeat_all
+                    && *sent_one == repeat_one
+            },
+        );
+        if unchanged {
+            self.pending_program = None;
+            return;
+        }
+
+        self.pending_program = Some(PendingProgram {
+            order,
+            cursor_index,
+            position_ms,
+            start_playing,
+            repeat_all,
+            repeat_one,
+        });
+        self.flush_pending_program();
+    }
+
+    /// Send `pending_program`, if any, provided the debounce window has
+    /// elapsed since the last actual send; otherwise leaves it queued for
+    /// a later call (the next `sync_program` or `tick()`).
+    fn flush_pending_program(&mut self) {
+        let Some(pending) = self.pending_program.clone() else {
+            return;
+        };
+        let now = (self.now)();
+        if let Some(last_sent) = self.last_program_sent_at
+            && now.saturating_duration_since(last_sent) < PROGRAM_SEND_DEBOUNCE
+        {
+            return;
+        }
+        self.pending_program = None;
+        self.program_generation += 1;
+        self.transport_state.current_generation = self.program_generation;
+        let program = Program {
+            order: pending.order.clone(),
+            cursor_index: pending.cursor_index,
+            position_ms: pending.position_ms,
+            start_playing: pending.start_playing,
+            repeat_all: pending.repeat_all,
+            repeat_one: pending.repeat_one,
+            generation: self.program_generation,
+        };
+        self.last_sent_program_key = Some((
+            pending.order,
+            pending.cursor_index,
+            pending.repeat_all,
+            pending.repeat_one,
+        ));
+        self.last_program_sent_at = Some(now);
+        self.source_host
+            .command(SourceCommand::LoadProgram(program));
     }
 
     /// Retry any commands that failed to enqueue on a previous attempt
     /// because the SPSC queue was momentarily full (contracts/engine-
     /// commands.md rule 3: the controller "never blocks and never drops
-    /// the shadow update"), and drain any device events the backend has
+    /// the shadow update"), drain any device events the backend has
     /// raised (device loss, list changes, sample-rate changes — US3
-    /// T069-T074). Call once per UI tick.
+    /// T069-T074), and drain+reduce every event the source host has
+    /// raised (contracts/transport-and-queue.md §1's `tick()`; only the
+    /// T11/T12 mirror is wired this phase — health/session/transfer
+    /// mirroring lands with US3/US4). Call once per UI tick.
     pub fn tick(&mut self) {
         self.flush_pending_commands();
         self.drain_backend_events();
+        self.drain_source_events();
+        // A `sync_program` send debounced on a previous call becomes
+        // sendable once enough real time has passed, even with no further
+        // mutation (contracts/transport-and-queue.md §3).
+        self.flush_pending_program();
+        self.flush_transfer_timer();
+        self.flush_reconnect_timer();
+    }
+
+    /// T19: fire `Input::TransferTimedOut` once the 5 s transfer-request
+    /// deadline (T17) has passed, polled each `tick()` against the
+    /// injectable clock (design note 6) rather than a background thread —
+    /// self-healing if the state already moved on (`BecameActive`) without
+    /// an explicit `Timer(Cancel)` in between.
+    fn flush_transfer_timer(&mut self) {
+        let Some(deadline) = self.transfer_timer_deadline else {
+            return;
+        };
+        if !matches!(
+            self.transport_state.active,
+            ActiveState::TransferRequested { .. }
+        ) {
+            self.transfer_timer_deadline = None;
+            return;
+        }
+        if (self.now)() >= deadline {
+            self.transfer_timer_deadline = None;
+            self.dispatch(Input::TransferTimedOut);
+        }
+    }
+
+    /// T20: fire `Input::ReconnectTimedOut` once the 30 s reconnect-
+    /// warning deadline has passed, polled each `tick()` against the
+    /// injectable clock exactly like `flush_transfer_timer` — self-healing
+    /// if health already recovered (`Health(Ok)`) without an explicit
+    /// `Timer(Cancel)` racing in first.
+    fn flush_reconnect_timer(&mut self) {
+        let Some(deadline) = self.reconnect_timer_deadline else {
+            return;
+        };
+        if !matches!(self.transport_state.health, SourceHealth::Transient { .. }) {
+            self.reconnect_timer_deadline = None;
+            return;
+        }
+        if (self.now)() >= deadline {
+            self.reconnect_timer_deadline = None;
+            self.dispatch(Input::ReconnectTimedOut);
+        }
+    }
+
+    /// Poll `source_host` and mirror every event this phase's reducer
+    /// understands through `transport::reduce` (T11/T12).
+    fn drain_source_events(&mut self) {
+        let events = self.source_host.poll();
+        for event in events {
+            if let SourceEvent::AccountTracks { request_id, result } = event {
+                // Not a transport input — a "Play from account" read reply
+                // (Stage 2); stash for the UI to drain via
+                // `take_account_tracks`.
+                self.pending_account_tracks.push((request_id, result));
+                continue;
+            }
+            if let Some(input) = map_source_event(event) {
+                self.dispatch(input);
+            }
+        }
+    }
+
+    /// Ask the source to list up to `limit` playable tracks from the
+    /// signed-in account via its own session (Stage 2 "Play from account").
+    /// Returns the request id whose reply arrives through
+    /// [`Self::take_account_tracks`].
+    pub fn request_account_tracks(&mut self, limit: u8) -> u64 {
+        let request_id = self.next_account_read_id;
+        self.next_account_read_id += 1;
+        self.source_host
+            .command(SourceCommand::ListAccountTracks { request_id, limit });
+        request_id
+    }
+
+    /// Drain the `request_account_tracks` replies received since the last
+    /// call (one per completed request, in arrival order).
+    pub fn take_account_tracks(&mut self) -> Vec<(u64, Result<Vec<TrackRef>, AccountReadError>)> {
+        std::mem::take(&mut self.pending_account_tracks)
+    }
+
+    /// Run `input` through the pure transport reducer and apply the
+    /// effects it returns (contracts/transport-and-queue.md §2). The
+    /// `QueueChangeOrigin` a follow-up `Input::QueueChanged` should carry
+    /// is derived from which kind of input this was, *before* it is moved
+    /// into `reduce`.
+    fn dispatch(&mut self, input: Input) {
+        let queue_origin = match &input {
+            Input::SkipForward => QueueChangeOrigin::UserSkipForward,
+            Input::SkipBack { .. } => QueueChangeOrigin::UserSkipBack,
+            Input::Seek { .. } => QueueChangeOrigin::UserSeek,
+            Input::Unavailable { .. } => QueueChangeOrigin::UnavailableMirror,
+            _ => QueueChangeOrigin::EndOfTrackMirror,
+        };
+        let (new_state, effects) =
+            transport::reduce(std::mem::take(&mut self.transport_state), input);
+        self.transport_state = new_state;
+        self.apply_effects(effects, queue_origin);
+    }
+
+    fn apply_effects(&mut self, effects: Vec<Effect>, queue_origin: QueueChangeOrigin) {
+        for effect in effects {
+            match effect {
+                Effect::Engine(cmd) => self.push_command_retrying(cmd),
+                Effect::Source(cmd) => {
+                    // T22/T23 send `Deregister` straight from the reducer
+                    // (unlike `clear_for_sign_out`/`set_playback_
+                    // permitted`, which already track this themselves) —
+                    // keep `registered_or_pending` in sync so a later
+                    // `set_playback_permitted(true, ..)` (tier restored)
+                    // sends a fresh `Initialize` rather than assuming the
+                    // source is still registered.
+                    if matches!(cmd, SourceCommand::Deregister) {
+                        self.registered_or_pending = false;
+                    }
+                    self.source_host.command(cmd);
+                }
+                Effect::SeekTo { position_ms } => {
+                    let frames = self.ms_to_frames(position_ms);
+                    self.push_command_retrying(Command::Seek(frames));
+                    self.source_host.command(SourceCommand::Seek(position_ms));
+                }
+                Effect::LoadCurrentProgram {
+                    position_ms,
+                    start_playing,
+                } => {
+                    if let Some(program) = self.build_program(position_ms, start_playing) {
+                        self.source_host
+                            .command(SourceCommand::LoadProgram(program));
+                    }
+                }
+                Effect::Queue(op) => {
+                    let change = self.apply_queue_op(op);
+                    self.dispatch(Input::QueueChanged {
+                        change,
+                        origin: queue_origin,
+                    });
+                }
+                Effect::Notify {
+                    key,
+                    severity,
+                    actions,
+                } => {
+                    if actions.is_empty() {
+                        self.notifications.raise(severity, key);
+                    } else {
+                        self.notifications
+                            .raise_with_actions(severity, key, Vec::new(), actions);
+                    }
+                }
+                Effect::DismissNotify { key } => {
+                    self.notifications.dismiss_by_key(key);
+                }
+                Effect::Timer(TimerCommand::Start(TimerKind::Transfer)) => {
+                    self.transfer_timer_deadline = Some((self.now)() + TRANSFER_TIMEOUT);
+                }
+                Effect::Timer(TimerCommand::Cancel(TimerKind::Transfer)) => {
+                    self.transfer_timer_deadline = None;
+                }
+                Effect::Timer(TimerCommand::Start(TimerKind::Reconnect)) => {
+                    self.reconnect_timer_deadline = Some((self.now)() + RECONNECT_WARNING_TIMEOUT);
+                }
+                Effect::Timer(TimerCommand::Cancel(TimerKind::Reconnect)) => {
+                    self.reconnect_timer_deadline = None;
+                }
+                Effect::ApplyPendingTransferCommand(pending) => match pending {
+                    PendingTransferCommand::Play | PendingTransferCommand::PlayHere => self.play(),
+                    PendingTransferCommand::SkipForward => self.skip_forward(),
+                    PendingTransferCommand::SkipBack => self.skip_back(),
+                    PendingTransferCommand::Seek(ms) => {
+                        self.seek(Duration::from_millis(u64::from(ms)));
+                    }
+                },
+                Effect::MirrorVolume(pct) => {
+                    // T15: update the shadow/engine volume like
+                    // `set_master_volume`, but do not echo
+                    // `SourceCommand::SetVolume` back to the source that
+                    // just reported this remote change.
+                    let volume = VolumePercent::new(pct.value());
+                    self.master_volume = volume;
+                    self.push_command_retrying(Command::SetMasterVolume(volume));
+                    self.persist_settings(|settings| settings.master_volume = volume);
+                }
+                Effect::RemoteSetShuffle(on) => self.set_shuffle(on),
+                Effect::RemoteSetRepeat(mode) => self.set_repeat(mode),
+            }
+        }
+    }
+
+    /// Apply `op` to the queue, then keep applying `advance(Removed)`
+    /// while the result is `Skipped(uid)` — `Queue::advance`/`mark_
+    /// unavailable` return `Skipped` one item at a time, expecting the
+    /// caller to keep walking forward past every already-unavailable item
+    /// until a terminal result (FR-026), notifying about each one along
+    /// the way (contracts/transport-and-queue.md §2 rule T14).
+    fn apply_queue_op(&mut self, op: QueueOp) -> QueueChange {
+        let mut change = match op {
+            QueueOp::Advance(reason) => self.queue.advance(reason, &mut self.queue_rng),
+            QueueOp::SkipBack { position_ms } => self.queue.skip_back(position_ms),
+            QueueOp::Reveal(track) => {
+                let uid = self.queue.reveal(track);
+                self.queue.move_current_to(uid)
+            }
+            QueueOp::MarkUnavailable(track_id) => {
+                self.notify_track_unavailable(&track_id);
+                self.queue.mark_unavailable(&track_id, &mut self.queue_rng)
+            }
+            QueueOp::AdoptTransferContext {
+                track,
+                shuffle,
+                repeat,
+            } => {
+                let change = self.queue.adopt_transfer_context(track);
+                if let Some(on) = shuffle {
+                    self.queue.set_shuffle(on, &mut self.queue_rng);
+                }
+                if let Some(mode) = repeat {
+                    self.queue.set_repeat(mode);
+                }
+                change
+            }
+        };
+        while let PlaybackChange::Skipped(uid) = change.playback {
+            self.notify_queue_item_skipped(uid);
+            change = self
+                .queue
+                .advance(AdvanceReason::Removed, &mut self.queue_rng);
+        }
+        // The host already knows every queued item's duration (unlike a
+        // source-revealed track, which needs the `TrackStarted` mirror,
+        // T12) — keep the reducer's `track_len_ms` in sync with whichever
+        // item `Queue` is now on, so seek-past-end (T7, SC-006) has a
+        // length to compare against right after a skip/advance/reveal
+        // rather than only once a `TrackStarted` event round-trips back
+        // from the source. `None` when the queue emptied out.
+        self.transport_state.track_len_ms = self.queue.current().map(|item| item.track.duration_ms);
+        change
+    }
+
+    /// Raise `queue-item-skipped-unavailable` for the track the source
+    /// just refused (FR-026), looked up by id before `mark_unavailable`
+    /// runs — the reducer only has the id, not the title.
+    fn notify_track_unavailable(&mut self, track_id: &TrackId) {
+        let title = self.queue.track_title(track_id).unwrap_or_default();
+        self.notifications.raise_with_args(
+            Severity::Info,
+            KEY_QUEUE_ITEM_SKIPPED_UNAVAILABLE,
+            vec![("title", title)],
+        );
+    }
+
+    /// Raise `queue-item-skipped-unavailable` for an item `advance`
+    /// stepped over because it was already marked unavailable (FR-026),
+    /// looked up by uid before it potentially falls out of the queue.
+    fn notify_queue_item_skipped(&mut self, uid: QueueItemId) {
+        let title = self
+            .queue
+            .item(uid)
+            .map(|item| item.track.title.clone())
+            .unwrap_or_default();
+        self.notifications.raise_with_args(
+            Severity::Info,
+            KEY_QUEUE_ITEM_SKIPPED_UNAVAILABLE,
+            vec![("title", title)],
+        );
+    }
+
+    /// Build a `Program` from the queue's current effective order
+    /// (contracts/transport-and-queue.md §3), bumping the program
+    /// generation and keeping `transport_state.current_generation` in
+    /// sync so T12's staleness check is meaningful. `None` when the queue
+    /// has nothing to play.
+    fn build_program(
+        &mut self,
+        position_ms: u32,
+        start_playing: bool,
+    ) -> Option<modplayer_audio_source::Program> {
+        let queue_program = self.queue.program()?;
+        self.program_generation += 1;
+        self.transport_state.current_generation = self.program_generation;
+        Some(queue_program.into_program(
+            position_ms,
+            start_playing,
+            self.queue.repeat() == Repeat::All,
+            self.queue.repeat() == Repeat::One,
+            self.program_generation,
+        ))
+    }
+
+    /// Convert a millisecond position to source-rate frames, using the
+    /// sample rate captured at the last `attach()` (0 before any stream
+    /// has ever been opened, so this yields frame 0).
+    fn ms_to_frames(&self, position_ms: u32) -> u64 {
+        (u64::from(position_ms) * u64::from(self.source_sample_rate)) / 1000
     }
 
     /// Device Check "Yes": persist `{output_device, buffer_preset,
@@ -426,7 +1316,7 @@ impl<B: OutputBackend> PlaybackController<B> {
                 self.disconnect();
                 // Position is retained: it lives in `self.shared`, which is
                 // never reset by `disconnect()`.
-                self.transport = Transport::Paused;
+                self.transport_state.intent = Intent::Paused;
                 self.notifications
                     .raise(Severity::Critical, KEY_NO_OUTPUT_DEVICES);
             }
@@ -514,13 +1404,17 @@ impl<B: OutputBackend> PlaybackController<B> {
         self.stream = None;
         let (command_tx, command_rx) = RingBuffer::<Command>::new(QUEUE_CAPACITY);
         let (event_tx, event_rx) = RingBuffer::<Event>::new(QUEUE_CAPACITY);
-        let source = SyntheticSource::default();
+        // A fresh `Rt` per stream (re)build, restored to the last known
+        // position; never cached across streams (contracts/audio-source-
+        // host.md §1, design note 2).
+        let source = self.source_host.attach(self.shared.position_frames());
+        self.source_sample_rate = source.sample_rate();
         let config = ProcessorConfig {
             source_rate: source.sample_rate(),
             device_rate: device.default_rate.hz(),
             device_channels: device.channels,
             max_frames: self.preset.requested_frames().frames() as usize,
-            transport: self.transport,
+            transport: self.engine_transport(),
             position_frames: self.shared.position_frames(),
             master_volume: self.master_volume,
             ceiling: self.ceiling,
@@ -617,10 +1511,67 @@ fn severity_for(warning: &SettingsWarning) -> Severity {
     }
 }
 
+/// Map a `SourceEvent` to the `Input` this phase's reducer understands
+/// (T1-T14's minimal subset, plus a lightweight `Registered`/
+/// `Deregistered`/`TierRejected`/`Health` mirror so `active_state()`/
+/// `disabled_reason()` are meaningful from US1 on; `None` for every event
+/// whose full rule lands with a later user story — contracts/audio-
+/// source-host.md §3, contracts/transport-and-queue.md §2).
+fn map_source_event(event: SourceEvent) -> Option<Input> {
+    match event {
+        SourceEvent::TrackStarted {
+            track,
+            program,
+            position_ms,
+            playing,
+        } => match program {
+            Some((generation, _index)) => Some(Input::TrackStarted {
+                generation,
+                position_ms,
+                playing,
+                track_len_ms: track.duration_ms,
+            }),
+            None => Some(Input::TrackRevealed { track }),
+        },
+        SourceEvent::EndOfTrack => Some(Input::EndOfTrack),
+        SourceEvent::Registered { .. } => Some(Input::Registered),
+        SourceEvent::Deregistered => Some(Input::Deregistered),
+        SourceEvent::TierRejected => Some(Input::TierRejected),
+        SourceEvent::Health(health) => Some(Input::Health(health)),
+        SourceEvent::Loading { .. } => Some(Input::Loading),
+        SourceEvent::Playing { .. } => Some(Input::Playing),
+        SourceEvent::Unavailable { track } => Some(Input::Unavailable { track }),
+        SourceEvent::BecameActive { context } => Some(Input::BecameActive { context }),
+        SourceEvent::BecameInactive => Some(Input::BecameInactive),
+        SourceEvent::RemoteCommand(cmd) => Some(Input::RemoteCommand(cmd)),
+        // Paused/Stopped/Seeked's full rules (T20/T21) are US4's job.
+        _ => None,
+    }
+}
+
+/// `"ModPlayer on <hostname>"`, falling back to plain `"ModPlayer"` when
+/// the hostname cannot be determined (FR-001's default name). Shells out
+/// to the platform's own `hostname` command (present on macOS, Linux and
+/// Windows alike) rather than adding a dependency for a single syscall.
+fn default_device_name() -> String {
+    let hostname = std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    match hostname {
+        Some(host) => format!("ModPlayer on {host}"),
+        None => "ModPlayer".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use modplayer_audio_io::FakeBackend;
+    use modplayer_audio_source_synthetic::SyntheticHost;
 
     fn fresh_store() -> SettingsStore {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -637,13 +1588,21 @@ mod tests {
 
     #[test]
     fn transport_always_starts_stopped() {
-        let controller = PlaybackController::new(FakeBackend::new(vec![]), fresh_store());
+        let controller = PlaybackController::new(
+            FakeBackend::new(vec![]),
+            SyntheticHost::new(44_100),
+            fresh_store(),
+        );
         assert_eq!(controller.transport(), Transport::Stopped);
     }
 
     #[test]
     fn shadow_state_seeded_from_defaults_with_no_settings_file() {
-        let controller = PlaybackController::new(FakeBackend::new(vec![]), fresh_store());
+        let controller = PlaybackController::new(
+            FakeBackend::new(vec![]),
+            SyntheticHost::new(44_100),
+            fresh_store(),
+        );
         // Default settings: master volume 80%, safe volume enabled with a
         // 50% cap — so the effective launch volume is the cap (US2 T061,
         // `crates/modplayer-core/tests/safe_volume.rs` covers the clamp
@@ -659,7 +1618,11 @@ mod tests {
 
     #[test]
     fn shared_atomics_are_created_once_and_reachable() {
-        let controller = PlaybackController::new(FakeBackend::new(vec![]), fresh_store());
+        let controller = PlaybackController::new(
+            FakeBackend::new(vec![]),
+            SyntheticHost::new(44_100),
+            fresh_store(),
+        );
         let shared = controller.shared();
         shared.advance_clock(42);
         assert_eq!(controller.shared().clock_frames(), 42);
@@ -669,7 +1632,8 @@ mod tests {
     fn a_settings_load_warning_becomes_a_notification() {
         let store = fresh_store();
         let _ = std::fs::write(store.path(), "not valid toml {{{");
-        let controller = PlaybackController::new(FakeBackend::new(vec![]), store);
+        let controller =
+            PlaybackController::new(FakeBackend::new(vec![]), SyntheticHost::new(44_100), store);
         assert_eq!(controller.notifications().visible().count(), 1);
         let notification = controller.notifications().visible().next();
         assert_eq!(notification.map(|n| n.severity), Some(Severity::Warning));

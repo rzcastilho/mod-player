@@ -13,6 +13,7 @@
 
 use egui::{ComboBox, Ui};
 use modplayer_audio_io::OutputBackend;
+use modplayer_audio_source::SourceHost;
 use modplayer_core::{AudioSettings, PlaybackController, Severity, tr};
 use modplayer_engine::Theme;
 
@@ -24,9 +25,9 @@ const THEMES: [Theme; 3] = [Theme::System, Theme::Light, Theme::Dark];
 /// (`settings/mod.rs`'s `SettingsScreen`, T090), kept in sync with whatever
 /// was last saved. `focus` is `Some("appearance.theme")` the frame a
 /// settings-search result asks to land here.
-pub fn show<B: OutputBackend>(
+pub fn show<B: OutputBackend, H: SourceHost>(
     ui: &mut Ui,
-    controller: &mut PlaybackController<B>,
+    controller: &mut PlaybackController<B, H>,
     cached: &mut AudioSettings,
     focus: Option<&str>,
 ) {

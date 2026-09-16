@@ -58,6 +58,11 @@ pub struct AudioSettings {
     pub master_volume: VolumePercent,
     pub theme: Theme,
     pub disclosure: Option<DisclosureAcknowledgement>,
+    /// `[playback] device_name` (FR-001); `None` = use the default name.
+    pub device_name: Option<DeviceName>,
+    /// `[playback] connect_device_id` (research R8); `None` until first
+    /// generated.
+    pub connect_device_id: Option<String>,
     pub schema_version: u32,
 }
 
@@ -72,6 +77,8 @@ impl Default for AudioSettings {
             master_volume: VolumePercent::new(80),
             theme: Theme::default(),
             disclosure: None,
+            device_name: None,
+            connect_device_id: None,
             schema_version: SCHEMA_VERSION,
         }
     }
@@ -84,6 +91,9 @@ impl Default for AudioSettings {
 pub enum InvalidField {
     BufferPreset,
     Theme,
+    /// `[playback] device_name` was longer than 64 characters after trim
+    /// (contracts/transport-and-queue.md §5).
+    DeviceName,
 }
 
 impl InvalidField {
@@ -92,8 +102,63 @@ impl InvalidField {
         match self {
             InvalidField::BufferPreset => "audio.buffer_preset",
             InvalidField::Theme => "appearance.theme",
+            InvalidField::DeviceName => "playback.device_name",
         }
     }
+}
+
+/// A user-chosen Connect device name (data-model.md §4, FR-001): trimmed,
+/// 1-64 characters. `DeviceName::parse` is the single validating
+/// constructor; `None` (from an empty/absent input) means "use the default
+/// name" (`"ModPlayer on <hostname>"` / `"ModPlayer"`), computed by the
+/// caller (`modplayer-audio-source-connect`, which knows the hostname).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceName(String);
+
+/// `DeviceName::parse` rejected its input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceNameError {
+    /// Longer than 64 characters after trimming.
+    TooLong,
+}
+
+impl DeviceName {
+    /// The maximum length, in characters, after trimming.
+    pub const MAX_LEN: usize = 64;
+
+    /// Trim `input`; empty trims to `Ok(None)` (restore the default);
+    /// longer than [`Self::MAX_LEN`] characters is `Err(TooLong)`.
+    pub fn parse(input: &str) -> Result<Option<Self>, DeviceNameError> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        if trimmed.chars().count() > Self::MAX_LEN {
+            return Err(DeviceNameError::TooLong);
+        }
+        Ok(Some(Self(trimmed.to_string())))
+    }
+
+    /// The validated, trimmed name.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Generate a fresh 32-hex-character Connect device id (data-model.md §4),
+/// used the first time a device id is needed; persisted afterward so other
+/// controllers see a stable device across launches (research R8).
+pub fn generate_connect_device_id() -> String {
+    let mut bytes = [0u8; 16];
+    // A failed read (vanishingly rare) leaves `bytes` zeroed — still a
+    // valid-shaped (if predictable) id rather than a panic; the caller can
+    // regenerate on the next launch if it observes an all-zero id.
+    let _ = getrandom::fill(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn is_valid_connect_device_id(id: &str) -> bool {
+    id.len() == 32 && id.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// The literal `settings.toml` shape: every field is the raw wire type
@@ -109,6 +174,8 @@ pub struct RawSettings {
     pub appearance: RawAppearance,
     #[serde(default)]
     pub disclosure: RawDisclosure,
+    #[serde(default)]
+    pub playback: RawPlayback,
 }
 
 fn default_schema_version() -> u32 {
@@ -122,8 +189,19 @@ impl Default for RawSettings {
             audio: RawAudio::default(),
             appearance: RawAppearance::default(),
             disclosure: RawDisclosure::default(),
+            playback: RawPlayback::default(),
         }
     }
+}
+
+/// The `[playback]` section (contracts/transport-and-queue.md §5): an
+/// optional table so older files (with no such section) load unchanged.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RawPlayback {
+    #[serde(default)]
+    pub device_name: Option<String>,
+    #[serde(default)]
+    pub connect_device_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -266,6 +344,13 @@ impl RawSettings {
                 },
                 None => RawDisclosure::default(),
             },
+            playback: RawPlayback {
+                device_name: settings
+                    .device_name
+                    .as_ref()
+                    .map(|name| name.as_str().to_string()),
+                connect_device_id: settings.connect_device_id.clone(),
+            },
         }
     }
 
@@ -314,6 +399,30 @@ impl RawSettings {
                     .unwrap_or(OffsetDateTime::UNIX_EPOCH),
             });
 
+        // Absent -> `None` (default name); present-but-too-long -> `None`
+        // plus a warning; present-and-valid -> `Some` (contracts/
+        // transport-and-queue.md §5).
+        let device_name = match self.playback.device_name.as_deref() {
+            None => None,
+            Some(raw) => match DeviceName::parse(raw) {
+                Ok(name) => name,
+                Err(DeviceNameError::TooLong) => {
+                    invalid.push(InvalidField::DeviceName);
+                    None
+                }
+            },
+        };
+
+        // An invalid-shaped id (not present, or not 32 hex chars) is
+        // silently dropped; the caller regenerates and persists a fresh
+        // one on next use (contracts/transport-and-queue.md §5) — not
+        // itself a reported `InvalidField`, matching `output_device`'s
+        // silent-drop-on-empty precedent above.
+        let connect_device_id = self
+            .playback
+            .connect_device_id
+            .filter(|id| is_valid_connect_device_id(id));
+
         let settings = AudioSettings {
             output_device,
             device_confirmed: self.audio.device_confirmed,
@@ -326,6 +435,8 @@ impl RawSettings {
             master_volume: VolumePercent::from_i64(self.audio.master_volume),
             theme,
             disclosure,
+            device_name,
+            connect_device_id,
             schema_version: self.schema_version,
         };
 

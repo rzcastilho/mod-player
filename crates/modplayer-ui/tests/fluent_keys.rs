@@ -4,7 +4,13 @@
 //! Settings screens use (contracts/ui-surface.md "Main window",
 //! "Notification message keys", "Settings") must resolve against
 //! `locales/en-US/*.ftl` (research R10). Extended to cover every
-//! Settings-screen key in US5 (T086).
+//! Settings-screen key in US5 (T086), and every Now Playing / queue /
+//! transfer-banner / stream-notification / device-name / "Play from
+//! account" key added by 003-streaming-playback-and-queue (T064, T071,
+//! T080, T095), including a check that `playback.ftl`/`settings.ftl`
+//! define no key this test does not exercise.
+
+use std::collections::HashSet;
 
 use modplayer_core::{tr, tr_args};
 
@@ -44,6 +50,77 @@ const SHELL_AND_NOTIFICATION_KEYS: &[&str] = &[
     "setting-buffer-frames-desc",
     "setting-raise-notification",
     "setting-raise-notification-desc",
+];
+
+/// Now Playing status-line / stream-notification / transfer-banner /
+/// queue keys with no Fluent placeholder (003-streaming-playback-and-queue,
+/// T058/T064/T069/T071/T079/T080/T090; contracts/ui-surface.md §1/§2/§5) —
+/// resolved via plain `tr`.
+const PLAYBACK_KEYS: &[&str] = &[
+    // Transport (now_playing.rs).
+    "transport-skip-back",
+    "transport-skip-forward",
+    "now-playing-empty",
+    // Status line.
+    "status-buffering",
+    "status-no-device",
+    "status-premium-required",
+    "status-subscription-not-verified",
+    "status-signed-out",
+    "status-not-registered",
+    "status-source-unavailable",
+    "status-reconnecting",
+    // Transfer banner.
+    "banner-play-here",
+    "banner-unknown-device",
+    // Queue panel.
+    "queue-toggle",
+    "queue-shuffle",
+    "queue-repeat-off",
+    "queue-repeat-one",
+    "queue-repeat-all",
+    "queue-current",
+    "queue-badge-play-next",
+    "queue-badge-unavailable",
+    "queue-move-up",
+    "queue-move-down",
+    "queue-play-next",
+    "queue-remove",
+    "queue-empty",
+    // Stream/session/subscription notifications and their actions.
+    "transfer-request-failed",
+    "stream-reconnect-warning",
+    "stream-source-unavailable",
+    "stream-source-update-required",
+    "subscription-downgraded",
+    "action-status-page",
+    "action-retry",
+    "action-open-upgrade-page",
+];
+
+/// Now Playing / queue / transfer-banner keys that take a Fluent
+/// placeholder — resolved via `tr_args` with a stand-in value.
+const PLAYBACK_ARG_KEYS: &[&str] = &[
+    "transport-position",
+    "now-playing-title",
+    "now-playing-artist",
+    "queue-row",
+    "banner-playing-elsewhere",
+];
+
+/// Settings › Playback (device name) and Settings › Developer ("Play from
+/// account") keys added by 003-streaming-playback-and-queue (T062/T063/
+/// T064; contracts/ui-surface.md §3/§5) — resolved via plain `tr`.
+const PLAYBACK_SETTINGS_KEYS: &[&str] = &[
+    "setting-device-name",
+    "setting-device-name-hint",
+    "setting-device-name-desc",
+    "setting-device-name-too-long",
+    "setting-play-from-account",
+    "setting-play-from-account-desc",
+    "play-from-account-loading",
+    "play-from-account-empty",
+    "play-from-account-failed",
 ];
 
 /// Every Settings-screen key (US5, T086): the eleven fixed-order category
@@ -233,6 +310,89 @@ fn every_shell_nav_and_notification_key_resolves() {
         assert_ne!(
             &resolved, key,
             "Fluent key `{key}` is missing from locales/en-US/*.ftl (tr_args() fell back to the raw key)"
+        );
+    }
+
+    for key in PLAYBACK_KEYS {
+        let resolved = tr(key);
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/playback.ftl (tr() fell back to the raw key)"
+        );
+    }
+
+    for key in PLAYBACK_SETTINGS_KEYS {
+        let resolved = tr(key);
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/settings.ftl (tr() fell back to the raw key)"
+        );
+    }
+
+    for key in PLAYBACK_ARG_KEYS {
+        let resolved = tr_args(
+            key,
+            &[
+                ("position", "0:00".to_string()),
+                ("duration", "3:45".to_string()),
+                ("title", "Example Track".to_string()),
+                ("artist", "Example Artist".to_string()),
+                ("device", "Example Device".to_string()),
+            ],
+        );
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/playback.ftl (tr_args() fell back to the raw key)"
+        );
+    }
+}
+
+/// Every message identifier a Fluent (`.ftl`) resource defines: lines of
+/// the form `key = value`, skipping comments (`#`), section headers
+/// (`##`/`###`), and blank lines. Good enough for `en-US`'s flat,
+/// one-key-per-line resources — it does not need to understand Fluent's
+/// full grammar, only to find identifiers at the start of a line.
+fn defined_keys(ftl: &str) -> HashSet<&str> {
+    ftl.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            line.split_once(" = ").map(|(key, _)| key.trim())
+        })
+        .collect()
+}
+
+/// FR-024 / T095: every key `playback.ftl` and `settings.ftl` define is
+/// exercised by this file — no orphaned translation the app never
+/// displays. (Coverage the other direction — every key the app looks up
+/// exists — is `every_shell_nav_and_notification_key_resolves` above.)
+#[test]
+fn no_unused_keys_in_playback_and_settings_ftl() {
+    let playback_ftl = include_str!("../../../locales/en-US/playback.ftl");
+    let settings_ftl = include_str!("../../../locales/en-US/settings.ftl");
+
+    let tested: HashSet<&str> = SHELL_AND_NOTIFICATION_KEYS
+        .iter()
+        .chain(SETTINGS_SCREEN_KEYS)
+        .chain(ACCOUNT_KEYS)
+        .chain(PLAYBACK_KEYS)
+        .chain(PLAYBACK_ARG_KEYS)
+        .chain(PLAYBACK_SETTINGS_KEYS)
+        .copied()
+        .collect();
+
+    for key in defined_keys(playback_ftl) {
+        assert!(
+            tested.contains(key),
+            "locales/en-US/playback.ftl defines `{key}`, which no UI code path (and so no test in this file) uses — remove it or wire it up"
+        );
+    }
+    for key in defined_keys(settings_ftl) {
+        assert!(
+            tested.contains(key),
+            "locales/en-US/settings.ftl defines `{key}`, which no UI code path (and so no test in this file) uses — remove it or wire it up"
         );
     }
 }

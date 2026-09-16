@@ -23,12 +23,37 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use modplayer_account::{
-    AccountService, AuthorizationService, Clock, SpotifyAuthorizationService, SystemClock,
+    AccountService, AuthorizationService, Clock, SessionCredential, SpotifyAuthorizationService,
+    SystemClock,
 };
 use modplayer_audio_io::CpalBackend;
+use modplayer_audio_source_connect::{
+    ConnectConfig, ConnectSource, CredentialError, ReceiverCredentials,
+};
 use modplayer_core::{PlaybackController, SettingsStore};
-use modplayer_secure_store::{KeyringSecureStore, SecureStore};
+use modplayer_secure_store::{EntryName, KeyringSecureStore, SecureStore};
 use modplayer_ui::App;
+
+/// `ReceiverCredentials` over the OS secure store (design note 5:
+/// "the only read path"; contracts/connect-source.md §1). Reads the same
+/// `SessionCredential` 002's `AccountService` writes/refreshes — this
+/// crate never sees the token beyond this one call per (re)connect.
+struct SecureStoreCredentials {
+    store: Arc<dyn SecureStore>,
+}
+
+impl ReceiverCredentials for SecureStoreCredentials {
+    fn access_token(&self) -> Result<String, CredentialError> {
+        let bytes = self
+            .store
+            .get(EntryName::SessionCredential)
+            .map_err(|_| CredentialError::Unavailable)?
+            .ok_or(CredentialError::Unavailable)?;
+        let credential =
+            SessionCredential::from_payload(&bytes).map_err(|_| CredentialError::Unavailable)?;
+        Ok(credential.access_token)
+    }
+}
 
 fn main() -> anyhow::Result<()> {
     let settings_store = SettingsStore::new()
@@ -39,10 +64,23 @@ fn main() -> anyhow::Result<()> {
         .map(Path::to_path_buf)
         .context("settings path has no parent directory")?;
 
-    let mut controller = PlaybackController::new(CpalBackend::new(), settings_store);
+    let secure_store: Arc<dyn SecureStore> = Arc::new(KeyringSecureStore::new());
+
+    // `device_name`/`device_id` are placeholders here: the real,
+    // settings-derived values are sent with `SourceCommand::Initialize`
+    // once `PlaybackController::set_playback_permitted(true, _)` decides
+    // playback is allowed (contracts/connect-source.md §1, design note 5).
+    let connect_source = ConnectSource::new(ConnectConfig {
+        device_name: String::new(),
+        device_id: String::new(),
+        credentials: Arc::new(SecureStoreCredentials {
+            store: Arc::clone(&secure_store),
+        }),
+    });
+    let mut controller =
+        PlaybackController::new(CpalBackend::new(), connect_source, settings_store);
     controller.launch();
 
-    let secure_store: Arc<dyn SecureStore> = Arc::new(KeyringSecureStore::new());
     let auth_service: Arc<dyn AuthorizationService> = Arc::new(SpotifyAuthorizationService::new());
     let clock: Arc<dyn Clock> = Arc::new(SystemClock::new());
     let mut account = AccountService::new(secure_store, auth_service, clock, config_dir);

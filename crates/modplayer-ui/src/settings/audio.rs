@@ -20,6 +20,7 @@
 
 use egui::{ComboBox, Slider, Ui};
 use modplayer_audio_io::OutputBackend;
+use modplayer_audio_source::SourceHost;
 use modplayer_core::{AudioSettings, PlaybackController, Severity, tr};
 use modplayer_engine::{
     BufferPreset, CeilingDb, DeviceId, NegotiatedBuffer, SafeVolume, SampleRate, VolumePercent,
@@ -38,9 +39,9 @@ const PRESETS: [BufferPreset; 3] = [
 /// Draw the "Test output device" button. Returns a fresh `DeviceCheckScreen`
 /// — preselecting the controller's currently active device and preset,
 /// exactly as first launch does — the frame it is clicked.
-pub fn test_output_device_button<B: OutputBackend>(
+pub fn test_output_device_button<B: OutputBackend, H: SourceHost>(
     ui: &mut Ui,
-    controller: &PlaybackController<B>,
+    controller: &PlaybackController<B, H>,
 ) -> Option<DeviceCheckScreen> {
     if ui.button(tr("setting-test-output-device")).clicked() {
         Some(DeviceCheckScreen::new(
@@ -56,9 +57,9 @@ pub fn test_output_device_button<B: OutputBackend>(
 /// `controller` (or, for safe-volume, straight to its settings store via
 /// `cached`). Returns a fresh `DeviceCheckScreen` the frame "Test output
 /// device" is clicked.
-pub fn show<B: OutputBackend>(
+pub fn show<B: OutputBackend, H: SourceHost>(
     ui: &mut Ui,
-    controller: &mut PlaybackController<B>,
+    controller: &mut PlaybackController<B, H>,
     cached: &mut AudioSettings,
     focus: Option<&str>,
 ) -> Option<DeviceCheckScreen> {
@@ -193,8 +194,8 @@ pub fn show<B: OutputBackend>(
 /// so a concurrent change to any other field is not clobbered), reporting a
 /// `settings-save-failed` warning on failure, and refreshing `cached` from
 /// what was actually saved.
-fn persist_safe_volume<B: OutputBackend>(
-    controller: &mut PlaybackController<B>,
+fn persist_safe_volume<B: OutputBackend, H: SourceHost>(
+    controller: &mut PlaybackController<B, H>,
     cached: &mut AudioSettings,
     safe_volume: SafeVolume,
 ) {

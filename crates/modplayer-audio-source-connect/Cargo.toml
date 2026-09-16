@@ -1,0 +1,26 @@
+[package]
+name = "modplayer-audio-source-connect"
+# Independently versioned per Constitution IV / A-11 — NOT `workspace = true`.
+# Bumped on its own cadence; only `crates/modplayer` depends on it.
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+modplayer-audio-source = { path = "../modplayer-audio-source", version = "0.1.0" }
+librespot-core.workspace = true
+librespot-connect.workspace = true
+librespot-playback.workspace = true
+librespot-audio.workspace = true
+librespot-metadata.workspace = true
+librespot-protocol.workspace = true
+protobuf.workspace = true
+tokio.workspace = true
+rtrb.workspace = true
+thiserror.workspace = true
+getrandom.workspace = true
+
+[dev-dependencies]
+assert_no_alloc.workspace = true

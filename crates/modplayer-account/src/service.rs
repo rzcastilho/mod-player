@@ -21,9 +21,12 @@ use std::thread;
 
 use time::OffsetDateTime;
 
+use modplayer_audio_source::TrackRef;
 use modplayer_secure_store::{EntryName, SecureStore};
 
-use crate::auth_service::{AuthError, AuthorizationService, Profile, REDIRECT_PATH, TokenSet};
+use crate::auth_service::{
+    AuthError, AuthorizationService, PlaybackStateSummary, Profile, REDIRECT_PATH, TokenSet,
+};
 use crate::clock::Clock;
 use crate::credential::SessionCredential;
 use crate::listener::{self, ListenerConfig, ListenerOutcome};
@@ -56,6 +59,34 @@ enum WorkerEvent {
         attempt_id: u64,
         result: Result<TokenSet, AuthError>,
     },
+    RecentTracks {
+        attempt_id: u64,
+        request_id: RequestId,
+        result: Result<Vec<TrackRef>, AuthError>,
+    },
+    PlaybackState {
+        attempt_id: u64,
+        request_id: RequestId,
+        result: Result<Option<PlaybackStateSummary>, AuthError>,
+    },
+}
+
+/// An id returned by [`AccountService::request_recent_tracks`]/
+/// [`AccountService::request_playback_state`], unique per call
+/// (contracts/account-read-delta.md §3) — lets a caller with several reads
+/// in flight match each `AccountEvent::ReadResult` back to its request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RequestId(u64);
+
+/// The payload of an `AccountEvent::ReadResult` (contracts/
+/// account-read-delta.md §1/§3). Carries the `Result` rather than the bare
+/// value so a `Forbidden` (scope not yet granted; the sign-in screen's
+/// scope list did not change, so an existing session needs a fresh sign-in
+/// to gain it) is distinguishable from an empty answer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReadOutcome {
+    RecentTracks(Result<Vec<TrackRef>, AuthError>),
+    PlaybackState(Result<Option<PlaybackStateSummary>, AuthError>),
 }
 
 /// Events the service raises for the UI to map to notifications/screens
@@ -95,6 +126,14 @@ pub enum AccountEvent {
     /// A definitive rejection anywhere — refresh, launch validation, or a
     /// tier check (US4, T097, `revoke`).
     SessionRevoked,
+    /// A `request_recent_tracks`/`request_playback_state` result arrived
+    /// (contracts/account-read-delta.md §1/§3). Dropped (never raised) for
+    /// a stale attempt — e.g. a sign-out landed while the read was in
+    /// flight.
+    ReadResult {
+        request_id: RequestId,
+        result: ReadOutcome,
+    },
 }
 
 /// The outcome of `AccountService::launch()`
@@ -137,6 +176,10 @@ pub struct AccountService {
     worker_rx: mpsc::Receiver<WorkerEvent>,
     refresh: Option<RefreshScheduler>,
     tier_check_in_flight: bool,
+    /// Counter backing [`RequestId`] (contracts/account-read-delta.md §3),
+    /// distinct from `attempt_id` — several reads can be in flight within
+    /// one session generation.
+    next_request_id: u64,
 }
 
 impl AccountService {
@@ -168,6 +211,7 @@ impl AccountService {
             worker_rx,
             refresh: None,
             tier_check_in_flight: false,
+            next_request_id: 0,
         }
     }
 
@@ -561,6 +605,111 @@ impl AccountService {
         self.spawn_tier_worker(self.attempt_id, access_token);
     }
 
+    /// Request up to `limit` recently-played tracks, falling back to saved
+    /// tracks when the recently-played result is empty (contracts/
+    /// account-read-delta.md §1/§3, FR-022 "Play from account"). A no-op
+    /// (the returned id never resolves) when there is no readable
+    /// credential — mirrors [`Self::recheck_tier`]'s precondition handling.
+    pub fn request_recent_tracks(&mut self, limit: u8) -> RequestId {
+        let request_id = self.next_request_id();
+        if let Some(credential) = self.stored_credential() {
+            self.spawn_recent_tracks_worker(
+                self.attempt_id,
+                request_id,
+                credential.access_token,
+                limit,
+            );
+        }
+        request_id
+    }
+
+    /// Request the other Connect device's playback state (the transfer
+    /// banner's device name, FR-016/019; research R3, R9). A no-op (the
+    /// returned id never resolves) when there is no readable credential.
+    pub fn request_playback_state(&mut self) -> RequestId {
+        let request_id = self.next_request_id();
+        if let Some(credential) = self.stored_credential() {
+            self.spawn_playback_state_worker(self.attempt_id, request_id, credential.access_token);
+        }
+        request_id
+    }
+
+    /// The current credential's access token, read from the secure store on
+    /// demand (contracts/account-read-delta.md §3) — used by the binary's
+    /// `ReceiverCredentials` implementation to hand librespot a token
+    /// without this crate depending on the receiver crate. Never logged.
+    pub fn access_token(&self) -> Option<String> {
+        self.stored_credential()
+            .map(|credential| credential.access_token)
+    }
+
+    fn next_request_id(&mut self) -> RequestId {
+        self.next_request_id += 1;
+        RequestId(self.next_request_id)
+    }
+
+    fn spawn_recent_tracks_worker(
+        &self,
+        attempt_id: u64,
+        request_id: RequestId,
+        access_token: String,
+        limit: u8,
+    ) {
+        let auth = Arc::clone(&self.auth);
+        let tx = self.worker_tx.clone();
+        let fallback_tx = tx.clone();
+        let spawned = thread::Builder::new()
+            .name("account-recent-tracks".to_string())
+            .spawn(move || {
+                let result = match auth.fetch_recently_played(&access_token, limit) {
+                    Ok(tracks) if tracks.is_empty() => {
+                        auth.fetch_saved_tracks(&access_token, limit)
+                    }
+                    other => other,
+                };
+                let _ = tx.send(WorkerEvent::RecentTracks {
+                    attempt_id,
+                    request_id,
+                    result,
+                });
+            });
+        if spawned.is_err() {
+            let _ = fallback_tx.send(WorkerEvent::RecentTracks {
+                attempt_id,
+                request_id,
+                result: Err(AuthError::Transient),
+            });
+        }
+    }
+
+    fn spawn_playback_state_worker(
+        &self,
+        attempt_id: u64,
+        request_id: RequestId,
+        access_token: String,
+    ) {
+        let auth = Arc::clone(&self.auth);
+        let tx = self.worker_tx.clone();
+        let fallback_tx = tx.clone();
+        let spawned = thread::Builder::new()
+            .name("account-playback-state".to_string())
+            .spawn(move || {
+                let result = auth.fetch_playback_state(&access_token);
+                let _ = tx.send(WorkerEvent::PlaybackState {
+                    attempt_id,
+                    request_id,
+                    result,
+                });
+            });
+        if spawned.is_err() {
+            let _ = fallback_tx.send(WorkerEvent::PlaybackState {
+                attempt_id,
+                request_id,
+                result: Err(AuthError::Transient),
+            });
+        }
+    }
+
     /// Sign out (contracts/account-session.md "Commands" `sign_out()`,
     /// FR-015, FR-019, SC-003). Precondition: state ∈ {`Active`, `Expired`,
     /// `StoreUnreadable`}. Bumps `attempt_id` *first* so any
@@ -691,6 +840,30 @@ impl AccountService {
                 WorkerEvent::Refresh { attempt_id, result } => {
                     events.extend(self.handle_refresh_result(attempt_id, result));
                 }
+                WorkerEvent::RecentTracks {
+                    attempt_id,
+                    request_id,
+                    result,
+                } => {
+                    if attempt_id == self.attempt_id {
+                        events.push(AccountEvent::ReadResult {
+                            request_id,
+                            result: ReadOutcome::RecentTracks(result),
+                        });
+                    }
+                }
+                WorkerEvent::PlaybackState {
+                    attempt_id,
+                    request_id,
+                    result,
+                } => {
+                    if attempt_id == self.attempt_id {
+                        events.push(AccountEvent::ReadResult {
+                            request_id,
+                            result: ReadOutcome::PlaybackState(result),
+                        });
+                    }
+                }
             }
         }
 
@@ -766,13 +939,20 @@ impl AccountService {
     fn spawn_exchange_worker(&self, attempt_id: u64, pending: PendingAuthorization, code: String) {
         let auth = Arc::clone(&self.auth);
         let tx = self.worker_tx.clone();
+        let fallback_tx = tx.clone();
         let redirect_uri = format!("http://127.0.0.1:{}{REDIRECT_PATH}", pending.port);
-        let _ = thread::Builder::new()
+        let spawned = thread::Builder::new()
             .name("account-exchange".to_string())
             .spawn(move || {
                 let result = auth.exchange_code(&code, &pending.pkce_verifier, &redirect_uri);
                 let _ = tx.send(WorkerEvent::Exchange { attempt_id, result });
             });
+        if spawned.is_err() {
+            let _ = fallback_tx.send(WorkerEvent::Exchange {
+                attempt_id,
+                result: Err(AuthError::Transient),
+            });
+        }
     }
 
     /// `account-exchange` worker result (contracts/authorization-
@@ -850,12 +1030,19 @@ impl AccountService {
         self.tier_check_in_flight = true;
         let auth = Arc::clone(&self.auth);
         let tx = self.worker_tx.clone();
-        let _ = thread::Builder::new()
+        let fallback_tx = tx.clone();
+        let spawned = thread::Builder::new()
             .name("account-tier".to_string())
             .spawn(move || {
                 let result = auth.fetch_profile(&access_token);
                 let _ = tx.send(WorkerEvent::Tier { attempt_id, result });
             });
+        if spawned.is_err() {
+            let _ = fallback_tx.send(WorkerEvent::Tier {
+                attempt_id,
+                result: Err(AuthError::Transient),
+            });
+        }
     }
 
     /// `account-tier` worker result (T062): maps the profile to a `Tier`
@@ -948,12 +1135,19 @@ impl AccountService {
     fn spawn_refresh_worker(&self, attempt_id: u64, refresh_token: String) {
         let auth = Arc::clone(&self.auth);
         let tx = self.worker_tx.clone();
-        let _ = thread::Builder::new()
+        let fallback_tx = tx.clone();
+        let spawned = thread::Builder::new()
             .name("account-refresh".to_string())
             .spawn(move || {
                 let result = auth.refresh(&refresh_token);
                 let _ = tx.send(WorkerEvent::Refresh { attempt_id, result });
             });
+        if spawned.is_err() {
+            let _ = fallback_tx.send(WorkerEvent::Refresh {
+                attempt_id,
+                result: Err(AuthError::Transient),
+            });
+        }
     }
 
     /// `account-refresh` worker result (contracts/account-session.md

@@ -11,7 +11,11 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::auth_service::{AuthError, AuthorizationService, Profile, TokenSet};
+use modplayer_audio_source::TrackRef;
+
+use crate::auth_service::{
+    AuthError, AuthorizationService, PlaybackStateSummary, Profile, TokenSet,
+};
 use crate::pending::PendingAuthorization;
 
 /// One scripted call: which result to return, and how long the caller
@@ -51,6 +55,9 @@ pub enum LoggedCall {
     ExchangeCode,
     Refresh,
     FetchProfile,
+    FetchRecentlyPlayed,
+    FetchSavedTracks,
+    FetchPlaybackState,
 }
 
 /// Simulates the user's browser: called with the built authorization URL
@@ -62,6 +69,9 @@ struct Script {
     exchange_code: Vec<ScriptedCall<TokenSet>>,
     refresh: Vec<ScriptedCall<TokenSet>>,
     fetch_profile: Vec<ScriptedCall<Profile>>,
+    fetch_recently_played: Vec<ScriptedCall<Vec<TrackRef>>>,
+    fetch_saved_tracks: Vec<ScriptedCall<Vec<TrackRef>>>,
+    fetch_playback_state: Vec<ScriptedCall<Option<PlaybackStateSummary>>>,
     log: Vec<LoggedCall>,
     browser: Option<BrowserHook>,
 }
@@ -103,6 +113,21 @@ impl FakeAuthorizationService {
     /// Queue the result (and optional delay) for the next `fetch_profile` call.
     pub fn push_fetch_profile(&self, call: ScriptedCall<Profile>) {
         self.lock().fetch_profile.push(call);
+    }
+
+    /// Queue the result for the next `fetch_recently_played` call.
+    pub fn push_recently_played(&self, call: ScriptedCall<Vec<TrackRef>>) {
+        self.lock().fetch_recently_played.push(call);
+    }
+
+    /// Queue the result for the next `fetch_saved_tracks` call.
+    pub fn push_saved_tracks(&self, call: ScriptedCall<Vec<TrackRef>>) {
+        self.lock().fetch_saved_tracks.push(call);
+    }
+
+    /// Queue the result for the next `fetch_playback_state` call.
+    pub fn push_playback_state(&self, call: ScriptedCall<Option<PlaybackStateSummary>>) {
+        self.lock().fetch_playback_state.push(call);
     }
 
     /// Every call made so far, in order.
@@ -186,6 +211,35 @@ impl AuthorizationService for FakeAuthorizationService {
         let mut inner = self.lock();
         inner.log.push(LoggedCall::FetchProfile);
         pop_scripted(&mut inner.fetch_profile)
+    }
+
+    fn fetch_recently_played(
+        &self,
+        _access_token: &str,
+        _limit: u8,
+    ) -> Result<Vec<TrackRef>, AuthError> {
+        let mut inner = self.lock();
+        inner.log.push(LoggedCall::FetchRecentlyPlayed);
+        pop_scripted(&mut inner.fetch_recently_played)
+    }
+
+    fn fetch_saved_tracks(
+        &self,
+        _access_token: &str,
+        _limit: u8,
+    ) -> Result<Vec<TrackRef>, AuthError> {
+        let mut inner = self.lock();
+        inner.log.push(LoggedCall::FetchSavedTracks);
+        pop_scripted(&mut inner.fetch_saved_tracks)
+    }
+
+    fn fetch_playback_state(
+        &self,
+        _access_token: &str,
+    ) -> Result<Option<PlaybackStateSummary>, AuthError> {
+        let mut inner = self.lock();
+        inner.log.push(LoggedCall::FetchPlaybackState);
+        pop_scripted(&mut inner.fetch_playback_state)
     }
 }
 

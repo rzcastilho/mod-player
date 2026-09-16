@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use modplayer_core::settings::{
-    AudioSettings, DisclosureAcknowledgement, SettingsStore, SettingsWarning,
+    AudioSettings, DeviceName, DisclosureAcknowledgement, InvalidField, SettingsStore,
+    SettingsWarning, generate_connect_device_id,
 };
 use modplayer_engine::{BufferPreset, VolumePercent};
 
@@ -162,4 +163,103 @@ fn unknown_key_and_newer_schema_version_behave_as_contracted() {
 
     let after = fs::read_to_string(newer_store.path()).unwrap_or_default();
     assert_eq!(before, after, "load() must not rewrite a newer-schema file");
+}
+
+#[test]
+fn playback_section_round_trips_through_the_file() {
+    // contracts/transport-and-queue.md §5: `[playback] device_name` /
+    // `connect_device_id` must survive a real save/load through
+    // `settings.toml`, not just the in-memory `RawSettings` conversion.
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let settings = AudioSettings {
+        device_name: DeviceName::parse("Studio Mac").unwrap_or_default(),
+        connect_device_id: Some("0123456789abcdef0123456789abcdef".to_string()),
+        ..AudioSettings::default()
+    };
+    assert!(store.save(&settings).is_ok());
+
+    let outcome = store.load();
+    assert_eq!(outcome.settings, settings);
+    assert_eq!(outcome.warning, None);
+
+    let on_disk = fs::read_to_string(store.path()).unwrap_or_default();
+    assert!(
+        on_disk.contains("[playback]") && on_disk.contains("Studio Mac"),
+        "settings.toml must persist the [playback] section, got:\n{on_disk}"
+    );
+}
+
+#[test]
+fn absent_playback_section_means_default_device_name() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let _ = fs::write(store.path(), "schema_version = 1\n");
+    let outcome = store.load();
+    assert_eq!(outcome.warning, None);
+    assert_eq!(outcome.settings.device_name, None);
+    assert_eq!(outcome.settings.connect_device_id, None);
+}
+
+#[test]
+fn device_name_over_64_chars_falls_back_to_default_with_a_warning() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let too_long = "x".repeat(65);
+    let content = format!("schema_version = 1\n\n[playback]\ndevice_name = \"{too_long}\"\n");
+    let _ = fs::write(store.path(), content);
+
+    let outcome = store.load();
+    assert_eq!(outcome.settings.device_name, None);
+    assert_eq!(
+        outcome.warning,
+        Some(SettingsWarning::InvalidValue(vec![
+            InvalidField::DeviceName
+        ]))
+    );
+}
+
+#[test]
+fn empty_device_name_means_default_with_no_warning() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let content = "schema_version = 1\n\n[playback]\ndevice_name = \"   \"\n";
+    let _ = fs::write(store.path(), content);
+
+    let outcome = store.load();
+    assert_eq!(outcome.settings.device_name, None);
+    assert_eq!(outcome.warning, None);
+}
+
+#[test]
+fn malformed_connect_device_id_is_dropped_silently() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let content = "schema_version = 1\n\n[playback]\nconnect_device_id = \"not-hex!\"\n";
+    let _ = fs::write(store.path(), content);
+
+    let outcome = store.load();
+    assert_eq!(outcome.settings.connect_device_id, None);
+    assert_eq!(outcome.warning, None);
+}
+
+#[test]
+fn device_name_validation() {
+    assert_eq!(DeviceName::parse("").unwrap_or(None), None);
+    assert_eq!(DeviceName::parse("   ").unwrap_or(None), None);
+    assert_eq!(
+        DeviceName::parse("  Studio Mac  ")
+            .unwrap_or(None)
+            .map(|d| d.as_str().to_string()),
+        Some("Studio Mac".to_string())
+    );
+    assert!(DeviceName::parse(&"x".repeat(64)).is_ok());
+    assert!(DeviceName::parse(&"x".repeat(65)).is_err());
+}
+
+#[test]
+fn generate_connect_device_id_is_32_hex_chars() {
+    let id = generate_connect_device_id();
+    assert_eq!(id.len(), 32);
+    assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
 }
