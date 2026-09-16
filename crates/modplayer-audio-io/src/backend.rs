@@ -8,6 +8,7 @@
 
 use std::sync::mpsc::Receiver;
 
+use modplayer_audio_source::AudioSource;
 use modplayer_audio_source_synthetic::SyntheticSource;
 use modplayer_engine::{
     BufferPreset, DeviceId, FrameCount, NegotiatedBuffer, Processor, SampleRate,
@@ -86,11 +87,15 @@ pub trait OutputBackend: Send {
     /// result in `OpenStream::negotiated`. `processor` is moved into the
     /// callback and driven with `Processor::render` for every buffer until
     /// the stream is dropped.
-    fn open(
+    ///
+    /// Generic over `S` (003-streaming-playback-and-queue research R10):
+    /// `Processor<S>` carries no trait object on the real-time path
+    /// regardless of which `SourceHost::Rt` `S` a caller is using.
+    fn open<S: AudioSource>(
         &mut self,
         device: &DeviceId,
         preset: BufferPreset,
-        processor: Processor<SyntheticSource>,
+        processor: Processor<S>,
     ) -> Result<OpenStream, AudioIoError>;
 
     /// Receiver for asynchronous device events, delivered off the

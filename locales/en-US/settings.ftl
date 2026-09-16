@@ -45,3 +45,14 @@ setting-theme-dark = Dark
 setting-locale = Language
 setting-locale-desc = The language ModPlayer's interface is displayed in.
 language-english = English
+
+setting-device-name = Device name
+setting-device-name-hint = as seen by other apps on your account
+setting-device-name-desc = The name other Spotify Connect apps see for this device.
+setting-device-name-too-long = Device name must be 64 characters or fewer.
+
+setting-play-from-account = Play from account
+setting-play-from-account-desc = Fetch your recently played tracks (or saved tracks, if empty) and start playing — for testing the transport with real audio.
+play-from-account-loading = Loading…
+play-from-account-empty = No tracks were found in your account.
+play-from-account-failed = Couldn't load tracks from your account.

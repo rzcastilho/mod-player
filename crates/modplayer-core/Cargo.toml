@@ -17,6 +17,13 @@ directories.workspace = true
 fluent-templates.workspace = true
 thiserror.workspace = true
 rtrb.workspace = true
+# Seeds the in-crate xorshift RNG for `Queue::set_shuffle` (research: "no
+# `rand` dependency"); the actual shuffling algorithm stays hand-rolled.
+getrandom.workspace = true
 # `formatting`/`parsing`: `[disclosure].acknowledged_at`'s RFC 3339
 # timestamp (002-first-launch-and-sign-in, DM-27).
 time = { workspace = true, features = ["formatting", "parsing"] }
+
+[dev-dependencies]
+# SC-011: queue operation-sequence proptests (research: Dependency additions).
+proptest.workspace = true

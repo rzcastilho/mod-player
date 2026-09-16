@@ -9,13 +9,23 @@
 //! `track.rs` sequences the four looping segments (US2 T059); `tone.rs` is
 //! the first-launch/device-check test tone (US1). Both build on the
 //! oscillator primitives in `osc.rs`.
+//!
+//! `host.rs`/`scripted.rs` (003-streaming-playback-and-queue) add the
+//! `SourceHost` implementors that prove the seam is additive:
+//! `SyntheticHost` (this crate's own source, production default) and
+//! `ScriptedHost` (a public test double used across crates, as 002 did
+//! with `FakeAuthorizationService`).
 
+pub mod host;
 pub mod osc;
+pub mod scripted;
 pub mod tone;
 pub mod track;
 
 use modplayer_audio_source::AudioSource;
 
+pub use host::SyntheticHost;
+pub use scripted::{ScriptedHost, ScriptedHostHandle, ScriptedRt};
 pub use tone::TestTone;
 
 /// The built-in deterministic synthetic test track (contracts/audio-source.md):

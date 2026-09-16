@@ -13,6 +13,7 @@
 use egui::{Ui, ViewportCommand};
 use modplayer_account::{DISCLOSURE_BUNDLE_VERSION, TERMS_URL};
 use modplayer_audio_io::OutputBackend;
+use modplayer_audio_source::SourceHost;
 use modplayer_core::{DisclosureAcknowledgement, PlaybackController, Severity, tr};
 
 use crate::privacy_notice;
@@ -55,10 +56,10 @@ impl WelcomeScreen {
     /// Draw the current sub-view. Returns `Some(Acknowledged)` the frame
     /// the acknowledge action is recorded; `None` otherwise (including
     /// every frame of the Decline/Privacy sub-views).
-    pub fn show<B: OutputBackend>(
+    pub fn show<B: OutputBackend, H: SourceHost>(
         &mut self,
         ui: &mut Ui,
-        controller: &mut PlaybackController<B>,
+        controller: &mut PlaybackController<B, H>,
     ) -> Option<WelcomeOutcome> {
         match self.view {
             View::Disclosure => self.show_disclosure(ui, controller),
@@ -75,10 +76,10 @@ impl WelcomeScreen {
         }
     }
 
-    fn show_disclosure<B: OutputBackend>(
+    fn show_disclosure<B: OutputBackend, H: SourceHost>(
         &mut self,
         ui: &mut Ui,
-        controller: &mut PlaybackController<B>,
+        controller: &mut PlaybackController<B, H>,
     ) -> Option<WelcomeOutcome> {
         ui.heading(tr("welcome-title"));
         ui.label(tr("welcome-description"));
@@ -129,7 +130,7 @@ pub fn handle_decline(ctx: &egui::Context) {
 /// same load-mutate-save pattern), raising `settings-save-failed` and still
 /// proceeding — an unsaved acknowledgement re-shows Welcome next launch,
 /// which is safe, but must never block this launch.
-fn acknowledge<B: OutputBackend>(controller: &mut PlaybackController<B>) {
+fn acknowledge<B: OutputBackend, H: SourceHost>(controller: &mut PlaybackController<B, H>) {
     let mut settings = controller.settings_store().load().settings;
     settings.disclosure = Some(DisclosureAcknowledgement::now(DISCLOSURE_BUNDLE_VERSION));
     if controller.settings_store().save(&settings).is_err() {

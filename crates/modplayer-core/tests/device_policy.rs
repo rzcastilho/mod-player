@@ -12,9 +12,27 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use modplayer_audio_io::FakeBackend;
+use modplayer_audio_source::{Availability, TrackId, TrackRef};
+use modplayer_audio_source_synthetic::SyntheticHost;
 use modplayer_core::settings::SettingsStore;
 use modplayer_core::{PlaybackController, Severity};
 use modplayer_engine::{BufferPreset, DeviceId, SampleRate, Transport};
+
+/// A single fixture track (003 T047 changed `play()` to require a current
+/// queue item, contracts/transport-and-queue.md §2 rule T1) — this file's
+/// tests only care about device/stream rebuild behaviour, not queue
+/// content, so one arbitrary track is enough to make `play()` proceed.
+fn fixture_track() -> TrackRef {
+    TrackRef::new(
+        TrackId::new("spotify:track:fixture").unwrap_or_else(|_| unreachable!()),
+        "Fixture",
+        vec!["Fixture Artist".to_string()],
+        None,
+        None,
+        180_000,
+        Availability::Available,
+    )
+}
 
 /// A minimal self-cleaning temp directory (no `tempfile` dependency),
 /// mirroring `tests/settings.rs`'s isolation approach.
@@ -66,7 +84,8 @@ fn fake_device(id: &str, name: &str, is_default: bool) -> modplayer_audio_io::Fa
 fn fresh_install_previews_default_and_auto_plays_test_tone() {
     let (store, _dir) = fresh_store();
     let devices = vec![fake_device("dev-1", "Speakers", true)];
-    let mut controller = PlaybackController::new(FakeBackend::new(devices), store);
+    let mut controller =
+        PlaybackController::new(FakeBackend::new(devices), SyntheticHost::new(44_100), store);
 
     controller.launch();
 
@@ -102,7 +121,11 @@ fn yes_persists_device_and_skips_device_check_next_launch() {
     let (store, _dir) = fresh_store();
     let devices = vec![fake_device("dev-1", "Speakers", true)];
 
-    let mut controller = PlaybackController::new(FakeBackend::new(devices.clone()), store.clone());
+    let mut controller = PlaybackController::new(
+        FakeBackend::new(devices.clone()),
+        SyntheticHost::new(44_100),
+        store.clone(),
+    );
     controller.launch();
     let confirmed_id = DeviceId::new("dev-1").unwrap_or_else(|| unreachable!());
     controller.confirm_device(confirmed_id.clone(), BufferPreset::Performance);
@@ -112,7 +135,8 @@ fn yes_persists_device_and_skips_device_check_next_launch() {
     assert!(controller.device_confirmed());
 
     // Simulate relaunch: a brand-new controller loading the same settings file.
-    let mut relaunched = PlaybackController::new(FakeBackend::new(devices), store);
+    let mut relaunched =
+        PlaybackController::new(FakeBackend::new(devices), SyntheticHost::new(44_100), store);
     relaunched.launch();
 
     assert!(
@@ -132,13 +156,18 @@ fn skip_for_now_leaves_unconfirmed_and_device_check_reappears() {
     let (store, _dir) = fresh_store();
     let devices = vec![fake_device("dev-1", "Speakers", true)];
 
-    let mut controller = PlaybackController::new(FakeBackend::new(devices.clone()), store.clone());
+    let mut controller = PlaybackController::new(
+        FakeBackend::new(devices.clone()),
+        SyntheticHost::new(44_100),
+        store.clone(),
+    );
     controller.launch();
     controller.skip_device_check();
 
     assert!(!controller.device_confirmed());
 
-    let mut relaunched = PlaybackController::new(FakeBackend::new(devices), store);
+    let mut relaunched =
+        PlaybackController::new(FakeBackend::new(devices), SyntheticHost::new(44_100), store);
     relaunched.launch();
 
     assert!(
@@ -151,7 +180,8 @@ fn skip_for_now_leaves_unconfirmed_and_device_check_reappears() {
 #[test]
 fn zero_devices_at_launch_is_empty_state_with_no_tone_and_critical_notice() {
     let (store, _dir) = fresh_store();
-    let mut controller = PlaybackController::new(FakeBackend::new(vec![]), store);
+    let mut controller =
+        PlaybackController::new(FakeBackend::new(vec![]), SyntheticHost::new(44_100), store);
 
     controller.launch();
 
@@ -180,7 +210,8 @@ fn zero_devices_at_launch_is_empty_state_with_no_tone_and_critical_notice() {
 #[test]
 fn zero_devices_at_launch() {
     let (store, _dir) = fresh_store();
-    let mut controller = PlaybackController::new(FakeBackend::new(vec![]), store);
+    let mut controller =
+        PlaybackController::new(FakeBackend::new(vec![]), SyntheticHost::new(44_100), store);
 
     controller.launch();
 
@@ -207,6 +238,7 @@ fn missing_preferred_at_launch_uses_default_with_warning() {
     {
         let mut controller = PlaybackController::new(
             FakeBackend::new(vec![fake_device("missing-dev", "Old Interface", true)]),
+            SyntheticHost::new(44_100),
             store.clone(),
         );
         controller.launch();
@@ -215,7 +247,8 @@ fn missing_preferred_at_launch_uses_default_with_warning() {
 
     // Relaunch with a different device list — the preferred device is gone.
     let devices = vec![fake_device("dev-2", "Built-in Speakers", true)];
-    let mut controller = PlaybackController::new(FakeBackend::new(devices), store);
+    let mut controller =
+        PlaybackController::new(FakeBackend::new(devices), SyntheticHost::new(44_100), store);
     controller.launch();
 
     assert!(
@@ -251,9 +284,11 @@ fn fallback_on_device_lost() {
         fake_device("dev-1", "USB Interface", true),
         fake_device("dev-2", "Built-in Speakers", false),
     ];
-    let mut controller = PlaybackController::new(FakeBackend::new(devices), store);
+    let mut controller =
+        PlaybackController::new(FakeBackend::new(devices), SyntheticHost::new(44_100), store);
     controller.launch();
     controller.confirm_device(lost_id.clone(), BufferPreset::Balanced);
+    controller.queue_replace(vec![fixture_track()]);
     controller.play();
 
     controller.backend_mut().render_buffers(5);
@@ -309,9 +344,11 @@ fn pause_when_no_device_remains() {
     let (store, _dir) = fresh_store();
     let only_id = DeviceId::new("dev-1").unwrap_or_else(|| unreachable!());
     let devices = vec![fake_device("dev-1", "Only Output", true)];
-    let mut controller = PlaybackController::new(FakeBackend::new(devices), store);
+    let mut controller =
+        PlaybackController::new(FakeBackend::new(devices), SyntheticHost::new(44_100), store);
     controller.launch();
     controller.confirm_device(only_id.clone(), BufferPreset::Balanced);
+    controller.queue_replace(vec![fixture_track()]);
     controller.play();
     controller.backend_mut().render_buffers(3);
     let position_before = controller.shared().position_frames();
@@ -348,7 +385,8 @@ fn no_switch_back_on_reappear() {
         fake_device("dev-1", "USB Interface", true),
         fake_device("dev-2", "Built-in Speakers", false),
     ];
-    let mut controller = PlaybackController::new(FakeBackend::new(devices), store);
+    let mut controller =
+        PlaybackController::new(FakeBackend::new(devices), SyntheticHost::new(44_100), store);
     controller.launch();
     controller.confirm_device(lost_id.clone(), BufferPreset::Balanced);
 
@@ -416,9 +454,11 @@ fn rate_change_rebuilds_output_stage_only() {
     let (store, _dir) = fresh_store();
     let dev_id = DeviceId::new("dev-1").unwrap_or_else(|| unreachable!());
     let devices = vec![fake_device("dev-1", "Interface", true)];
-    let mut controller = PlaybackController::new(FakeBackend::new(devices), store);
+    let mut controller =
+        PlaybackController::new(FakeBackend::new(devices), SyntheticHost::new(44_100), store);
     controller.launch();
     controller.confirm_device(dev_id.clone(), BufferPreset::Balanced);
+    controller.queue_replace(vec![fixture_track()]);
     controller.play();
     controller.backend_mut().render_buffers(5);
     let clock_before = controller.shared().clock_frames();

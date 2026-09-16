@@ -7,6 +7,7 @@ mod model;
 mod store;
 
 pub use model::{
-    AudioSettings, DisclosureAcknowledgement, InvalidField, RawSettings, SCHEMA_VERSION,
+    AudioSettings, DeviceName, DeviceNameError, DisclosureAcknowledgement, InvalidField,
+    RawSettings, SCHEMA_VERSION, generate_connect_device_id,
 };
 pub use store::{CONFIG_DIR_ENV, LoadOutcome, SaveError, SettingsStore, SettingsWarning};

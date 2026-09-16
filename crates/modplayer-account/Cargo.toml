@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 modplayer-secure-store = { path = "../modplayer-secure-store", version = "0.1.0" }
+modplayer-audio-source = { path = "../modplayer-audio-source", version = "0.1.0" }
 ureq.workspace = true
 serde.workspace = true
 serde_json.workspace = true

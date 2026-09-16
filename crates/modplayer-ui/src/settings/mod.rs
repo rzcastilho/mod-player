@@ -14,9 +14,12 @@ pub mod audio;
 pub mod developer;
 pub mod language;
 
+pub mod playback;
+
 use egui::{Id, Key, TextEdit, Ui};
 use modplayer_account::{AccountEvent, AccountService};
 use modplayer_audio_io::OutputBackend;
+use modplayer_audio_source::SourceHost;
 use modplayer_core::settings_registry::{self, SettingsCategory};
 use modplayer_core::{AudioSettings, PlaybackController, tr};
 
@@ -38,20 +41,41 @@ pub struct SettingsScreen {
     focus_target: Option<&'static str>,
     cached_settings: AudioSettings,
     about: AboutScreen,
+    playback: playback::PlaybackScreen,
+    developer_play_from_account: developer::PlayFromAccountState,
 }
 
 impl SettingsScreen {
     /// Open the Settings screen on its first (fixed-order) category,
     /// loading the settings-store snapshot `audio.rs`/`appearance.rs` cache
     /// locally.
-    pub fn new<B: OutputBackend>(controller: &PlaybackController<B>) -> Self {
+    pub fn new<B: OutputBackend, H: SourceHost>(controller: &PlaybackController<B, H>) -> Self {
         Self {
             category: SettingsCategory::ALL[0],
             search_query: String::new(),
             focus_target: None,
             cached_settings: controller.settings_store().load().settings,
             about: AboutScreen::default(),
+            playback: playback::PlaybackScreen::new(controller),
+            developer_play_from_account: developer::PlayFromAccountState::default(),
         }
+    }
+
+    /// React to a `PlaybackController::take_account_tracks` reply for the
+    /// Developer screen's "Play from account" (Stage 2, spec Amendment
+    /// 2026-09-16) — called by `App` regardless of which Settings category
+    /// is currently shown, since the request may resolve on a later frame
+    /// than the one the screen was open on.
+    pub fn handle_account_tracks_result(
+        &mut self,
+        request_id: u64,
+        result: &Result<
+            Vec<modplayer_audio_source::TrackRef>,
+            modplayer_audio_source::AccountReadError,
+        >,
+    ) -> developer::PlayFromAccountOutcome {
+        self.developer_play_from_account
+            .handle_account_tracks(request_id, result)
     }
 }
 
@@ -62,9 +86,9 @@ impl SettingsScreen {
 /// `AccountEvent`s the Account category's Sign in/Sign out commands raised
 /// this frame (US3 T085/T086/T087) for the caller to map to notifications/
 /// screens.
-pub fn show<B: OutputBackend>(
+pub fn show<B: OutputBackend, H: SourceHost>(
     ui: &mut Ui,
-    controller: &mut PlaybackController<B>,
+    controller: &mut PlaybackController<B, H>,
     account: &mut AccountService,
     screen: &mut SettingsScreen,
 ) -> (Option<DeviceCheckScreen>, Vec<AccountEvent>) {
@@ -124,7 +148,12 @@ pub fn show<B: OutputBackend>(
             (None, Vec::new())
         }
         SettingsCategory::Developer => {
-            developer::show(ui, controller);
+            developer::show(
+                ui,
+                controller,
+                account,
+                &mut screen.developer_play_from_account,
+            );
             (None, Vec::new())
         }
         SettingsCategory::Account => (None, account::show(ui, account)),
@@ -132,8 +161,11 @@ pub fn show<B: OutputBackend>(
             about::show(ui, &mut screen.about);
             (None, Vec::new())
         }
-        SettingsCategory::Playback
-        | SettingsCategory::Controls
+        SettingsCategory::Playback => {
+            playback::show(ui, controller, &mut screen.playback, focus);
+            (None, Vec::new())
+        }
+        SettingsCategory::Controls
         | SettingsCategory::Plugins
         | SettingsCategory::Offline
         | SettingsCategory::PrivacyDiagnostics => {

@@ -6,6 +6,21 @@
 //! data enters the ModPlayer real-time engine (Constitution Principle IV).
 //!
 //! See `specs/001-walking-skeleton/contracts/audio-source.md`.
+//!
+//! `host` and `types` (003-streaming-playback-and-queue) add the additive
+//! off-real-time half of the seam (`SourceHost`, `SourceCommand`,
+//! `SourceEvent`, ...) without changing `AudioSource` itself
+//! (contracts/audio-source-host.md).
+
+pub mod host;
+pub mod types;
+
+pub use host::{SourceHost, SourceRtShared};
+pub use types::{
+    AccountReadError, Availability, BufferStatus, Intent, Program, RemoteCommand, Repeat,
+    SourceCommand, SourceEvent, SourceHealth, TrackId, TrackIdError, TrackRef, TransferContext,
+    VolumePercent,
+};
 
 /// A producer of interleaved stereo `f32` frames at its own fixed sample rate.
 ///

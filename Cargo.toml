@@ -28,3 +28,16 @@ getrandom = "0.3"
 time = "0.3"
 # Dev-only: Constitution VIII state-serialization proptests (modplayer-account).
 proptest = "1"
+# Receiver crate only (modplayer-audio-source-connect): Connect protocol
+# implementation (research R1). No default features; TLS via rustls with
+# webpki bundled roots to match the rest of the workspace's TLS stack.
+librespot-core = { version = "0.8", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-connect = { version = "0.8", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-playback = { version = "0.8", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-audio = { version = "0.8", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-metadata = { version = "0.8", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-protocol = "0.8"
+protobuf = "3.7"
+# Required by librespot's Session/Spirc/Player, confined to the receiver
+# crate's dedicated worker thread (research R1).
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }

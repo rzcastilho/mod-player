@@ -25,7 +25,9 @@ pub mod session;
 pub mod spotify;
 pub mod state_store;
 
-pub use auth_service::{AuthError, AuthorizationService, ClientConfig, Profile, TokenSet};
+pub use auth_service::{
+    AuthError, AuthorizationService, ClientConfig, PlaybackStateSummary, Profile, TokenSet,
+};
 pub use clock::{Clock, FakeClock, SystemClock};
 pub use credential::{CredentialPayloadError, SessionCredential};
 pub use disclosure::{DISCLOSURE_BUNDLE_VERSION, DISCLOSURE_EN_US_SHA256, TERMS_URL, UPGRADE_URL};
@@ -35,7 +37,7 @@ pub use pending::PendingAuthorization;
 pub use pkce::PkceMaterial;
 pub use refresh::RefreshScheduler;
 pub use registry::{AccountScopedStore, ClearError, CredentialStore};
-pub use service::{AccountEvent, AccountService, LaunchOutcome};
+pub use service::{AccountEvent, AccountService, LaunchOutcome, ReadOutcome, RequestId};
 pub use session::{AccountSession, SessionState, SignInNote, Tier};
 pub use spotify::SpotifyAuthorizationService;
 pub use state_store::{AccountStateStore, LoadOutcome, PersistedAccount};

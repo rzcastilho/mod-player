@@ -12,6 +12,7 @@ pub mod command;
 pub mod event;
 pub mod limiter;
 pub mod output_stage;
+pub mod position_clock;
 pub mod processor;
 pub mod resample;
 pub mod shared;
@@ -21,8 +22,9 @@ pub use command::Command;
 pub use event::Event;
 pub use limiter::Limiter;
 pub use output_stage::OutputStage;
+pub use position_clock::PositionClock;
 pub use processor::{Processor, ProcessorConfig};
-pub use shared::RtShared;
+pub use shared::{AnchorSnapshot, RtShared};
 pub use types::{
     BufferPreset, CeilingDb, DeviceId, FrameCount, NegotiatedBuffer, SafeVolume, SampleRate, Theme,
     Transport, VolumePercent,

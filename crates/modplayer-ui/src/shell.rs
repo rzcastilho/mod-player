@@ -408,8 +408,10 @@ mod tests {
     /// fresh temp `settings.toml` — enough to draw `WelcomeScreen` without
     /// touching real audio devices (mirrors `settings/developer.rs`'s own
     /// test fixture).
-    fn fresh_playback_controller()
-    -> modplayer_core::PlaybackController<modplayer_audio_io::FakeBackend> {
+    fn fresh_playback_controller() -> modplayer_core::PlaybackController<
+        modplayer_audio_io::FakeBackend,
+        modplayer_audio_source_synthetic::SyntheticHost,
+    > {
         use modplayer_core::SettingsStore;
         use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -423,6 +425,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         modplayer_core::PlaybackController::new(
             modplayer_audio_io::FakeBackend::new(vec![]),
+            modplayer_audio_source_synthetic::SyntheticHost::new(44_100),
             SettingsStore::with_path(dir.join("settings.toml")),
         )
     }

@@ -4,3 +4,7 @@
 
 # Security-sensitive credential storage adapter (Constitution VI).
 /crates/modplayer-secure-store/ @rzcastilho
+
+# Sole importer of librespot-* / the Connect protocol (Constitution IV);
+# receiver maintainer sign-off.
+/crates/modplayer-audio-source-connect/ @rzcastilho

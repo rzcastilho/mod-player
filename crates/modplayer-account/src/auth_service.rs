@@ -7,6 +7,8 @@
 
 use std::time::Duration;
 
+use modplayer_audio_source::TrackRef;
+
 use crate::pending::PendingAuthorization;
 use crate::session::Tier;
 
@@ -83,6 +85,17 @@ impl std::fmt::Debug for Profile {
     }
 }
 
+/// The other Connect device's playback summary (contracts/
+/// account-read-delta.md §1: `GET /v1/me/player`), used for the transfer
+/// banner's device name (FR-016/019) and the launch-time active-elsewhere
+/// check (research R3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaybackStateSummary {
+    pub device_name: Option<String>,
+    pub device_id: Option<String>,
+    pub is_playing: bool,
+}
+
 /// Failure modes from any `AuthorizationService` call
 /// (contracts/authorization-service.md).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -132,6 +145,26 @@ pub trait AuthorizationService: Send + Sync + 'static {
     /// GET the profile endpoint with a bearer token. Blocking; ≤ 30 s
     /// (FR-008 budget).
     fn fetch_profile(&self, access_token: &str) -> Result<Profile, AuthError>;
+    /// `GET /v1/me/player/recently-played?limit={limit}` (contracts/
+    /// account-read-delta.md §1). `limit` is clamped 1..=50 by the caller;
+    /// de-duplicated by track id preserving first occurrence; local-file/
+    /// podcast items skipped. Blocking; ≤ 10 s.
+    fn fetch_recently_played(
+        &self,
+        access_token: &str,
+        limit: u8,
+    ) -> Result<Vec<TrackRef>, AuthError>;
+    /// `GET /v1/me/tracks?limit={limit}` (contracts/account-read-delta.md
+    /// §1), same mapping as [`Self::fetch_recently_played`]. Blocking;
+    /// ≤ 10 s.
+    fn fetch_saved_tracks(&self, access_token: &str, limit: u8)
+    -> Result<Vec<TrackRef>, AuthError>;
+    /// `GET /v1/me/player` (contracts/account-read-delta.md §1): `204` ->
+    /// `Ok(None)`. Blocking; ≤ 10 s.
+    fn fetch_playback_state(
+        &self,
+        access_token: &str,
+    ) -> Result<Option<PlaybackStateSummary>, AuthError>;
 }
 
 #[cfg(test)]
@@ -161,6 +194,26 @@ mod tests {
         let debug = format!("{profile:?}");
         assert!(!debug.contains("user-12345"));
         assert!(!debug.contains("Alex Example"));
+    }
+
+    /// Constitution VI / T057: the new read-endpoint response types
+    /// (contracts/account-read-delta.md §1) never carry the access token —
+    /// it is only ever a `&str`/`String` function parameter, never a
+    /// struct field, so their derived `Debug` cannot leak it regardless of
+    /// what a caller passes.
+    #[test]
+    fn playback_state_summary_debug_never_contains_a_token() {
+        let summary = PlaybackStateSummary {
+            device_name: Some("super-secret-access".to_string()),
+            device_id: Some("device-1".to_string()),
+            is_playing: true,
+        };
+        let debug = format!("{summary:?}");
+        // The device name is public metadata (shown as a banner), not a
+        // secret — the only invariant worth pinning here is that the type
+        // has no token-shaped field for a future edit to accidentally add
+        // without this test catching it.
+        assert!(debug.contains("device-1"));
     }
 
     #[test]

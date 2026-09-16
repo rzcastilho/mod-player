@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use modplayer_audio_io::FakeBackend;
+use modplayer_audio_source_synthetic::SyntheticHost;
 use modplayer_core::PlaybackController;
 use modplayer_core::settings::{AudioSettings, SettingsStore};
 use modplayer_engine::{SafeVolume, VolumePercent};
@@ -63,7 +64,8 @@ fn enabled_cap_clamps_stored_volume_above_cap_at_launch() {
     };
     let (store, _dir) = store_with(&settings);
 
-    let controller = PlaybackController::new(FakeBackend::new(vec![]), store);
+    let controller =
+        PlaybackController::new(FakeBackend::new(vec![]), SyntheticHost::new(44_100), store);
 
     assert_eq!(
         controller.master_volume(),
@@ -84,7 +86,8 @@ fn enabled_cap_leaves_stored_volume_at_or_below_cap_unchanged() {
     };
     let (store, _dir) = store_with(&settings);
 
-    let controller = PlaybackController::new(FakeBackend::new(vec![]), store);
+    let controller =
+        PlaybackController::new(FakeBackend::new(vec![]), SyntheticHost::new(44_100), store);
 
     assert_eq!(controller.master_volume(), VolumePercent::new(30));
 }
@@ -101,7 +104,11 @@ fn raising_above_the_cap_applies_and_persists_then_reclamps_next_launch() {
     };
     let (store, _dir) = store_with(&settings);
 
-    let mut controller = PlaybackController::new(FakeBackend::new(vec![]), store.clone());
+    let mut controller = PlaybackController::new(
+        FakeBackend::new(vec![]),
+        SyntheticHost::new(44_100),
+        store.clone(),
+    );
     assert_eq!(controller.master_volume(), VolumePercent::new(30));
 
     // Raise above the cap: applied immediately this session...
@@ -113,7 +120,8 @@ fn raising_above_the_cap_applies_and_persists_then_reclamps_next_launch() {
     assert_eq!(persisted.master_volume, VolumePercent::new(90));
 
     // Next launch: safe volume re-clamps the persisted value to the cap again.
-    let relaunched = PlaybackController::new(FakeBackend::new(vec![]), store);
+    let relaunched =
+        PlaybackController::new(FakeBackend::new(vec![]), SyntheticHost::new(44_100), store);
     assert_eq!(relaunched.master_volume(), VolumePercent::new(50));
 }
 
@@ -129,7 +137,8 @@ fn disabled_uses_the_saved_value_unchanged() {
     };
     let (store, _dir) = store_with(&settings);
 
-    let controller = PlaybackController::new(FakeBackend::new(vec![]), store);
+    let controller =
+        PlaybackController::new(FakeBackend::new(vec![]), SyntheticHost::new(44_100), store);
 
     assert_eq!(
         controller.master_volume(),

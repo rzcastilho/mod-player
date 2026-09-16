@@ -15,10 +15,12 @@ pub mod device_check;
 pub mod notifications;
 pub mod now_playing;
 pub mod privacy_notice;
+pub mod queue_view;
 pub mod settings;
 pub mod shell;
 pub mod sign_in;
 pub mod theme;
+pub mod ticker;
 pub mod welcome;
 pub mod widgets;
 

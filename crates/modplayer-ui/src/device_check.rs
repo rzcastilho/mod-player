@@ -9,6 +9,7 @@
 
 use egui::Ui;
 use modplayer_audio_io::OutputBackend;
+use modplayer_audio_source::SourceHost;
 use modplayer_core::{PlaybackController, tr};
 use modplayer_engine::{BufferPreset, DeviceId, NegotiatedBuffer, SampleRate};
 
@@ -40,10 +41,10 @@ impl DeviceCheckScreen {
     /// Draw the screen and apply the user's actions directly to
     /// `controller`. Returns `true` once the screen should close ("Yes" or
     /// "Skip for now" was chosen this frame).
-    pub fn show<B: OutputBackend>(
+    pub fn show<B: OutputBackend, H: SourceHost>(
         &mut self,
         ui: &mut Ui,
-        controller: &mut PlaybackController<B>,
+        controller: &mut PlaybackController<B, H>,
     ) -> bool {
         let devices = controller.backend().devices().unwrap_or_default();
 

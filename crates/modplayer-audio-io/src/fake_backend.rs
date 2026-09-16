@@ -7,7 +7,7 @@
 
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use modplayer_audio_source_synthetic::SyntheticSource;
+use modplayer_audio_source::AudioSource;
 use modplayer_engine::{
     BufferPreset, DeviceId, FrameCount, NegotiatedBuffer, Processor, SampleRate,
 };
@@ -46,11 +46,20 @@ struct FakeStreamHandle;
 
 impl StreamHandle for FakeStreamHandle {}
 
+/// A type-erased `processor.render()` closure, boxed so `ActiveStream` (see
+/// below) stays non-generic.
+type RenderFn = Box<dyn FnMut(&mut [f32]) + Send>;
+
+/// `render` is `processor.render()` erased behind a closure so
+/// `ActiveStream` (and `FakeBackend`) stay non-generic even though `open`
+/// is generic over any `AudioSource` (003-streaming-playback-and-queue
+/// research R10) — mirroring how a real device callback never sees the
+/// source's concrete type either.
 struct ActiveStream {
     device_id: DeviceId,
     device_channels: u16,
     negotiated: NegotiatedBuffer,
-    processor: Processor<SyntheticSource>,
+    render: RenderFn,
 }
 
 /// A scripted, in-process `OutputBackend` for tests.
@@ -86,7 +95,7 @@ impl FakeBackend {
         let mut output = Vec::with_capacity(frames * channels * n);
         let mut buffer = vec![0.0f32; frames * channels];
         for _ in 0..n {
-            active.processor.render(&mut buffer);
+            (active.render)(&mut buffer);
             output.extend_from_slice(&buffer);
         }
         output
@@ -130,11 +139,13 @@ impl FakeBackend {
         }
     }
 
-    /// Take the active stream's processor, detaching it from this backend
-    /// without emitting any event. Lets a test inspect (or rebuild from)
-    /// the processor after the stream it belonged to is gone.
-    pub fn take_processor(&mut self) -> Option<Processor<SyntheticSource>> {
-        self.active.take().map(|a| a.processor)
+    /// Detach the active stream (if any) without emitting any event.
+    /// Returns whether one was open. Erasure (see `ActiveStream::render`)
+    /// means the concrete processor can no longer be handed back; callers
+    /// that need to keep inspecting it should hold their own clone of
+    /// whatever state they care about before `open`.
+    pub fn take_processor(&mut self) -> bool {
+        self.active.take().is_some()
     }
 }
 
@@ -151,11 +162,11 @@ impl OutputBackend for FakeBackend {
             .map(FakeDevice::to_info))
     }
 
-    fn open(
+    fn open<S: AudioSource>(
         &mut self,
         device: &DeviceId,
         preset: BufferPreset,
-        processor: Processor<SyntheticSource>,
+        mut processor: Processor<S>,
     ) -> Result<OpenStream, AudioIoError> {
         let found = self
             .devices
@@ -179,7 +190,7 @@ impl OutputBackend for FakeBackend {
             device_id: found.id.clone(),
             device_channels: found.channels,
             negotiated,
-            processor,
+            render: Box::new(move |buf: &mut [f32]| processor.render(buf)),
         });
 
         Ok(OpenStream::new(negotiated, Box::new(FakeStreamHandle)))

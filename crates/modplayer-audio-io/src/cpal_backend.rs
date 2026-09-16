@@ -11,7 +11,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize as CpalBufferSize, FromSample, SampleFormat, SizedSample, StreamConfig};
-use modplayer_audio_source_synthetic::SyntheticSource;
+use modplayer_audio_source::AudioSource;
 use modplayer_engine::{
     BufferPreset, DeviceId, FrameCount, NegotiatedBuffer, Processor, RtShared, SampleRate,
 };
@@ -110,17 +110,18 @@ fn device_info(device: &cpal::Device, default_id: Option<&str>) -> Option<Output
 /// Build and start an output stream of sample type `T`, converting the
 /// engine's `f32` mix arithmetically when `T != f32` (contracts:
 /// "F32 preferred; otherwise convert ... arithmetic only").
-fn build_and_play<T>(
+fn build_and_play<T, S>(
     device: &cpal::Device,
     stream_config: &StreamConfig,
     device_channels: u16,
-    mut processor: Processor<SyntheticSource>,
+    mut processor: Processor<S>,
     shared: Arc<RtShared>,
     events_tx: Sender<BackendEvent>,
     lost_id: DeviceId,
 ) -> Result<cpal::Stream, cpal::Error>
 where
     T: SizedSample + FromSample<f32>,
+    S: AudioSource,
 {
     let first_callback = AtomicBool::new(true);
     let channels = usize::from(device_channels).max(1);
@@ -155,11 +156,11 @@ where
 
 /// The F32 direct path: no conversion, `Processor::render` writes straight
 /// into the device's callback buffer.
-fn build_and_play_f32(
+fn build_and_play_f32<S: AudioSource>(
     device: &cpal::Device,
     stream_config: &StreamConfig,
     device_channels: u16,
-    mut processor: Processor<SyntheticSource>,
+    mut processor: Processor<S>,
     shared: Arc<RtShared>,
     events_tx: Sender<BackendEvent>,
     lost_id: DeviceId,
@@ -207,11 +208,11 @@ impl OutputBackend for CpalBackend {
         }))
     }
 
-    fn open(
+    fn open<S: AudioSource>(
         &mut self,
         device_id: &DeviceId,
         preset: BufferPreset,
-        processor: Processor<SyntheticSource>,
+        processor: Processor<S>,
     ) -> Result<OpenStream, AudioIoError> {
         let device = self.find_device(device_id)?;
         let default_config =
@@ -252,7 +253,7 @@ impl OutputBackend for CpalBackend {
                 events_tx,
                 lost_id,
             ),
-            SampleFormat::I8 => build_and_play::<i8>(
+            SampleFormat::I8 => build_and_play::<i8, S>(
                 &device,
                 &stream_config,
                 device_channels,
@@ -261,7 +262,7 @@ impl OutputBackend for CpalBackend {
                 events_tx,
                 lost_id,
             ),
-            SampleFormat::I16 => build_and_play::<i16>(
+            SampleFormat::I16 => build_and_play::<i16, S>(
                 &device,
                 &stream_config,
                 device_channels,
@@ -270,7 +271,7 @@ impl OutputBackend for CpalBackend {
                 events_tx,
                 lost_id,
             ),
-            SampleFormat::I32 => build_and_play::<i32>(
+            SampleFormat::I32 => build_and_play::<i32, S>(
                 &device,
                 &stream_config,
                 device_channels,
@@ -279,7 +280,7 @@ impl OutputBackend for CpalBackend {
                 events_tx,
                 lost_id,
             ),
-            SampleFormat::I64 => build_and_play::<i64>(
+            SampleFormat::I64 => build_and_play::<i64, S>(
                 &device,
                 &stream_config,
                 device_channels,
@@ -288,7 +289,7 @@ impl OutputBackend for CpalBackend {
                 events_tx,
                 lost_id,
             ),
-            SampleFormat::U8 => build_and_play::<u8>(
+            SampleFormat::U8 => build_and_play::<u8, S>(
                 &device,
                 &stream_config,
                 device_channels,
@@ -297,7 +298,7 @@ impl OutputBackend for CpalBackend {
                 events_tx,
                 lost_id,
             ),
-            SampleFormat::U16 => build_and_play::<u16>(
+            SampleFormat::U16 => build_and_play::<u16, S>(
                 &device,
                 &stream_config,
                 device_channels,
@@ -306,7 +307,7 @@ impl OutputBackend for CpalBackend {
                 events_tx,
                 lost_id,
             ),
-            SampleFormat::U32 => build_and_play::<u32>(
+            SampleFormat::U32 => build_and_play::<u32, S>(
                 &device,
                 &stream_config,
                 device_channels,
@@ -315,7 +316,7 @@ impl OutputBackend for CpalBackend {
                 events_tx,
                 lost_id,
             ),
-            SampleFormat::U64 => build_and_play::<u64>(
+            SampleFormat::U64 => build_and_play::<u64, S>(
                 &device,
                 &stream_config,
                 device_channels,
@@ -324,7 +325,7 @@ impl OutputBackend for CpalBackend {
                 events_tx,
                 lost_id,
             ),
-            SampleFormat::F64 => build_and_play::<f64>(
+            SampleFormat::F64 => build_and_play::<f64, S>(
                 &device,
                 &stream_config,
                 device_channels,
