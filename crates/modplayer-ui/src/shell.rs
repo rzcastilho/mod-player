@@ -1,65 +1,94 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! The app shell's left-rail navigation (contracts/ui-surface.md "Main
-//! window"): four sections — Library, Now Playing, Plugins, Settings —
-//! selectable by pointer or `Ctrl/Cmd+1..4`. Drawing the four nav buttons
-//! in this fixed order also fixes their Tab focus order to match (egui's
-//! default focus order follows widget-creation order within a frame).
-//! `app.rs` owns the `CentralPanel` that renders whichever section is
-//! selected; this module only owns the rail and the two placeholder
-//! sections that have no dedicated screen yet.
+//! window"): five sections — Library, Search, Now Playing, Plugins,
+//! Settings — selectable by pointer or `Ctrl/Cmd+1..5`. Drawing the five
+//! nav buttons in this fixed order also fixes their Tab focus order to
+//! match (egui's default focus order follows widget-creation order within
+//! a frame). `app.rs` owns the `CentralPanel` that renders whichever
+//! section is selected; this module only owns the rail and the Plugins
+//! placeholder, which has no dedicated screen yet (Constitution Principle
+//! II). The Library placeholder wiring point that used to live here is
+//! dropped (004-search-and-library-browse, T026) — `app.rs` renders that
+//! section's content directly until `library_view` (US2, T063/T065)
+//! replaces it.
+//!
+//! `Section::Search` is new (004-search-and-library-browse,
+//! contracts/ui-surface.md §1): `Ctrl/Cmd+F` or `/` from anywhere jumps to
+//! it and asks the search box (`search_view.rs`, US1, T038/T039) to take
+//! focus, via `focus_search_requested`.
 
 use egui::{Key, Ui};
 use modplayer_core::tr;
 
-/// The four navigable sections (contracts/ui-surface.md), in the fixed
+/// The five navigable sections (contracts/ui-surface.md §1), in the fixed
 /// left-rail display order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     Library,
+    Search,
     NowPlaying,
     Plugins,
     Settings,
 }
 
 /// Every section with its Fluent label key, in nav-rail display order.
-const SECTIONS: [(Section, &str); 4] = [
+/// `nav-search` lands in `locales/en-US/app.ftl` with the rest of Search
+/// (US1, T040); until then it renders as the raw key (`tr`'s missing-key
+/// fallback).
+const SECTIONS: [(Section, &str); 5] = [
     (Section::Library, "nav-library"),
+    (Section::Search, "nav-search"),
     (Section::NowPlaying, "nav-now-playing"),
     (Section::Plugins, "nav-plugins"),
     (Section::Settings, "nav-settings"),
 ];
 
-/// The shell's own UI state: which section is currently selected.
+/// The shell's own UI state: which section is currently selected, and
+/// whether a global shortcut just asked the search box to take focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Shell {
     pub section: Section,
+    /// Set by `handle_shortcuts` on `Ctrl/Cmd+F` or `/`
+    /// (contracts/ui-surface.md §1); `search_view::show` (US1) consumes
+    /// and clears it to request keyboard focus on the search box the same
+    /// frame. Until that view exists, it is only ever set, never read.
+    pub focus_search_requested: bool,
 }
 
 impl Default for Shell {
     fn default() -> Self {
         Self {
             section: Section::Library,
+            focus_search_requested: false,
         }
     }
 }
 
 impl Shell {
-    /// `Ctrl/Cmd+1..4` jump directly to a section regardless of focus
-    /// (contracts/ui-surface.md). Call once per frame before drawing.
+    /// `Ctrl/Cmd+1..5` jump directly to a section regardless of focus;
+    /// `Ctrl/Cmd+F`/`/` jump to Search and request search-box focus
+    /// (contracts/ui-surface.md §1). Call once per frame before drawing.
     pub fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         ctx.input(|input| {
-            if !input.modifiers.command {
-                return;
-            }
-            if input.key_pressed(Key::Num1) {
-                self.section = Section::Library;
-            } else if input.key_pressed(Key::Num2) {
-                self.section = Section::NowPlaying;
-            } else if input.key_pressed(Key::Num3) {
-                self.section = Section::Plugins;
-            } else if input.key_pressed(Key::Num4) {
-                self.section = Section::Settings;
+            if input.modifiers.command {
+                if input.key_pressed(Key::Num1) {
+                    self.section = Section::Library;
+                } else if input.key_pressed(Key::Num2) {
+                    self.section = Section::Search;
+                } else if input.key_pressed(Key::Num3) {
+                    self.section = Section::NowPlaying;
+                } else if input.key_pressed(Key::Num4) {
+                    self.section = Section::Plugins;
+                } else if input.key_pressed(Key::Num5) {
+                    self.section = Section::Settings;
+                } else if input.key_pressed(Key::F) {
+                    self.section = Section::Search;
+                    self.focus_search_requested = true;
+                }
+            } else if input.key_pressed(Key::Slash) {
+                self.section = Section::Search;
+                self.focus_search_requested = true;
             }
         });
     }
@@ -77,12 +106,6 @@ impl Shell {
             }
         }
     }
-}
-
-/// Library placeholder content (`placeholder-library`) — the real Library
-/// screen is a later slice.
-pub fn library_placeholder(ui: &mut Ui) {
-    ui.label(tr("placeholder-library"));
 }
 
 /// Plugins placeholder content (`placeholder-plugins`) — the real Plugins
@@ -123,7 +146,6 @@ mod tests {
 
         let mut output = ctx.run_ui(RawInput::default(), |ui| {
             shell.nav_rail(ui);
-            library_placeholder(ui);
             plugins_placeholder(ui);
             crate::notifications::show(ui, &center);
         });
@@ -146,8 +168,8 @@ mod tests {
                 );
             }
         }
-        // 4 nav buttons + 3 Dismiss buttons (one per notification raised above).
-        assert_eq!(buttons_checked, 7);
+        // 5 nav buttons + 3 Dismiss buttons (one per notification raised above).
+        assert_eq!(buttons_checked, 8);
     }
 
     /// Run `render` in a fresh headless context with AccessKit enabled,

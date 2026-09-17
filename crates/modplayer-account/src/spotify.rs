@@ -506,7 +506,7 @@ fn track_ref_from_object(track: TrackObject) -> Option<TrackRef> {
         .and_then(|image| image.url);
     let duration_ms = track.duration_ms.unwrap_or(0).max(0) as u32;
     let availability = if track.is_playable == Some(false) {
-        Availability::Unavailable
+        Availability::UnavailableRegion
     } else {
         Availability::Available
     };
@@ -810,7 +810,7 @@ mod tests {
             "is_playable": false, "duration_ms": 1000, "type": "track"}}]}"#;
         let tracks = parse_track_items(body);
         assert_eq!(tracks.len(), 1);
-        assert_eq!(tracks[0].availability, Availability::Unavailable);
+        assert_eq!(tracks[0].availability, Availability::UnavailableRegion);
     }
 
     #[test]

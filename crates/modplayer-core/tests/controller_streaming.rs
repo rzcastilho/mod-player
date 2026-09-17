@@ -9,13 +9,16 @@ use std::time::Duration;
 
 use modplayer_audio_io::{FakeBackend, FakeDevice};
 use modplayer_audio_source::{
-    AccountReadError, Availability, RemoteCommand, Repeat, SourceEvent, SourceHealth, TrackId,
-    TrackRef, TransferContext, VolumePercent,
+    AlbumId, Availability, LibraryItem, LibraryPage, LibrarySet, RemoteCommand, Repeat,
+    SearchGroupPage, SearchHit, SearchKind, SearchPage, SourceEvent, SourceHealth, TrackId,
+    TrackList, TrackListSource, TrackRef, TransferContext, VolumePercent,
 };
+use modplayer_audio_source_synthetic::scripted::HydratedReply;
 use modplayer_audio_source_synthetic::{ScriptedHost, ScriptedHostHandle};
 use modplayer_core::PlaybackController;
 use modplayer_core::settings::SettingsStore;
 use modplayer_core::transport::{ActiveState, Intent, NotRegisteredReason, PendingTransferCommand};
+use modplayer_core::{Connectivity, GroupState, TrackListState};
 use modplayer_engine::{BufferPreset, DeviceId, FrameCount, SampleRate};
 
 /// `sync_program`'s debounce window (contracts/transport-and-queue.md §3)
@@ -914,34 +917,238 @@ fn downgrade_finishes_track_then_disables() {
     );
 }
 
-// --- Stage 2: "Play from account" over the session (spec Amendment 2026-09-16) ---
+// "Play from account" over the session (spec Amendment 2026-09-16) was
+// retired in 004-search-and-library-browse (T061/T062) once the Library
+// view replaced it — its `request_account_tracks`/`take_account_tracks`
+// coverage is removed alongside the scaffold itself.
 
-#[test]
-fn account_tracks_request_is_answered_from_the_source() {
-    let (mut controller, handle, _dir) = ready_controller();
-    handle.account_tracks(Ok(vec![track("a"), track("b")]));
+// --- T046 (US2): catalog event routing + connectivity derivation
+// (contracts/library-and-search-core.md §1) ---
 
-    let request_id = controller.request_account_tracks(20);
-    controller.tick();
+/// `SearchSession`'s own debounce window (150 ms) plus slack, walked with a
+/// real sleep exactly like `DEBOUNCE_SETTLE` above — the controller has no
+/// injectable clock plumbed into `SearchSession::tick` yet (it reads
+/// `PlaybackController::now()` directly, but this test doesn't need to
+/// fake it).
+const SEARCH_DEBOUNCE_SETTLE: Duration = Duration::from_millis(200);
 
-    let replies = controller.take_account_tracks();
-    assert_eq!(replies.len(), 1);
-    let (id, result) = &replies[0];
-    assert_eq!(*id, request_id);
-    assert_eq!(result.as_ref().map(|t| t.len()), Ok(2));
-    // Drained: a second call returns nothing.
-    assert!(controller.take_account_tracks().is_empty());
+fn search_reply(track_count: usize) -> SearchPage {
+    SearchPage {
+        groups: vec![
+            SearchGroupPage {
+                kind: SearchKind::Track,
+                items: (0..track_count)
+                    .map(|i| SearchHit::Track(track(&i.to_string())))
+                    .collect(),
+                next_offset: None,
+            },
+            SearchGroupPage {
+                kind: SearchKind::Album,
+                items: vec![],
+                next_offset: None,
+            },
+            SearchGroupPage {
+                kind: SearchKind::Artist,
+                items: vec![],
+                next_offset: None,
+            },
+            SearchGroupPage {
+                kind: SearchKind::Playlist,
+                items: vec![],
+                next_offset: None,
+            },
+        ],
+        unsupported: vec![],
+    }
 }
 
 #[test]
-fn account_tracks_defaults_to_unavailable_when_unscripted() {
-    let (mut controller, _handle, _dir) = ready_controller();
+fn search_result_event_routes_into_search_session_not_the_transport_reducer() {
+    let (mut controller, handle, _dir) = ready_controller();
+    controller.set_playback_permitted(true, None);
+    controller.tick(); // registers, so the search offline gate (FR-018) opens
+    let intent_before = controller.transport_state().intent;
 
-    let request_id = controller.request_account_tracks(20);
+    handle.script_search("floyd", Ok(search_reply(2)));
+    let now = controller.now();
+    controller.search_mut().set_query("floyd".to_string(), now);
+    std::thread::sleep(SEARCH_DEBOUNCE_SETTLE);
+    controller.tick(); // issues SearchCatalog once the debounce elapses
+    controller.tick(); // drains and routes SourceEvent::SearchResult
+
+    let group = controller.search().group(SearchKind::Track).clone();
+    assert!(
+        matches!(&group, GroupState::Loaded { items, .. } if items.len() == 2),
+        "expected a Loaded group with 2 items, got {group:?}"
+    );
+    assert_eq!(
+        controller.transport_state().intent,
+        intent_before,
+        "a catalog reply must never reach the transport reducer"
+    );
+}
+
+fn empty_library_page(set: LibrarySet) -> LibraryPage {
+    LibraryPage {
+        set,
+        items: vec![],
+        next_page: None,
+        sync_token: None,
+    }
+}
+
+fn saved_tracks_page(id: &str) -> LibraryPage {
+    LibraryPage {
+        set: LibrarySet::SavedTracks,
+        items: vec![LibraryItem::Track {
+            track: track(id),
+            added_at: Some(1),
+        }],
+        next_page: None,
+        sync_token: None,
+    }
+}
+
+#[test]
+fn library_page_and_hydrated_events_route_into_the_library_index_not_the_transport_reducer() {
+    let (mut controller, handle, _dir) = ready_controller();
+    controller.tick();
+    let intent_before = controller.transport_state().intent;
+
+    handle.script_library(
+        LibrarySet::SavedTracks,
+        vec![Ok(saved_tracks_page("hydrate-me"))],
+    );
+    handle.script_library(
+        LibrarySet::SavedAlbums,
+        vec![Ok(empty_library_page(LibrarySet::SavedAlbums))],
+    );
+    handle.script_library(
+        LibrarySet::FollowedArtists,
+        vec![Ok(empty_library_page(LibrarySet::FollowedArtists))],
+    );
+    handle.script_library(
+        LibrarySet::Playlists,
+        vec![Ok(empty_library_page(LibrarySet::Playlists))],
+    );
+    handle.script_hydrate(HydratedReply {
+        tracks: vec![track("hydrate-me")],
+        albums: vec![],
+        artists: vec![],
+        missing: vec![],
+    });
+
+    controller.library_retry_sync();
+    // Walk the four-set cycle plus the hydration sweep — each hop's
+    // follow-up command is only visible to the *next* `poll()`.
+    for _ in 0..10 {
+        controller.tick();
+    }
+
+    assert_eq!(
+        controller.library().saved_tracks().len(),
+        1,
+        "the SavedTracks page must have merged"
+    );
+    assert!(
+        controller
+            .library()
+            .track(&track_id("hydrate-me"))
+            .is_some(),
+        "the queued hydration for the merged track must have resolved"
+    );
+    assert_eq!(
+        controller.transport_state().intent,
+        intent_before,
+        "a catalog reply must never reach the transport reducer"
+    );
+}
+
+#[test]
+fn track_list_event_routes_into_library_track_list_cache() {
+    let (mut controller, handle, _dir) = ready_controller();
     controller.tick();
 
-    let replies = controller.take_account_tracks();
-    assert_eq!(replies.len(), 1);
-    assert_eq!(replies[0].0, request_id);
-    assert_eq!(replies[0].1, Err(AccountReadError::Unavailable));
+    let source =
+        TrackListSource::Album(AlbumId::new("spotify:album:a").unwrap_or_else(|_| unreachable!()));
+    handle.script_track_list(
+        source.clone(),
+        Ok(TrackList {
+            source: source.clone(),
+            tracks: vec![track("in-album")],
+        }),
+    );
+
+    assert_eq!(
+        controller.library_track_list(source.clone()),
+        TrackListState::Loading,
+        "first call issues FetchTrackList and reports Loading"
+    );
+    controller.tick();
+
+    match controller.library_track_list(source) {
+        TrackListState::Cached(tracks) => {
+            assert_eq!(tracks.len(), 1);
+            assert_eq!(tracks[0].id, track_id("in-album"));
+        }
+        other => unreachable!("expected Cached after the reply routed in, got {other:?}"),
+    }
+}
+
+#[test]
+fn connectivity_is_online_once_registered_and_healthy() {
+    let (mut controller, _handle, _dir) = ready_controller();
+    controller.set_playback_permitted(true, None);
+    controller.tick(); // drains the Registered reply from Initialize
+    assert_eq!(
+        controller.library_status().connectivity,
+        Connectivity::Online
+    );
+}
+
+#[test]
+fn connectivity_derives_offline_from_source_health_alone() {
+    let (mut controller, handle, _dir) = ready_controller();
+    controller.set_playback_permitted(true, None);
+    controller.tick();
+    assert_eq!(
+        controller.library_status().connectivity,
+        Connectivity::Online
+    );
+
+    handle.health(SourceHealth::Transient {
+        since: std::time::Instant::now(),
+        next_retry_in: Duration::from_secs(1),
+    });
+    controller.tick();
+    assert_eq!(
+        controller.library_status().connectivity,
+        Connectivity::Offline,
+        "unhealthy source health must derive Offline (research R5)"
+    );
+
+    handle.health(SourceHealth::Ok);
+    controller.tick();
+    assert_eq!(
+        controller.library_status().connectivity,
+        Connectivity::Online
+    );
+}
+
+#[test]
+fn connectivity_is_offline_while_not_registered() {
+    let (mut controller, _handle, _dir) = ready_controller();
+    controller.set_playback_permitted(true, None);
+    controller.tick();
+    assert_eq!(
+        controller.library_status().connectivity,
+        Connectivity::Online
+    );
+
+    controller.clear_for_sign_out();
+    assert_eq!(
+        controller.library_status().connectivity,
+        Connectivity::Offline,
+        "a signed-out (NotRegistered) controller must derive Offline"
+    );
 }

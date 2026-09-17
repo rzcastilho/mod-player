@@ -9,7 +9,8 @@
 use std::sync::Arc;
 
 use modplayer_audio_source::{
-    AudioSource, BufferStatus, SourceCommand, SourceEvent, SourceHealth, SourceHost, SourceRtShared,
+    AudioSource, BufferStatus, CatalogError, SourceCommand, SourceEvent, SourceHealth, SourceHost,
+    SourceRtShared,
 };
 
 use crate::SyntheticSource;
@@ -50,9 +51,58 @@ impl SourceHost for SyntheticHost {
 
     fn command(&mut self, cmd: SourceCommand) {
         // Every command besides `Initialize` is a no-op (contracts/
-        // audio-source-host.md §2's "Synthetic/Scripted behaviour" column).
-        if let SourceCommand::Initialize { device_name, .. } = cmd {
-            self.events.push(SourceEvent::Registered { device_name });
+        // audio-source-host.md §2's "Synthetic/Scripted behaviour" column),
+        // except the catalog commands (004-search-and-library-browse),
+        // which this host has no catalog to answer from
+        // (contracts/catalog-source.md §4: "`SyntheticHost` answers every
+        // catalog command with `Err(Unsupported)`").
+        match cmd {
+            SourceCommand::Initialize { device_name, .. } => {
+                self.events.push(SourceEvent::Registered { device_name });
+            }
+            SourceCommand::SearchCatalog { request_id, .. } => {
+                self.events.push(SourceEvent::SearchResult {
+                    request_id,
+                    result: Err(CatalogError::Unsupported),
+                });
+            }
+            SourceCommand::FetchLibrary { request_id, .. } => {
+                self.events.push(SourceEvent::LibraryPage {
+                    request_id,
+                    result: Err(CatalogError::Unsupported),
+                });
+            }
+            SourceCommand::FetchTrackList { request_id, .. } => {
+                self.events.push(SourceEvent::TrackList {
+                    request_id,
+                    result: Err(CatalogError::Unsupported),
+                });
+            }
+            SourceCommand::HydrateRefs {
+                request_id,
+                tracks,
+                albums,
+                artists,
+            } => {
+                // `Hydrated` carries no `Result` (contracts/catalog-
+                // source.md §2): report every requested id as `missing`,
+                // this host's closest equivalent of "unsupported".
+                let missing = tracks
+                    .iter()
+                    .map(|id| id.to_string())
+                    .chain(albums.iter().map(|id| id.to_string()))
+                    .chain(artists.iter().map(|id| id.to_string()))
+                    .collect();
+                self.events.push(SourceEvent::Hydrated {
+                    request_id,
+                    tracks: Vec::new(),
+                    albums: Vec::new(),
+                    artists: Vec::new(),
+                    missing,
+                });
+            }
+            SourceCommand::CancelCatalog { .. } => {}
+            _ => {}
         }
     }
 

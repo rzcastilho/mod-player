@@ -17,14 +17,15 @@
 //! contracts/engine-commands.md rule 3). Device-loss handling
 //! (T071-T074) is a later phase.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use modplayer_audio_io::{BackendEvent, OpenStream, OutputBackend, OutputDeviceInfo};
 use modplayer_audio_source::{
-    AccountReadError, AudioSource, Program, Repeat, SourceCommand, SourceEvent, SourceHealth,
-    SourceHost, TrackId, TrackRef,
+    AudioSource, CatalogError, LibraryPage, Program, Repeat, SourceCommand, SourceEvent,
+    SourceHealth, SourceHost, TrackId, TrackList, TrackListSource, TrackRef,
 };
 use modplayer_engine::{
     BufferPreset, CeilingDb, Command, DeviceId, Event, NegotiatedBuffer, PositionClock, Processor,
@@ -33,6 +34,11 @@ use modplayer_engine::{
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::device_policy::{self, DeviceLostOutcome, DeviceResolution, DeviceWarning};
+use crate::library::index::SyncOutcome;
+use crate::library::{
+    Connectivity, LibraryIndex, LibraryPaths, LibraryStatus, LoadIndexOutcome, LoadPlayLogOutcome,
+    PersistJob, PlayLog, SyncScheduler,
+};
 use crate::notifications::{
     KEY_DEVICE_APPEARED, KEY_DEVICE_AVAILABLE_AGAIN, KEY_DEVICE_LOST, KEY_DEVICE_MISSING_AT_LAUNCH,
     KEY_NO_OUTPUT_DEVICES, KEY_QUEUE_ITEM_SKIPPED_UNAVAILABLE, NotificationCenter, Severity,
@@ -41,6 +47,7 @@ use crate::queue::{
     AdvanceReason, Origin, PlaybackChange, Queue, QueueChange, QueueItem, QueueItemId, QueueMode,
     XorShiftRng,
 };
+use crate::search::SearchSession;
 use crate::settings::{
     AudioSettings, DeviceName, DeviceNameError, SettingsStore, SettingsWarning,
     generate_connect_device_id,
@@ -49,6 +56,16 @@ use crate::transport::{
     self, ActiveState, Effect, Input, Intent, NotRegisteredReason, PendingTransferCommand,
     QueueChangeOrigin, QueueOp, TimerCommand, TimerKind, TransportState,
 };
+
+/// contracts/library-and-search-core.md §4: at most this many ids per
+/// `HydrateRefs` sweep request.
+const HYDRATE_BATCH: usize = 100;
+/// contracts/library-and-search-core.md §4: "≤ 2 batches/s background
+/// sweep" — one sweep request at most every 500 ms.
+const HYDRATE_SWEEP_INTERVAL: Duration = Duration::from_millis(500);
+/// contracts/library-and-search-core.md §4: dirty persistence flushes at
+/// most once per this window.
+const PERSIST_DEBOUNCE: Duration = Duration::from_secs(1);
 
 /// Capacity of the command/event SPSC queues opened for each stream
 /// (contracts/engine-commands.md).
@@ -208,12 +225,71 @@ pub struct PlaybackController<B: OutputBackend, H: SourceHost> {
 
     settings_store: SettingsStore,
     notifications: NotificationCenter,
-    /// Monotonic id for `request_account_tracks` so a reply can be matched
-    /// to its request (Stage 2 "Play from account" over the session).
-    next_account_read_id: u64,
-    /// `SourceEvent::AccountTracks` replies drained from the source but not
-    /// yet handed to the UI via `take_account_tracks`.
-    pending_account_tracks: Vec<(u64, Result<Vec<TrackRef>, AccountReadError>)>,
+    /// Free-text catalog search state (004-search-and-library-browse,
+    /// research R7). `tick()` drives its debounce and routes
+    /// `SourceEvent::SearchResult` replies into it by `request_id`.
+    search: SearchSession,
+
+    /// The account library mirror (004-search-and-library-browse,
+    /// data-model.md §3.1). `Default`/empty until the background load
+    /// (`library_loading`) completes.
+    library: LibraryIndex,
+    /// Recently Played (data-model.md §3.5, research R11).
+    play_log: PlayLog,
+    /// The `FetchLibrary` cycle scheduler (data-model.md §3.3).
+    sync: SyncScheduler,
+    /// `None` when `library::LibraryPaths::resolve()` couldn't determine a
+    /// data directory (no platform home dir) — persistence degrades to
+    /// in-memory-only rather than failing launch.
+    persist_tx: Option<Sender<PersistJob>>,
+    /// The persistence writer thread, joined on `shutdown` so its last
+    /// queued write completes before the process exits.
+    persist_writer: Option<std::thread::JoinHandle<()>>,
+    /// The background-load reply channel, drained by `tick()`; `None`
+    /// once drained (or if no paths were resolvable).
+    load_rx: Option<Receiver<(LoadIndexOutcome, LoadPlayLogOutcome)>>,
+    /// `true` until the background load completes (contracts/ui-surface.md
+    /// §3 "loading" state) — starts `false` when no paths were resolvable
+    /// (nothing to wait for).
+    library_loading: bool,
+    /// Set by any `library`/`play_log` mutation since the last flush;
+    /// cleared by `flush_library_persistence`.
+    library_dirty: bool,
+    /// `MODPLAYER_LIBRARY_FIXTURE=large` has replaced `library` for this
+    /// process (debug builds only; see `tick_library`).
+    #[cfg(debug_assertions)]
+    large_fixture_seeded: bool,
+    last_persist_flush_at: Option<Instant>,
+    last_hydration_sweep_at: Option<Instant>,
+    /// Monotonic id source for `FetchTrackList`/`HydrateRefs` commands —
+    /// separate from `search`'s own generation-packed ids (a different
+    /// `SourceEvent` variant, so no collision risk either way).
+    next_library_request_id: u64,
+    /// `TrackListSource -> request_id` for an outstanding
+    /// `FetchTrackList` (contracts/library-and-search-core.md §1
+    /// `library_track_list`), so a second call while one is in flight
+    /// doesn't issue a duplicate request.
+    track_list_in_flight: HashMap<TrackListSource, u64>,
+    /// The track id last recorded into `play_log`, so pausing/resuming the
+    /// same track never double-records it (research R11: record only on a
+    /// `TrackStarted -> Playing` transition to a *different* track than
+    /// the last one recorded).
+    last_recorded_play_track: Option<TrackId>,
+    /// Edge-detects the offline -> online transition so `tick_library` can
+    /// fire an immediate `Reconnect` trigger (FR-011) rather than waiting
+    /// for the passive 15-min `Interval` check — also doubles as the
+    /// `Launch` trigger, since the very first `tick()` that finds the
+    /// controller online is exactly that edge.
+    was_online_for_sync: bool,
+}
+
+/// [`PlaybackController::library_track_list`]'s reply state (contracts/
+/// library-and-search-core.md §1).
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrackListState {
+    Cached(Vec<TrackRef>),
+    Loading,
+    Failed,
 }
 
 impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
@@ -291,8 +367,29 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
             shared: Arc::new(RtShared::new()),
             settings_store,
             notifications,
-            next_account_read_id: 0,
-            pending_account_tracks: Vec::new(),
+            search: SearchSession::new(),
+            library: LibraryIndex::new(),
+            play_log: PlayLog::new(),
+            sync: SyncScheduler::new(),
+            // No persistence until `with_library_paths` opts in
+            // explicitly (the binary's job, `main.rs`) — a constructor
+            // that reached out to the real platform data directory by
+            // default would make every one of this controller's many
+            // existing unit tests spawn real background disk I/O against
+            // the developer's actual `ModPlayer` data directory.
+            persist_tx: None,
+            persist_writer: None,
+            load_rx: None,
+            library_loading: false,
+            library_dirty: false,
+            #[cfg(debug_assertions)]
+            large_fixture_seeded: false,
+            last_persist_flush_at: None,
+            last_hydration_sweep_at: None,
+            next_library_request_id: 0,
+            track_list_in_flight: HashMap::new(),
+            last_recorded_play_track: None,
+            was_online_for_sync: false,
         }
     }
 
@@ -304,6 +401,127 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
     /// The host-owned play queue (data-model.md §2.2).
     pub fn queue(&self) -> &Queue {
         &self.queue
+    }
+
+    /// Free-text catalog search state (004-search-and-library-browse,
+    /// contracts/library-and-search-core.md §1).
+    pub fn search(&self) -> &SearchSession {
+        &self.search
+    }
+
+    /// Edit-access to search state: `search_mut().set_query(text, now)` on
+    /// every keystroke (contracts/library-and-search-core.md §1).
+    pub fn search_mut(&mut self) -> &mut SearchSession {
+        &mut self.search
+    }
+
+    /// **Show more** on one search group (contracts/library-and-search-
+    /// core.md §1, FR-002): a no-op when that group has no further page or
+    /// a page request is already outstanding for it.
+    pub fn search_show_more(&mut self, kind: modplayer_audio_source::SearchKind) {
+        if let Some(cmd) = self.search.show_more(kind) {
+            self.source_host.command(cmd);
+        }
+    }
+
+    /// Opt this controller into real persistence (research R6): spawns the
+    /// background loader and the long-lived background writer against
+    /// `paths`, and marks the library `loading` until the load completes.
+    /// `None` leaves the library in-memory-only (this controller's
+    /// default) — the binary is the only caller that passes `Some`
+    /// (`LibraryPaths::resolve()`, `main.rs`), so unit tests across every
+    /// crate that construct a bare `PlaybackController::new(..)` never
+    /// touch a real directory on disk.
+    #[must_use]
+    pub fn with_library_paths(mut self, paths: Option<LibraryPaths>) -> Self {
+        if let Some(paths) = paths {
+            let (tx, writer) = crate::library::persist::spawn_writer(paths.clone());
+            self.persist_tx = Some(tx);
+            self.persist_writer = Some(writer);
+            self.load_rx = Some(crate::library::persist::spawn_background_load(paths));
+            self.library_loading = true;
+        }
+        self
+    }
+
+    /// The account library mirror snapshot (004-search-and-library-browse,
+    /// contracts/library-and-search-core.md §1) — never blocks; may still
+    /// be `loading` (`library_status()`).
+    pub fn library(&self) -> &LibraryIndex {
+        &self.library
+    }
+
+    /// The Library view's derived state flags (contracts/library-and-
+    /// search-core.md §1).
+    pub fn library_status(&self) -> LibraryStatus {
+        LibraryStatus {
+            loading: self.library_loading,
+            refreshing: self.sync.refreshing(),
+            first_sync_failed: self.library.meta().first_sync_failed(),
+            connectivity: if self.is_online() {
+                Connectivity::Online
+            } else {
+                Connectivity::Offline
+            },
+        }
+    }
+
+    /// FR-021's retry action: force a fresh sync cycle regardless of the
+    /// 15-min interval or current backoff.
+    pub fn library_retry_sync(&mut self) {
+        let now = (self.now)();
+        for cmd in self.sync.trigger(now) {
+            self.source_host.command(cmd);
+        }
+    }
+
+    /// The full ordered track list for an album/playlist/artist row
+    /// (contracts/library-and-search-core.md §1 "Acting-list rule"):
+    /// serves the cache, or issues `FetchTrackList` on first miss (a
+    /// second call while that request is outstanding reports `Loading`
+    /// rather than issuing a duplicate).
+    pub fn library_track_list(&mut self, source: TrackListSource) -> TrackListState {
+        if let Some(tracks) = self.library.track_list(&source) {
+            return TrackListState::Cached(tracks);
+        }
+        if self.track_list_in_flight.contains_key(&source) {
+            return TrackListState::Loading;
+        }
+        let request_id = self.next_library_request_id;
+        self.next_library_request_id += 1;
+        self.track_list_in_flight.insert(source.clone(), request_id);
+        self.source_host
+            .command(SourceCommand::FetchTrackList { request_id, source });
+        TrackListState::Loading
+    }
+
+    /// UI hint: prioritise `ids` in the hydration sweep (contracts/
+    /// library-and-search-core.md §1 `library_hydrate_visible`, design
+    /// note 7).
+    pub fn library_hydrate_visible(&mut self, ids: &[TrackId]) {
+        self.library.prioritize_hydration(ids);
+    }
+
+    /// Recently Played (FR-012), newest first, <= 100 entries.
+    pub fn recently_played(&self) -> Vec<TrackRef> {
+        self.play_log.recent_tracks()
+    }
+
+    fn mark_library_dirty(&mut self) {
+        self.library_dirty = true;
+    }
+
+    /// "Online" for search gating and the sync scheduler (research R5,
+    /// data-model.md §3.6 `Connectivity`): the source health is `Ok` and
+    /// the device is registered with the service. Computed inline here,
+    /// the same way `library::Connectivity` (US2) will, since that module
+    /// does not exist yet in this phase.
+    fn is_online(&self) -> bool {
+        matches!(self.transport_state.health, SourceHealth::Ok)
+            && !matches!(
+                self.transport_state.active,
+                ActiveState::NotRegistered { .. }
+            )
     }
 
     /// The injected wall clock's current reading (design note 6);
@@ -467,6 +685,20 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         self.transport_state.active = ActiveState::NotRegistered {
             reason: NotRegisteredReason::SignedOut,
         };
+        // 004-search-and-library-browse, design note 8: search, the
+        // library index, play log and their persisted files are cleared
+        // along with everything else on sign-out.
+        self.search = SearchSession::new();
+        self.library = LibraryIndex::new();
+        self.play_log = PlayLog::new();
+        self.sync = SyncScheduler::new();
+        self.track_list_in_flight.clear();
+        self.last_recorded_play_track = None;
+        self.was_online_for_sync = false;
+        self.library_dirty = false;
+        if let Some(tx) = &self.persist_tx {
+            let _ = tx.send(PersistJob::DeleteAll);
+        }
     }
 
     /// Login refused for a non-Premium account (FR-027, rule T22): the
@@ -489,6 +721,17 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         self.stop();
         self.source_host.command(SourceCommand::Shutdown);
         self.stream = None;
+        // Anything still inside the persist debounce window (the track that
+        // just started, the page that just merged) is written now, and the
+        // writer is drained before the process is allowed to exit — the
+        // 2026-09-17 manual walk (quickstart M9) otherwise lost the last
+        // play-log entry on quit.
+        self.last_persist_flush_at = None;
+        self.flush_persistence();
+        drop(self.persist_tx.take());
+        if let Some(writer) = self.persist_writer.take() {
+            let _ = writer.join();
+        }
     }
 
     /// Current master-volume shadow state.
@@ -721,6 +964,38 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         self.sync_program();
     }
 
+    /// **Play now** on a row picked from a list that is not itself the
+    /// current context (004-search-and-library-browse, contracts/library-
+    /// and-search-core.md §2, FR-006): the acting list becomes the new
+    /// context, playback starts at `cursor`.
+    pub fn queue_replace_at(
+        &mut self,
+        tracks: Vec<modplayer_audio_source::TrackRef>,
+        cursor: usize,
+    ) {
+        self.queue.replace_context_at(tracks, cursor);
+        self.sync_program();
+    }
+
+    /// **Play next** on an album/playlist/artist row (004-search-and-
+    /// library-browse, contracts/library-and-search-core.md §2, FR-007):
+    /// appends every track to the tail of the play-next block, preserving
+    /// order.
+    pub fn queue_play_next_tracks(&mut self, tracks: Vec<modplayer_audio_source::TrackRef>) {
+        self.queue.ensure_host_driven();
+        self.queue.play_next_tracks(tracks);
+        self.sync_program();
+    }
+
+    /// **Add to queue** on any row (004-search-and-library-browse,
+    /// contracts/library-and-search-core.md §1, FR-007): appends to the
+    /// context.
+    pub fn queue_add_context(&mut self, tracks: Vec<modplayer_audio_source::TrackRef>) {
+        self.queue.ensure_host_driven();
+        self.queue.add_context(tracks);
+        self.sync_program();
+    }
+
     /// Move an existing item to the tail of the play-next block (FR-011,
     /// FIFO; contracts/transport-and-queue.md §1).
     pub fn queue_play_next(&mut self, uid: QueueItemId) {
@@ -916,6 +1191,149 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         self.flush_pending_program();
         self.flush_transfer_timer();
         self.flush_reconnect_timer();
+        self.drain_library_load();
+        self.tick_search();
+        self.tick_library();
+        self.flush_persistence();
+    }
+
+    /// Drive `SearchSession`'s debounce timer every tick
+    /// (004-search-and-library-browse, contracts/library-and-search-
+    /// core.md §1): reports the derived online fact, then forwards
+    /// whatever `SourceCommand`s the debounce deadline elapsing produces.
+    fn tick_search(&mut self) {
+        let online = self.is_online();
+        self.search.set_offline(!online);
+        let now = (self.now)();
+        for cmd in self.search.tick(now) {
+            self.source_host.command(cmd);
+        }
+    }
+
+    /// Persistence-thread hook point (004-search-and-library-browse,
+    /// contracts/library-and-search-core.md §1: "flushes dirty persistence
+    /// <= 1 s later on the persistence thread"): sends a dirty
+    /// `LibraryIndex`/`PlayLog` snapshot to the background writer at most
+    /// once per `PERSIST_DEBOUNCE`. A no-op when nothing is dirty, or when
+    /// no data directory was resolvable at construction (`persist_tx`).
+    fn flush_persistence(&mut self) {
+        let Some(tx) = &self.persist_tx else {
+            return;
+        };
+        if !self.library_dirty && !self.play_log.is_dirty() {
+            return;
+        }
+        let now = (self.now)();
+        let due = self
+            .last_persist_flush_at
+            .is_none_or(|last| now.saturating_duration_since(last) >= PERSIST_DEBOUNCE);
+        if !due {
+            return;
+        }
+        if self.library_dirty {
+            let _ = tx.send(PersistJob::SaveIndex(Box::new(self.library.clone())));
+            self.library_dirty = false;
+        }
+        if self.play_log.is_dirty() {
+            let _ = tx.send(PersistJob::SavePlayLog(Box::new(self.play_log.clone())));
+            self.play_log.mark_clean();
+        }
+        self.last_persist_flush_at = Some(now);
+    }
+
+    /// Drain the background-load reply, once (004-search-and-library-
+    /// browse, research R6): replaces the empty in-memory `library`/
+    /// `play_log` with whatever was on disk. A no-op once drained (or if
+    /// no paths were resolvable at construction).
+    fn drain_library_load(&mut self) {
+        let Some(rx) = &self.load_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok((index_outcome, log_outcome)) => {
+                self.library = index_outcome.index;
+                self.play_log = log_outcome.play_log;
+                self.library_loading = false;
+                self.load_rx = None;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.library_loading = false;
+                self.load_rx = None;
+            }
+        }
+    }
+
+    /// Drive the `FetchLibrary` cycle scheduler and the lazy hydration
+    /// sweep every tick (004-search-and-library-browse, research R4/R6,
+    /// design note 7). `Launch`/`Reconnect` (data-model.md §3.3) are both
+    /// exactly the offline -> online edge: the very first online tick is
+    /// Launch, any later one is Reconnect (FR-011's "immediate sync").
+    fn tick_library(&mut self) {
+        // `MODPLAYER_LIBRARY_FIXTURE=large` (quickstart M15, US3 T072):
+        // seed the synthetic 50 000/1 000 fixture once *instead of* the
+        // real library, so the at-scale experience can be rehearsed
+        // without a real account that large. While the override is set,
+        // neither the on-disk snapshot (`load_rx` dropped) nor the sync
+        // cycle (returned before the scheduler) may replace or merge over
+        // it — the 2026-09-17 manual walk found both doing exactly that
+        // once persistence was wired in. Deliberately never persisted (no
+        // `mark_library_dirty`) — a debug rehearsal aid, not real account
+        // data — so it never lands in a real user's `index.json`.
+        #[cfg(debug_assertions)]
+        if crate::library::index::large_fixture_requested() {
+            if !self.large_fixture_seeded {
+                self.library = crate::library::index::large_fixture();
+                self.large_fixture_seeded = true;
+                self.library_loading = false;
+                self.load_rx = None;
+            }
+            return;
+        }
+
+        let now = (self.now)();
+        let online = self.is_online();
+        let reconnected = online && !self.was_online_for_sync;
+        self.was_online_for_sync = online;
+
+        let commands = if reconnected {
+            self.sync.trigger(now)
+        } else {
+            self.sync.tick(now, online)
+        };
+        for cmd in commands {
+            self.source_host.command(cmd);
+        }
+        self.maybe_sweep_hydration(now);
+    }
+
+    /// Issue one bounded `HydrateRefs` sweep request if the throttle
+    /// window has elapsed and anything is still queued (contracts/
+    /// library-and-search-core.md §4: `HYDRATE_BATCH` = 100, <= 2
+    /// batches/s).
+    fn maybe_sweep_hydration(&mut self, now: Instant) {
+        if !self.library.has_pending_hydration() {
+            return;
+        }
+        let due = self
+            .last_hydration_sweep_at
+            .is_none_or(|last| now.saturating_duration_since(last) >= HYDRATE_SWEEP_INTERVAL);
+        if !due {
+            return;
+        }
+        let batch = self.library.drain_hydration_batch(HYDRATE_BATCH);
+        if batch.is_empty() {
+            return;
+        }
+        self.last_hydration_sweep_at = Some(now);
+        let request_id = self.next_library_request_id;
+        self.next_library_request_id += 1;
+        self.source_host.command(SourceCommand::HydrateRefs {
+            request_id,
+            tracks: batch.tracks,
+            albums: batch.albums,
+            artists: batch.artists,
+        });
     }
 
     /// T19: fire `Input::TransferTimedOut` once the 5 s transfer-request
@@ -964,12 +1382,34 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
     fn drain_source_events(&mut self) {
         let events = self.source_host.poll();
         for event in events {
-            if let SourceEvent::AccountTracks { request_id, result } = event {
-                // Not a transport input — a "Play from account" read reply
-                // (Stage 2); stash for the UI to drain via
-                // `take_account_tracks`.
-                self.pending_account_tracks.push((request_id, result));
-                continue;
+            // Catalog events (004-search-and-library-browse, contracts/
+            // library-and-search-core.md §1) route by `request_id` to
+            // search/library state, **never** to the transport reducer
+            // (design note 1's "Seam first, UI last").
+            match event {
+                SourceEvent::SearchResult { request_id, result } => {
+                    self.route_search_result(request_id, result);
+                    continue;
+                }
+                SourceEvent::LibraryPage { request_id, result } => {
+                    self.route_library_page(request_id, result);
+                    continue;
+                }
+                SourceEvent::TrackList { request_id, result } => {
+                    self.route_track_list(request_id, result);
+                    continue;
+                }
+                SourceEvent::Hydrated {
+                    request_id,
+                    tracks,
+                    albums,
+                    artists,
+                    missing,
+                } => {
+                    self.route_hydrated(request_id, tracks, albums, artists, missing);
+                    continue;
+                }
+                _ => {}
             }
             if let Some(input) = map_source_event(event) {
                 self.dispatch(input);
@@ -977,22 +1417,80 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         }
     }
 
-    /// Ask the source to list up to `limit` playable tracks from the
-    /// signed-in account via its own session (Stage 2 "Play from account").
-    /// Returns the request id whose reply arrives through
-    /// [`Self::take_account_tracks`].
-    pub fn request_account_tracks(&mut self, limit: u8) -> u64 {
-        let request_id = self.next_account_read_id;
-        self.next_account_read_id += 1;
-        self.source_host
-            .command(SourceCommand::ListAccountTracks { request_id, limit });
-        request_id
+    /// Route a `SearchResult` reply into `SearchSession` by `request_id`
+    /// (contracts/library-and-search-core.md §1, US1 T035):
+    /// `SearchSession::apply_reply` itself drops a stale-generation or
+    /// while-offline reply.
+    #[allow(clippy::needless_pass_by_value)]
+    fn route_search_result(
+        &mut self,
+        request_id: u64,
+        result: Result<
+            modplayer_audio_source::catalog::SearchPage,
+            modplayer_audio_source::catalog::CatalogError,
+        >,
+    ) {
+        self.search.apply_reply(request_id, result);
     }
 
-    /// Drain the `request_account_tracks` replies received since the last
-    /// call (one per completed request, in arrival order).
-    pub fn take_account_tracks(&mut self) -> Vec<(u64, Result<Vec<TrackRef>, AccountReadError>)> {
-        std::mem::take(&mut self.pending_account_tracks)
+    /// Route a `LibraryPage` reply into `SyncScheduler`/`LibraryIndex`
+    /// (contracts/library-and-search-core.md §1, US2 T060): merges the
+    /// page, forwards whatever follow-up commands the scheduler's own
+    /// page-walking produces, and — once a whole cycle completes — records
+    /// its outcome (data-model.md §3.2/§3.3). `last_synced_at` only
+    /// advances on a non-`Failed` outcome, so a later failed cycle never
+    /// erases the timestamp of the last one that actually landed
+    /// (`SyncMeta::first_sync_failed` stays correct for FR-021).
+    #[allow(clippy::needless_pass_by_value)]
+    fn route_library_page(&mut self, request_id: u64, result: Result<LibraryPage, CatalogError>) {
+        let now = (self.now)();
+        let outcome = self.sync.apply_reply(now, request_id, result);
+        if let Some(page) = outcome.merged_page {
+            self.library.merge_page(page);
+            self.mark_library_dirty();
+        }
+        for cmd in outcome.commands {
+            self.source_host.command(cmd);
+        }
+        if let Some(cycle_outcome) = self.sync.take_last_outcome() {
+            self.library.meta.last_outcome = cycle_outcome;
+            if !matches!(cycle_outcome, SyncOutcome::Failed) {
+                let now_ms = unix_ms_now();
+                self.library.meta.last_synced_at = Some(now_ms);
+            }
+            self.mark_library_dirty();
+        }
+    }
+
+    /// Route a `TrackList` reply (contracts/library-and-search-core.md §1
+    /// `library_track_list`): caches the ordered ref list on success;
+    /// either way, clears this source's in-flight marker so a later call
+    /// can retry.
+    #[allow(clippy::needless_pass_by_value)]
+    fn route_track_list(&mut self, request_id: u64, result: Result<TrackList, CatalogError>) {
+        self.track_list_in_flight.retain(|_, id| *id != request_id);
+        if let Ok(list) = result {
+            self.library.merge_track_list(list);
+            self.mark_library_dirty();
+        }
+    }
+
+    /// Route a `Hydrated` reply (contracts/library-and-search-core.md §1;
+    /// contracts/catalog-source.md §2 rule 7): merges every resolved
+    /// entity and maps a missing track uri to `Availability::Removed`
+    /// (`LibraryIndex::apply_hydrated`).
+    #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+    fn route_hydrated(
+        &mut self,
+        _request_id: u64,
+        tracks: Vec<TrackRef>,
+        albums: Vec<modplayer_audio_source::catalog::AlbumRef>,
+        artists: Vec<modplayer_audio_source::catalog::ArtistRef>,
+        missing: Vec<String>,
+    ) {
+        self.library
+            .apply_hydrated(tracks, albums, artists, missing);
+        self.mark_library_dirty();
     }
 
     /// Run `input` through the pure transport reducer and apply the
@@ -1008,10 +1506,58 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
             Input::Unavailable { .. } => QueueChangeOrigin::UnavailableMirror,
             _ => QueueChangeOrigin::EndOfTrackMirror,
         };
+        // research R11 (004-search-and-library-browse): a `PlayLog` entry
+        // is recorded only on a *source-confirmed* start — `Input::Playing`
+        // (the source's own confirmation, however quickly it follows the
+        // optimistic local `Input::Play`) or a transfer-in that arrives
+        // already `playing` (`Input::BecameActive { context: Some(ctx) }`
+        // with `ctx.playing`). Deliberately **not** `Input::Play` itself:
+        // that dispatch flips `intent` to `Playing` optimistically before
+        // the source has had any chance to reply — for a track the source
+        // is about to refuse (`Input::Unavailable` arrives on the very next
+        // `poll()`), that optimistic instant is the *only* moment
+        // `is_actively_playing` is briefly true, so gating on it would
+        // record a track that never actually played (FR-012's "unavailable-
+        // skipped not recorded"). `record_play_log_if_new_track`'s own
+        // dedup (`last_recorded_play_track`) still applies, so a resume's
+        // confirming `Input::Playing` for the same track that is already
+        // recorded is a no-op.
+        let confirms_playing = matches!(&input, Input::Playing)
+            || matches!(&input, Input::BecameActive { context: Some(ctx) } if ctx.playing);
         let (new_state, effects) =
             transport::reduce(std::mem::take(&mut self.transport_state), input);
         self.transport_state = new_state;
+        // Applied *after* `apply_effects`: a transfer-in
+        // (`Effect::Queue(AdoptTransferContext)`) sets the queue's
+        // `current()` as an *effect* of this same `reduce` call, not before
+        // it — recording immediately after `reduce` would log whatever
+        // track was current beforehand instead of the one that actually
+        // started playing.
         self.apply_effects(effects, queue_origin);
+        if confirms_playing && is_actively_playing(&self.transport_state) {
+            self.record_play_log_if_new_track();
+        }
+    }
+
+    /// research R11: record a `PlayLog` entry on the `TrackStarted ->
+    /// Playing` transition, for a track id that differs from the last one
+    /// recorded — never for the same track the transport was already
+    /// playing (a plain pause/resume), and never for a track that reached
+    /// `Unavailable` instead of `Playing` (FR-012's Connect-transfer and
+    /// unavailable-skip rules both fall out of this for free: a transfer-in
+    /// still lands on this same `TrackStarted -> Playing` path; an
+    /// unavailable track never does).
+    fn record_play_log_if_new_track(&mut self) {
+        let Some(current) = self.queue.current() else {
+            return;
+        };
+        if self.last_recorded_play_track.as_ref() == Some(&current.track.id) {
+            return;
+        }
+        self.last_recorded_play_track = Some(current.track.id.clone());
+        // `play_log.record` sets its own internal dirty flag — `flush_
+        // persistence` checks it independently of `library_dirty`.
+        self.play_log.record(&current.track, unix_ms_now());
     }
 
     fn apply_effects(&mut self, effects: Vec<Effect>, queue_origin: QueueChangeOrigin) {
@@ -1501,6 +2047,24 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
                 .raise(Severity::Warning, "settings-save-failed");
         }
     }
+}
+
+/// research R11: "`Active{intent: Playing, buffering: false}`" — the exact
+/// transport state the play-log record hook edge-detects a transition
+/// into.
+fn is_actively_playing(state: &TransportState) -> bool {
+    state.intent == Intent::Playing && !state.buffering
+}
+
+/// Current wall time in unix milliseconds, clamped to 0 if the clock is
+/// somehow set before the epoch (never true in production). Persisted
+/// timestamps (`PlayLog`, `SyncMeta`) are host-only bookkeeping, not the
+/// injectable `now()` clock — real wall time either way.
+fn unix_ms_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn severity_for(warning: &SettingsWarning) -> Severity {

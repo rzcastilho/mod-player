@@ -26,6 +26,10 @@ sha2 = "0.10"
 base64 = "0.22"
 getrandom = "0.3"
 time = "0.3"
+# modplayer-ui only (004-search-and-library-browse, research R13): decode
+# artwork fetched from the public CDN. No default features; JPEG only,
+# matching the CDN's actual artwork format.
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 # Dev-only: Constitution VIII state-serialization proptests (modplayer-account).
 proptest = "1"
 # Receiver crate only (modplayer-audio-source-connect): Connect protocol
@@ -38,6 +42,12 @@ librespot-audio = { version = "0.8", default-features = false, features = ["rust
 librespot-metadata = { version = "0.8", default-features = false, features = ["rustls-tls-webpki-roots"] }
 librespot-protocol = "0.8"
 protobuf = "3.7"
+# Receiver crate only (004-search-and-library-browse, research R3):
+# `http::Method`/`HeaderMap` for the hand-encoded `/collection/v2/paging`
+# POST — already resolved in the dependency tree (`hyper::Method` is a
+# re-export of the same `http::Method`, used internally by librespot-core's
+# own `spclient`), so this names no new transitive surface.
+http = "1"
 # Required by librespot's Session/Spirc/Player, confined to the receiver
 # crate's dedicated worker thread (research R1).
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }

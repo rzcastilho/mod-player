@@ -23,7 +23,13 @@ use modplayer_account::{
     AccountEvent, AccountService, AuthorizationService, Clock, FakeAuthorizationService, FakeClock,
     Profile, SessionState, Tier, TokenSet,
 };
-use modplayer_core::{NotificationCenter, Severity};
+use modplayer_audio_io::{FakeBackend, FakeDevice};
+use modplayer_audio_source::{Availability, LibraryPage, LibrarySet, TrackId, TrackRef};
+use modplayer_audio_source_synthetic::ScriptedHost;
+use modplayer_core::library::LibraryPaths;
+use modplayer_core::settings::SettingsStore;
+use modplayer_core::{NotificationCenter, PlaybackController, Severity};
+use modplayer_engine::{BufferPreset, DeviceId, FrameCount, SampleRate};
 use modplayer_secure_store::{MemorySecureStore, SecureStore};
 
 /// A value distinctive enough that finding it anywhere other than the
@@ -197,6 +203,183 @@ fn assert_leak_free(bytes: &[u8], surface: &str) {
     assert!(
         !text.contains(MARKER_REFRESH_TOKEN),
         "refresh token leaked into {surface}"
+    );
+}
+
+fn fake_device() -> FakeDevice {
+    FakeDevice {
+        id: DeviceId::new("dev-1").unwrap(),
+        name: "Speakers".to_string(),
+        rate: SampleRate::new(44_100),
+        channels: 2,
+        buffer_range: Some((FrameCount::new(32), FrameCount::new(2048))),
+        is_default: true,
+    }
+}
+
+fn empty_page(set: LibrarySet) -> LibraryPage {
+    LibraryPage {
+        set,
+        items: vec![],
+        next_page: None,
+        sync_token: None,
+    }
+}
+
+/// 004-search-and-library-browse: the catalog seam
+/// (`SourceCommand::FetchLibrary`/`SearchCatalog` and their replies) is a
+/// second path, entirely separate from the sign-in flow above, by which a
+/// session credential could in principle leak — e.g. a future change that
+/// threaded the account's bearer token into a `TrackRef`/`CatalogError`
+/// field by mistake. This exercises both paths in the *same* process
+/// against the *same* on-disk directory the sign-in flow just wrote to, so
+/// a leak from the account layer into catalog data (persisted
+/// `library/index.json`/`play_log.json`, or anything the UI would
+/// `{:?}`-print from `PlaybackController::search()`/`library()`) is caught
+/// exactly where a real regression would introduce it.
+#[test]
+fn catalog_seam_never_carries_session_token() {
+    let dir = TempDir::new();
+    let secure = Arc::new(MemorySecureStore::new());
+    let auth = FakeAuthorizationService::new();
+    auth.push_exchange_code(ScriptedCall::ok(TokenSet {
+        access_token: MARKER_ACCESS_TOKEN.to_string(),
+        refresh_token: Some(MARKER_REFRESH_TOKEN.to_string()),
+        expires_in: Duration::from_secs(3600),
+        scope: "streaming".to_string(),
+    }));
+    auth.push_fetch_profile(ScriptedCall::ok(Profile {
+        id: "user-1".to_string(),
+        display_name: Some("Alex".to_string()),
+        tier: Tier::Premium,
+    }));
+
+    let mut account = AccountService::new(
+        secure.clone() as Arc<dyn SecureStore>,
+        Arc::new(auth) as Arc<dyn AuthorizationService>,
+        Arc::new(FakeClock::default()) as Arc<dyn Clock>,
+        dir.path().to_path_buf(),
+    );
+    let events = account.start_sign_in();
+    let Some(AccountEvent::BrowserUrlReady(url)) = events.into_iter().next() else {
+        panic!("expected BrowserUrlReady");
+    };
+    let query = url.split('?').nth(1).expect("query string");
+    let (mut port, mut state) = (None, None);
+    for pair in query.split('&') {
+        let (k, v) = pair.split_once('=').expect("key=value");
+        match k {
+            "port" => port = Some(v.to_string()),
+            "state" => state = Some(v.to_string()),
+            _ => {}
+        }
+    }
+    let (port, state) = (port.expect("port"), state.expect("state"));
+    let addr = format!("127.0.0.1:{port}");
+    let mut connected = false;
+    for _ in 0..50 {
+        if let Ok(mut stream) = TcpStream::connect(&addr) {
+            let _ = stream.write_all(
+                format!("GET {REDIRECT_PATH}?code=auth-code&state={state} HTTP/1.1\r\n\r\n")
+                    .as_bytes(),
+            );
+            connected = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(connected, "could not connect to loopback listener");
+    for _ in 0..200 {
+        account.tick();
+        if matches!(account.state(), SessionState::Active) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(matches!(account.state(), SessionState::Active));
+
+    // The catalog seam, sharing this same directory tree for its own
+    // on-disk state (`settings.toml`, `library/index.json`,
+    // `library/play_log.json`).
+    let store = SettingsStore::with_path(dir.path().join("settings.toml"));
+    let paths = LibraryPaths::with_dir(dir.path().join("library"));
+    let host = ScriptedHost::new();
+    let handle = host.handle();
+    let mut controller =
+        PlaybackController::new(FakeBackend::new(vec![fake_device()]), host, store)
+            .with_library_paths(Some(paths.clone()));
+    controller.launch();
+    controller.confirm_device(DeviceId::new("dev-1").unwrap(), BufferPreset::Balanced);
+    controller.set_playback_permitted(true, None);
+    controller.tick();
+
+    handle.script_search(
+        "abba",
+        Ok(modplayer_audio_source::SearchPage {
+            groups: vec![modplayer_audio_source::SearchGroupPage {
+                kind: modplayer_audio_source::SearchKind::Track,
+                items: vec![modplayer_audio_source::SearchHit::Track(TrackRef::new(
+                    TrackId::new("spotify:track:a").unwrap(),
+                    "Dancing Queen",
+                    vec!["ABBA".to_string()],
+                    None,
+                    None,
+                    180_000,
+                    Availability::Available,
+                ))],
+                next_offset: None,
+            }],
+            unsupported: vec![],
+        }),
+    );
+    let now = controller.now();
+    controller.search_mut().set_query("abba", now);
+    controller.set_clock(move || now + Duration::from_millis(200));
+    controller.tick(); // issues SearchCatalog
+    controller.tick(); // drains SearchResult
+
+    for set in [
+        LibrarySet::SavedTracks,
+        LibrarySet::SavedAlbums,
+        LibrarySet::FollowedArtists,
+        LibrarySet::Playlists,
+    ] {
+        handle.script_library(set, vec![Ok(empty_page(set))]);
+    }
+    controller.library_retry_sync();
+    for _ in 0..12 {
+        controller.tick();
+    }
+
+    // Give the background persistence writer a moment to land the files
+    // `flush_persistence` queued during the ticks above.
+    for _ in 0..200 {
+        if paths.index_path.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // Surface 1: every file under the shared config/data directory,
+    // account.toml and the catalog's own index.json/play_log.json alike.
+    for entry in walk_files(dir.path()) {
+        let content = fs::read(&entry).unwrap_or_default();
+        assert_leak_free(&content, &format!("file {}", entry.display()));
+    }
+
+    // Surface 2: Debug output of everything the catalog seam exposes to
+    // the UI layer.
+    assert_leak_free(
+        format!("{:?}", controller.search()).as_bytes(),
+        "SearchSession Debug",
+    );
+    assert_leak_free(
+        format!("{:?}", controller.library()).as_bytes(),
+        "LibraryIndex Debug",
+    );
+    assert_leak_free(
+        format!("{:?}", controller.library_status()).as_bytes(),
+        "LibraryStatus Debug",
     );
 }
 

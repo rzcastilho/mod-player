@@ -11,15 +11,26 @@
 //! off-real-time half of the seam (`SourceHost`, `SourceCommand`,
 //! `SourceEvent`, ...) without changing `AudioSource` itself
 //! (contracts/audio-source-host.md).
+//!
+//! `catalog` (004-search-and-library-browse) adds catalog/library
+//! identities and request/reply payloads (data-model.md §1) carried by the
+//! additive `SourceCommand`/`SourceEvent` variants in `types`
+//! (contracts/catalog-source.md).
 
+pub mod catalog;
 pub mod host;
 pub mod types;
 
+pub use catalog::{
+    AlbumId, AlbumIdError, AlbumRef, ArtistId, ArtistIdError, ArtistRef, CatalogError, LibraryItem,
+    LibraryPage, LibrarySet, PlaylistId, PlaylistIdError, PlaylistRef, ReleaseDate,
+    SearchGroupPage, SearchHit, SearchKind, SearchPage, TrackList, TrackListSource,
+    pack_request_id, unpack_request_id,
+};
 pub use host::{SourceHost, SourceRtShared};
 pub use types::{
-    AccountReadError, Availability, BufferStatus, Intent, Program, RemoteCommand, Repeat,
-    SourceCommand, SourceEvent, SourceHealth, TrackId, TrackIdError, TrackRef, TransferContext,
-    VolumePercent,
+    Availability, BufferStatus, Intent, Program, RemoteCommand, Repeat, SourceCommand, SourceEvent,
+    SourceHealth, TrackId, TrackIdError, TrackRef, TrackRefExtras, TransferContext, VolumePercent,
 };
 
 /// A producer of interleaved stereo `f32` frames at its own fixed sample rate.

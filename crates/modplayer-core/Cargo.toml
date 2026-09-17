@@ -12,6 +12,7 @@ modplayer-audio-io = { path = "../modplayer-audio-io", version = "0.1.0" }
 modplayer-audio-source = { path = "../modplayer-audio-source", version = "0.1.0" }
 modplayer-audio-source-synthetic = { path = "../modplayer-audio-source-synthetic", version = "0.1.0" }
 serde.workspace = true
+serde_json.workspace = true
 toml.workspace = true
 directories.workspace = true
 fluent-templates.workspace = true

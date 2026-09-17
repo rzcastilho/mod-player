@@ -20,10 +20,10 @@ sample-notification-warning = This is a sample warning notification.
 sample-notification-info = This is a sample info notification.
 
 nav-library = Library
+nav-search = Search
 nav-now-playing = Now Playing
 nav-plugins = Plugins
 nav-settings = Settings
-placeholder-library = The Library is coming in a future update.
 placeholder-plugins = Plugins are coming in a future update.
 
 severity-critical = Critical

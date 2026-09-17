@@ -379,6 +379,34 @@ impl Queue {
         }
     }
 
+    /// Replace the whole context like `replace_context`, then start at
+    /// `cursor` (clamped to the last valid index) instead of the first
+    /// item — **Play now** on a track row picked from a list that is not
+    /// itself the current context (contracts/library-and-search-core.md
+    /// §2, FR-006): the acting list becomes the new context, playback
+    /// starts at the clicked track. `Restart`, like `replace_context`.
+    pub fn replace_context_at(&mut self, tracks: Vec<TrackRef>, cursor: usize) -> QueueChange {
+        let change = self.replace_context(tracks);
+        if self.context.is_empty() {
+            return change;
+        }
+        let index = cursor.min(self.context.len() - 1);
+        if index != 0 {
+            self.context_pos = Some(index);
+            let item = self.context[index].clone();
+            self.current = Some(item.clone());
+            // Replace the history entry `replace_context` just pushed for
+            // index 0 with the item playback actually starts on.
+            self.history.pop_back();
+            self.push_history(item.uid);
+        }
+        QueueChange {
+            order_changed: true,
+            cursor_changed: true,
+            playback: PlaybackChange::Restart,
+        }
+    }
+
     /// Append tracks to the context (FR-011).
     pub fn add_context(&mut self, tracks: Vec<TrackRef>) -> QueueChange {
         if tracks.is_empty() {
@@ -548,6 +576,30 @@ impl Queue {
             order_changed: true,
             cursor_changed: false,
             playback: PlaybackChange::None,
+        }
+    }
+
+    /// Append several new tracks directly to the tail of the play-next
+    /// block, preserving order — **Play next** on an album/playlist/artist
+    /// row (contracts/library-and-search-core.md §2, FR-007): repeated
+    /// `play_next_track`, so the first call's auto-start behaviour (queue
+    /// was empty) still applies to the very first of `tracks`.
+    pub fn play_next_tracks(&mut self, tracks: Vec<TrackRef>) -> QueueChange {
+        let mut order_changed = false;
+        let mut cursor_changed = false;
+        let mut playback = PlaybackChange::None;
+        for track in tracks {
+            let change = self.play_next_track(track);
+            order_changed |= change.order_changed;
+            cursor_changed |= change.cursor_changed;
+            if matches!(playback, PlaybackChange::None) {
+                playback = change.playback;
+            }
+        }
+        QueueChange {
+            order_changed,
+            cursor_changed,
+            playback,
         }
     }
 
@@ -1333,6 +1385,91 @@ mod tests {
         // session (research R3).
         q.reveal(track("y"));
         assert_eq!(q.effective_order().len(), 2);
+    }
+
+    #[test]
+    fn replace_context_at_starts_on_the_clicked_track() {
+        let mut q = Queue::new();
+        let change = q.replace_context_at(tracks(&["a", "b", "c"]), 1);
+        assert_eq!(change.playback, PlaybackChange::Restart);
+        assert_eq!(q.current().unwrap().track.id.as_str(), "spotify:track:b");
+        let order: Vec<_> = q
+            .effective_order()
+            .iter()
+            .map(|i| i.track.id.as_str().to_string())
+            .collect();
+        assert_eq!(
+            order,
+            vec!["spotify:track:b", "spotify:track:c"],
+            "context still holds only the upcoming items from cursor onward"
+        );
+    }
+
+    #[test]
+    fn replace_context_at_clamps_a_cursor_past_the_end() {
+        let mut q = Queue::new();
+        q.replace_context_at(tracks(&["a", "b"]), 99);
+        assert_eq!(q.current().unwrap().track.id.as_str(), "spotify:track:b");
+    }
+
+    #[test]
+    fn replace_context_at_zero_behaves_like_replace_context() {
+        let mut q = Queue::new();
+        let change = q.replace_context_at(tracks(&["a", "b"]), 0);
+        assert_eq!(change.playback, PlaybackChange::Restart);
+        assert_eq!(q.current().unwrap().track.id.as_str(), "spotify:track:a");
+    }
+
+    #[test]
+    fn replace_context_at_with_no_tracks_is_empty_change() {
+        let mut q = Queue::new();
+        let change = q.replace_context_at(vec![], 0);
+        assert_eq!(change.playback, PlaybackChange::Empty);
+        assert!(q.is_empty());
+    }
+
+    #[test]
+    fn play_next_tracks_preserves_order_at_the_tail() {
+        let mut q = Queue::new();
+        q.replace_context(tracks(&["a", "b"]));
+        q.play_next_tracks(tracks(&["x", "y", "z"]));
+        let order: Vec<_> = q
+            .effective_order()
+            .iter()
+            .map(|i| i.track.id.as_str().to_string())
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                "spotify:track:a",
+                "spotify:track:x",
+                "spotify:track:y",
+                "spotify:track:z",
+                "spotify:track:b",
+            ]
+        );
+    }
+
+    #[test]
+    fn play_next_tracks_on_an_empty_queue_auto_starts_the_first() {
+        let mut q = Queue::new();
+        let change = q.play_next_tracks(tracks(&["x", "y"]));
+        assert!(matches!(change.playback, PlaybackChange::MoveTo(_)));
+        assert_eq!(q.current().unwrap().track.id.as_str(), "spotify:track:x");
+        let order: Vec<_> = q
+            .effective_order()
+            .iter()
+            .map(|i| i.track.id.as_str().to_string())
+            .collect();
+        assert_eq!(order, vec!["spotify:track:x", "spotify:track:y"]);
+    }
+
+    #[test]
+    fn play_next_tracks_with_no_tracks_is_a_no_op() {
+        let mut q = Queue::new();
+        q.replace_context(tracks(&["a"]));
+        let change = q.play_next_tracks(vec![]);
+        assert_eq!(change, QueueChange::none());
     }
 
     #[test]

@@ -12,13 +12,60 @@
 //! lock in `fill`/`seek` for the sake of a simple, obviously-correct
 //! implementation.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use modplayer_audio_source::{
-    AccountReadError, AudioSource, BufferStatus, Program, RemoteCommand, SourceCommand,
-    SourceEvent, SourceHealth, SourceHost, SourceRtShared, TrackId, TrackRef, TransferContext,
+    AlbumRef, ArtistRef, AudioSource, BufferStatus, CatalogError, LibraryPage, LibrarySet, Program,
+    RemoteCommand, SearchPage, SourceCommand, SourceEvent, SourceHealth, SourceHost,
+    SourceRtShared, TrackId, TrackList, TrackListSource, TrackRef, TransferContext,
 };
+
+/// Scripted reply to the next `SourceCommand::HydrateRefs`
+/// (contracts/catalog-source.md §2 `Hydrated`; unlike the other three
+/// catalog replies this event carries no `Result` — `missing` is how a
+/// hydration "failure" is expressed).
+#[derive(Debug, Clone, Default)]
+pub struct HydratedReply {
+    pub tracks: Vec<TrackRef>,
+    pub albums: Vec<AlbumRef>,
+    pub artists: Vec<ArtistRef>,
+    pub missing: Vec<String>,
+}
+
+/// `query.trim()`, used as the key for scripted search replies so a
+/// leading/trailing-space query (e.g. from `SearchSession.query`, already
+/// trimmed) matches the way it was scripted.
+fn normalize_query(query: &str) -> String {
+    query.trim().to_string()
+}
+
+/// Injectable clock (contracts/catalog-source.md §4: "using the
+/// host-injected clock"): `Instant::now` by default, replaced in tests via
+/// `ScriptedHostHandle::set_clock`. Wrapped so `Shared` can still derive
+/// `Debug`/`Default` (a bare `Arc<dyn Fn() -> Instant>` cannot).
+#[derive(Clone)]
+struct Clock(Arc<dyn Fn() -> Instant + Send + Sync>);
+
+impl Clock {
+    fn now(&self) -> Instant {
+        (self.0)()
+    }
+}
+
+impl Default for Clock {
+    fn default() -> Self {
+        Self(Arc::new(Instant::now))
+    }
+}
+
+impl fmt::Debug for Clock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Clock(..)")
+    }
+}
 
 /// Deterministic fixture audio for the track at `order[track_index]`
 /// (contracts/audio-source-host.md §5): a DC offset unique to the track
@@ -48,9 +95,37 @@ struct Shared {
     events: VecDeque<SourceEvent>,
     registered: bool,
     device_name: String,
-    /// Scripted reply to `SourceCommand::ListAccountTracks`; `None` (the
-    /// default) replies `Err(Unavailable)`.
-    account_tracks: Option<Result<Vec<TrackRef>, AccountReadError>>,
+    /// Every `SourceCommand` this host has received, in order
+    /// (contracts/catalog-source.md §4 `record_commands`).
+    commands: Vec<SourceCommand>,
+    /// Delay applied to every catalog reply scheduled after
+    /// `script_catalog_delay` last set it (contracts/catalog-source.md §4).
+    catalog_delay: Duration,
+    /// See [`Clock`].
+    clock: Clock,
+    /// Catalog replies scheduled for delivery once `clock.now()` reaches
+    /// their deadline (contracts/catalog-source.md §4).
+    pending_catalog: Vec<(Instant, SourceEvent)>,
+    /// Scripted search replies, queued per (trimmed) query, consumed FIFO
+    /// by the next matching `SearchCatalog`.
+    search_scripts: HashMap<String, VecDeque<Result<SearchPage, CatalogError>>>,
+    /// Scripted library pages, queued per set, consumed FIFO by the next
+    /// matching `FetchLibrary`.
+    library_scripts: HashMap<LibrarySet, VecDeque<Result<LibraryPage, CatalogError>>>,
+    /// Scripted track-list replies, queued per source, consumed FIFO by the
+    /// next matching `FetchTrackList`.
+    track_list_scripts: HashMap<TrackListSource, VecDeque<Result<TrackList, CatalogError>>>,
+    /// Scripted hydration replies, consumed FIFO by the next `HydrateRefs`.
+    hydrate_scripts: VecDeque<HydratedReply>,
+}
+
+impl Shared {
+    /// Queue `event` for delivery once `clock.now() + catalog_delay` is
+    /// reached (contracts/catalog-source.md §4).
+    fn schedule_catalog_reply(&mut self, event: SourceEvent) {
+        let deadline = self.clock.now() + self.catalog_delay;
+        self.pending_catalog.push((deadline, event));
+    }
 }
 
 /// A cloneable handle onto a `ScriptedHost`'s script state, usable after
@@ -146,11 +221,70 @@ impl ScriptedHostHandle {
         self.lock().program.clone()
     }
 
-    /// Script the reply the next `SourceCommand::ListAccountTracks` returns
-    /// (Stage 2 "Play from account" over the session). `None` was never set
-    /// → the host replies `Err(Unavailable)`.
-    pub fn account_tracks(&self, result: Result<Vec<TrackRef>, AccountReadError>) {
-        self.lock().account_tracks = Some(result);
+    /// Queue a reply for the next `SearchCatalog` whose `query.trim()`
+    /// equals `query` (contracts/catalog-source.md §4). Replies for the
+    /// same query are consumed FIFO across successive commands (e.g. a
+    /// "Show more" page).
+    pub fn script_search(&self, query: impl Into<String>, reply: Result<SearchPage, CatalogError>) {
+        let key = normalize_query(&query.into());
+        self.lock()
+            .search_scripts
+            .entry(key)
+            .or_default()
+            .push_back(reply);
+    }
+
+    /// Queue `pages` for successive `FetchLibrary` commands against `set`,
+    /// consumed FIFO (contracts/catalog-source.md §4).
+    pub fn script_library(&self, set: LibrarySet, pages: Vec<Result<LibraryPage, CatalogError>>) {
+        self.lock()
+            .library_scripts
+            .entry(set)
+            .or_default()
+            .extend(pages);
+    }
+
+    /// Queue a reply for the next `FetchTrackList` against `source`
+    /// (contracts/catalog-source.md §4).
+    pub fn script_track_list(
+        &self,
+        source: TrackListSource,
+        reply: Result<TrackList, CatalogError>,
+    ) {
+        self.lock()
+            .track_list_scripts
+            .entry(source)
+            .or_default()
+            .push_back(reply);
+    }
+
+    /// Queue a reply for the next `HydrateRefs` (contracts/catalog-
+    /// source.md §4).
+    pub fn script_hydrate(&self, reply: HydratedReply) {
+        self.lock().hydrate_scripts.push_back(reply);
+    }
+
+    /// Every catalog reply scripted after this call is delivered `delay`
+    /// after the command that requested it, measured by the injected clock
+    /// (`set_clock`) and only realised on `poll()` (contracts/catalog-
+    /// source.md §4). `Duration::ZERO` (the default) delivers on the very
+    /// next `poll()`.
+    pub fn script_catalog_delay(&self, delay: Duration) {
+        self.lock().catalog_delay = delay;
+    }
+
+    /// Replace the clock catalog-reply delays are measured against
+    /// (contracts/catalog-source.md §4); production code never calls this
+    /// — tests inject a fixed/advancing fake instead of sleeping.
+    pub fn set_clock(&self, now: impl Fn() -> Instant + Send + Sync + 'static) {
+        self.lock().clock = Clock(Arc::new(now));
+    }
+
+    /// Every `SourceCommand` this host has received so far, in order
+    /// (contracts/catalog-source.md §4) — e.g. to assert "no request
+    /// issued" (FR-001, FR-005, FR-018).
+    pub fn record_commands(&self) -> Vec<SourceCommand> {
+        self.lock().commands.clone()
     }
 }
 
@@ -218,6 +352,45 @@ impl ScriptedHost {
         self.handle.emit(event);
     }
 
+    /// See `ScriptedHostHandle::script_search`.
+    pub fn script_search(&self, query: impl Into<String>, reply: Result<SearchPage, CatalogError>) {
+        self.handle.script_search(query, reply);
+    }
+
+    /// See `ScriptedHostHandle::script_library`.
+    pub fn script_library(&self, set: LibrarySet, pages: Vec<Result<LibraryPage, CatalogError>>) {
+        self.handle.script_library(set, pages);
+    }
+
+    /// See `ScriptedHostHandle::script_track_list`.
+    pub fn script_track_list(
+        &self,
+        source: TrackListSource,
+        reply: Result<TrackList, CatalogError>,
+    ) {
+        self.handle.script_track_list(source, reply);
+    }
+
+    /// See `ScriptedHostHandle::script_hydrate`.
+    pub fn script_hydrate(&self, reply: HydratedReply) {
+        self.handle.script_hydrate(reply);
+    }
+
+    /// See `ScriptedHostHandle::script_catalog_delay`.
+    pub fn script_catalog_delay(&self, delay: Duration) {
+        self.handle.script_catalog_delay(delay);
+    }
+
+    /// See `ScriptedHostHandle::set_clock`.
+    pub fn set_clock(&self, now: impl Fn() -> Instant + Send + Sync + 'static) {
+        self.handle.set_clock(now);
+    }
+
+    /// See `ScriptedHostHandle::record_commands`.
+    pub fn record_commands(&self) -> Vec<SourceCommand> {
+        self.handle.record_commands()
+    }
+
     /// See `ScriptedHostHandle::load_count`.
     pub fn load_count(&self) -> u32 {
         self.handle.load_count()
@@ -248,6 +421,7 @@ impl SourceHost for ScriptedHost {
 
     fn command(&mut self, cmd: SourceCommand) {
         let mut lock = self.lock();
+        lock.commands.push(cmd.clone());
         match cmd {
             SourceCommand::Initialize { device_name, .. } => {
                 lock.registered = true;
@@ -309,19 +483,69 @@ impl SourceHost for ScriptedHost {
             SourceCommand::SetVolume(_) => {}
             SourceCommand::RequestTransferHere => {}
             SourceCommand::ReportState { .. } => {}
-            SourceCommand::ListAccountTracks { request_id, .. } => {
-                let result = lock
-                    .account_tracks
-                    .clone()
-                    .unwrap_or(Err(AccountReadError::Unavailable));
-                lock.events
-                    .push_back(SourceEvent::AccountTracks { request_id, result });
+            SourceCommand::SearchCatalog {
+                request_id, query, ..
+            } => {
+                let key = normalize_query(&query);
+                let reply = lock
+                    .search_scripts
+                    .get_mut(&key)
+                    .and_then(VecDeque::pop_front);
+                if let Some(result) = reply {
+                    lock.schedule_catalog_reply(SourceEvent::SearchResult { request_id, result });
+                }
+            }
+            SourceCommand::FetchLibrary {
+                request_id, set, ..
+            } => {
+                let reply = lock
+                    .library_scripts
+                    .get_mut(&set)
+                    .and_then(VecDeque::pop_front);
+                if let Some(result) = reply {
+                    lock.schedule_catalog_reply(SourceEvent::LibraryPage { request_id, result });
+                }
+            }
+            SourceCommand::FetchTrackList { request_id, source } => {
+                let reply = lock
+                    .track_list_scripts
+                    .get_mut(&source)
+                    .and_then(VecDeque::pop_front);
+                if let Some(result) = reply {
+                    lock.schedule_catalog_reply(SourceEvent::TrackList { request_id, result });
+                }
+            }
+            SourceCommand::HydrateRefs { request_id, .. } => {
+                if let Some(reply) = lock.hydrate_scripts.pop_front() {
+                    lock.schedule_catalog_reply(SourceEvent::Hydrated {
+                        request_id,
+                        tracks: reply.tracks,
+                        albums: reply.albums,
+                        artists: reply.artists,
+                        missing: reply.missing,
+                    });
+                }
+            }
+            SourceCommand::CancelCatalog { .. } => {
+                // Best effort (contracts/catalog-source.md §1): this double
+                // tracks no per-request cancellation state, matching "a
+                // late reply is still delivered and the host discards it
+                // by id".
             }
         }
     }
 
     fn poll(&mut self) -> Vec<SourceEvent> {
-        self.lock().events.drain(..).collect()
+        let mut lock = self.lock();
+        let mut events: Vec<SourceEvent> = lock.events.drain(..).collect();
+        let now = lock.clock.now();
+        let (ready, pending): (Vec<_>, Vec<_>) = lock
+            .pending_catalog
+            .drain(..)
+            .partition(|(deadline, _)| *deadline <= now);
+        lock.pending_catalog = pending;
+        events.extend(ready.into_iter().map(|(_, event)| event));
+        events
     }
 
     fn buffer_status(&self) -> BufferStatus {

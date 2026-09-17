@@ -30,6 +30,7 @@ use modplayer_audio_io::CpalBackend;
 use modplayer_audio_source_connect::{
     ConnectConfig, ConnectSource, CredentialError, ReceiverCredentials,
 };
+use modplayer_core::library::LibraryPaths;
 use modplayer_core::{PlaybackController, SettingsStore};
 use modplayer_secure_store::{EntryName, KeyringSecureStore, SecureStore};
 use modplayer_ui::App;
@@ -77,8 +78,14 @@ fn main() -> anyhow::Result<()> {
             store: Arc::clone(&secure_store),
         }),
     });
+    // 004-search-and-library-browse (research R6/R13): the library mirror
+    // and play log live under the platform data dir; `None` (unresolvable
+    // dir) means an in-memory-only library, never a crash. The 2026-09-17
+    // manual walk (quickstart M9/M10) found this opt-in missing from the
+    // binary — nothing was ever persisted or reloaded.
     let mut controller =
-        PlaybackController::new(CpalBackend::new(), connect_source, settings_store);
+        PlaybackController::new(CpalBackend::new(), connect_source, settings_store)
+            .with_library_paths(LibraryPaths::resolve());
     controller.launch();
 
     let auth_service: Arc<dyn AuthorizationService> = Arc::new(SpotifyAuthorizationService::new());

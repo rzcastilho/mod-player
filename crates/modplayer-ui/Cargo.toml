@@ -16,6 +16,8 @@ modplayer-secure-store = { path = "../modplayer-secure-store", version = "0.1.0"
 eframe.workspace = true
 egui.workspace = true
 fluent-templates.workspace = true
+ureq.workspace = true
+image.workspace = true
 
 [dev-dependencies]
 time.workspace = true

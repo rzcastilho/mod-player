@@ -12,16 +12,25 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use std::time::Duration;
+
 use egui::accesskit::{Role, Toggled};
 use egui::{Context, Pos2, RawInput, Rect};
 use modplayer_audio_io::{FakeBackend, FakeDevice};
-use modplayer_audio_source::{Availability, Repeat, TrackId, TrackRef};
+use modplayer_audio_source::{
+    ArtistId, ArtistRef, Availability, CatalogError, LibraryItem, LibraryPage, LibrarySet, Repeat,
+    SearchGroupPage, SearchHit, SearchKind, SearchPage, TrackId, TrackList, TrackListSource,
+    TrackRef,
+};
 use modplayer_audio_source_synthetic::ScriptedHost;
+use modplayer_audio_source_synthetic::scripted::HydratedReply;
 use modplayer_core::settings::SettingsStore;
 use modplayer_core::{
-    ActiveState, NotificationAction, NotificationCenter, PlaybackController, Severity, tr,
+    ActiveState, NotificationAction, NotificationCenter, PlaybackController, Severity, tr, tr_args,
 };
 use modplayer_engine::{BufferPreset, DeviceId, FrameCount, SampleRate};
+use modplayer_ui::detail_view::{self, DetailTarget};
+use modplayer_ui::library_view::{self, LibraryTab, LibraryViewState};
 
 struct TempDir(PathBuf);
 
@@ -104,7 +113,10 @@ fn active_controller(
 
 fn default_input() -> RawInput {
     RawInput {
-        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0))),
+        // Tall enough that a 20-row search "Show more" page (T033) stays
+        // fully within the clip rect — every other test here renders far
+        // fewer widgets and is unaffected by the extra headroom.
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 2000.0))),
         ..Default::default()
     }
 }
@@ -365,4 +377,376 @@ fn notification_action_buttons_expose_accessible_names() {
     find_one(&nodes, Role::Button, &tr("action-status-page"));
     find_one(&nodes, Role::Button, &tr("action-retry"));
     find_one(&nodes, Role::Button, &tr("notification-dismiss"));
+}
+
+// -- Search (004-search-and-library-browse, T033) ---------------------------
+
+fn search_track_hit(id: &str, title: &str) -> SearchHit {
+    SearchHit::Track(TrackRef::new(
+        TrackId::new(format!("spotify:track:{id}")).unwrap(),
+        title,
+        vec!["Artist".to_string()],
+        None,
+        None,
+        180_000,
+        Availability::Available,
+    ))
+}
+
+/// A full four-group reply with `track_count` tracks and `next_offset` set
+/// on the Tracks group whenever it is a full page (so "Show more" renders
+/// too) — the other three groups empty.
+fn search_reply(track_count: usize) -> SearchPage {
+    let items: Vec<SearchHit> = (0..track_count)
+        .map(|i| search_track_hit(&i.to_string(), &format!("Track {i}")))
+        .collect();
+    let next_offset = if track_count >= 20 {
+        Some(track_count as u32)
+    } else {
+        None
+    };
+    SearchPage {
+        groups: vec![
+            SearchGroupPage {
+                kind: SearchKind::Track,
+                items,
+                next_offset,
+            },
+            SearchGroupPage {
+                kind: SearchKind::Album,
+                items: vec![],
+                next_offset: None,
+            },
+            SearchGroupPage {
+                kind: SearchKind::Artist,
+                items: vec![],
+                next_offset: None,
+            },
+            SearchGroupPage {
+                kind: SearchKind::Playlist,
+                items: vec![],
+                next_offset: None,
+            },
+        ],
+        unsupported: vec![],
+    }
+}
+
+/// Drive one query to a `Loaded` Tracks group with `track_count` items,
+/// scripted through `handle`.
+fn search_and_settle(
+    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+    handle: &modplayer_audio_source_synthetic::ScriptedHostHandle,
+    query: &str,
+    track_count: usize,
+) {
+    handle.script_search(query, Ok(search_reply(track_count)));
+    let now = controller.now();
+    controller.search_mut().set_query(query, now);
+    controller.set_clock(move || now + Duration::from_millis(200));
+    controller.tick(); // issues the request
+    controller.tick(); // drains the reply
+}
+
+#[test]
+fn search_box_exposes_a_text_input_labelled_search() {
+    let (mut controller, _handle, _dir) = active_controller("search-box");
+    let mut artwork = modplayer_ui::artwork::ArtworkCache::new();
+    let mut focus = false;
+
+    let nodes = render_nodes(|ui| {
+        modplayer_ui::search_view::show(ui, &mut controller, &mut artwork, &mut focus);
+    });
+
+    let text_inputs: Vec<_> = nodes.iter().filter(|n| n.role == Role::TextInput).collect();
+    assert_eq!(
+        text_inputs.len(),
+        1,
+        "expected exactly one Role::TextInput node, got {text_inputs:?}"
+    );
+    assert!(
+        text_inputs[0].labelled_by_something,
+        "the search box must be associated with its \"{}\" label: {:?}",
+        tr("search-placeholder"),
+        text_inputs[0]
+    );
+}
+
+#[test]
+fn group_headers_expose_role_header_and_the_fixed_names() {
+    let (mut controller, handle, _dir) = active_controller("search-headers");
+    search_and_settle(&mut controller, &handle, "abba", 2);
+
+    let mut artwork = modplayer_ui::artwork::ArtworkCache::new();
+    let mut focus = false;
+    let nodes = render_nodes(|ui| {
+        modplayer_ui::search_view::show(ui, &mut controller, &mut artwork, &mut focus);
+    });
+
+    find_one(&nodes, Role::Header, &tr("search-group-tracks"));
+    // Empty groups (Albums/Artists/Playlists) must not render a header at
+    // all (contracts/ui-surface.md §2: "omitted when Empty/Unsupported/
+    // Idle").
+    assert!(find_all(&nodes, Role::Header, &tr("search-group-albums")).is_empty());
+    assert!(find_all(&nodes, Role::Header, &tr("search-group-artists")).is_empty());
+    assert!(find_all(&nodes, Role::Header, &tr("search-group-playlists")).is_empty());
+}
+
+#[test]
+fn show_more_button_exposes_its_accessible_name_when_a_further_page_exists() {
+    let (mut controller, handle, _dir) = active_controller("search-show-more");
+    search_and_settle(&mut controller, &handle, "abba", 20);
+
+    let mut artwork = modplayer_ui::artwork::ArtworkCache::new();
+    let mut focus = false;
+    let nodes = render_nodes(|ui| {
+        modplayer_ui::search_view::show(ui, &mut controller, &mut artwork, &mut focus);
+    });
+
+    let expected = tr_args("search-show-more", &[("group", tr("search-group-tracks"))]);
+    let button = find_one(&nodes, Role::Button, &expected);
+    assert!(!button.disabled, "Show more must start enabled: {button:?}");
+}
+
+#[test]
+fn each_row_exposes_a_list_item_and_an_actions_button() {
+    let (mut controller, handle, _dir) = active_controller("search-row-menu");
+    search_and_settle(&mut controller, &handle, "abba", 1);
+
+    let mut artwork = modplayer_ui::artwork::ArtworkCache::new();
+    let mut focus = false;
+    let nodes = render_nodes(|ui| {
+        modplayer_ui::search_view::show(ui, &mut controller, &mut artwork, &mut focus);
+    });
+
+    let row_name = "Track 0 — Artist";
+    find_one(&nodes, Role::ListItem, row_name);
+    // The trailing "…" button that opens the six-action menu
+    // (contracts/ui-surface.md §5).
+    find_one(
+        &nodes,
+        Role::Button,
+        &tr_args("row-actions", &[("name", row_name.to_string())]),
+    );
+}
+
+// -- Library & detail (004-search-and-library-browse, T070) -----------------
+//
+// Search's own three tests above already pin the row/menu contract that
+// `rows::list_row` renders identically everywhere (FR-004) — this section
+// covers the elements unique to the Library and detail surfaces: the tab
+// row, the "Refreshing…" status label reachable only through an actual
+// resync (unlike Search's, driven straight off `SearchSession`), and the
+// detail view's Back control.
+
+fn library_track(id: &str, title: &str) -> TrackRef {
+    TrackRef::new(
+        TrackId::new(id).unwrap(),
+        title,
+        vec!["Artist".to_string()],
+        None,
+        None,
+        180_000,
+        Availability::Available,
+    )
+}
+
+fn empty_page(set: LibrarySet) -> LibraryPage {
+    LibraryPage {
+        set,
+        items: vec![],
+        next_page: None,
+        sync_token: None,
+    }
+}
+
+/// Script and settle a one-track Saved Tracks sync (the other three sets
+/// empty), so the Library view renders real content rather than an empty
+/// or loading state.
+fn sync_one_saved_track(
+    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+    handle: &modplayer_audio_source_synthetic::ScriptedHostHandle,
+) {
+    let track = library_track("spotify:track:a", "Track A");
+    handle.script_hydrate(HydratedReply {
+        tracks: vec![track.clone()],
+        ..Default::default()
+    });
+    handle.script_library(
+        LibrarySet::SavedTracks,
+        vec![Ok(LibraryPage {
+            set: LibrarySet::SavedTracks,
+            items: vec![LibraryItem::Track {
+                track,
+                added_at: None,
+            }],
+            next_page: None,
+            sync_token: None,
+        })],
+    );
+    handle.script_library(
+        LibrarySet::SavedAlbums,
+        vec![Ok(empty_page(LibrarySet::SavedAlbums))],
+    );
+    handle.script_library(
+        LibrarySet::FollowedArtists,
+        vec![Ok(empty_page(LibrarySet::FollowedArtists))],
+    );
+    handle.script_library(
+        LibrarySet::Playlists,
+        vec![Ok(empty_page(LibrarySet::Playlists))],
+    );
+    controller.library_retry_sync();
+    for _ in 0..12 {
+        controller.tick();
+    }
+}
+
+#[test]
+fn library_tabs_expose_role_tab_in_the_fixed_order() {
+    let (mut controller, _handle, _dir) = active_controller("library-tabs");
+    let mut artwork = modplayer_ui::artwork::ArtworkCache::new();
+    let mut state = LibraryViewState::default();
+
+    let nodes = render_nodes(|ui| {
+        let _ = library_view::show(ui, &mut controller, &mut artwork, &mut state);
+    });
+
+    for key in [
+        "library-tab-saved-tracks",
+        "library-tab-saved-albums",
+        "library-tab-followed-artists",
+        "library-tab-playlists",
+        "library-tab-recently-played",
+    ] {
+        find_one(&nodes, Role::Tab, &tr(key));
+    }
+}
+
+#[test]
+fn library_row_exposes_a_list_item_and_an_actions_button() {
+    let (mut controller, handle, _dir) = active_controller("library-row-menu");
+    sync_one_saved_track(&mut controller, &handle);
+
+    let mut artwork = modplayer_ui::artwork::ArtworkCache::new();
+    let mut state = LibraryViewState {
+        tab: LibraryTab::SavedTracks,
+        ..LibraryViewState::default()
+    };
+    let nodes = render_nodes(|ui| {
+        let _ = library_view::show(ui, &mut controller, &mut artwork, &mut state);
+    });
+
+    let row_name = "Track A — Artist";
+    find_one(&nodes, Role::ListItem, row_name);
+    find_one(
+        &nodes,
+        Role::Button,
+        &tr_args("row-actions", &[("name", row_name.to_string())]),
+    );
+}
+
+#[test]
+fn refreshing_status_label_exposes_role_status_after_a_rate_limited_resync() {
+    let (mut controller, handle, _dir) = active_controller("library-refreshing");
+    sync_one_saved_track(&mut controller, &handle);
+    assert!(
+        !controller.library_status().refreshing,
+        "test setup: a clean sync must not start out refreshing"
+    );
+
+    // A forced resync whose Saved Tracks page comes back rate-limited
+    // (contracts/library-and-search-core.md §3 "Syncing --RateLimited-->
+    // BackingOff") drives `library_status().refreshing` true while the
+    // existing snapshot stays on screen (FR-015/SC-005).
+    handle.script_library(
+        LibrarySet::SavedTracks,
+        vec![Err(CatalogError::RateLimited {
+            retry_after_ms: None,
+        })],
+    );
+    controller.library_retry_sync();
+    controller.tick();
+    assert!(
+        controller.library_status().refreshing,
+        "test setup: the scripted rate limit must trip the scheduler's backoff"
+    );
+
+    let mut artwork = modplayer_ui::artwork::ArtworkCache::new();
+    let mut state = LibraryViewState {
+        tab: LibraryTab::SavedTracks,
+        ..LibraryViewState::default()
+    };
+    let nodes = render_nodes(|ui| {
+        let _ = library_view::show(ui, &mut controller, &mut artwork, &mut state);
+    });
+
+    let status = find_one(&nodes, Role::Status, &tr("refreshing"));
+    assert!(!status.disabled, "{status:?}");
+    // The prior snapshot must stay visible underneath the status label
+    // (FR-015: "stale + Refreshing…", never an empty/error state).
+    find_one(&nodes, Role::ListItem, "Track A — Artist");
+}
+
+#[test]
+fn detail_back_button_exposes_its_accessible_name() {
+    let (mut controller, handle, _dir) = active_controller("detail-back-a11y");
+    let id = ArtistId::new("spotify:artist:a").unwrap();
+    let artist = ArtistRef {
+        id: id.clone(),
+        name: "The Artist".to_string(),
+        artwork_url: None,
+    };
+    handle.script_hydrate(HydratedReply {
+        artists: vec![artist.clone()],
+        ..Default::default()
+    });
+    handle.script_library(
+        LibrarySet::FollowedArtists,
+        vec![Ok(LibraryPage {
+            set: LibrarySet::FollowedArtists,
+            items: vec![LibraryItem::Artist(artist)],
+            next_page: None,
+            sync_token: None,
+        })],
+    );
+    handle.script_library(
+        LibrarySet::SavedTracks,
+        vec![Ok(empty_page(LibrarySet::SavedTracks))],
+    );
+    handle.script_library(
+        LibrarySet::SavedAlbums,
+        vec![Ok(empty_page(LibrarySet::SavedAlbums))],
+    );
+    handle.script_library(
+        LibrarySet::Playlists,
+        vec![Ok(empty_page(LibrarySet::Playlists))],
+    );
+    controller.library_retry_sync();
+    for _ in 0..12 {
+        controller.tick();
+    }
+    handle.script_track_list(
+        TrackListSource::ArtistTop(id.clone()),
+        Ok(TrackList {
+            source: TrackListSource::ArtistTop(id.clone()),
+            tracks: vec![],
+        }),
+    );
+
+    let mut artwork = modplayer_ui::artwork::ArtworkCache::new();
+    let target = DetailTarget::Artist(id);
+    let nodes = render_nodes(|ui| {
+        let _ = detail_view::show(ui, &mut controller, &mut artwork, &target);
+    });
+    // First frame only issues `FetchTrackList`; settle it before asserting.
+    controller.tick();
+    let nodes2 = render_nodes(|ui| {
+        let _ = detail_view::show(ui, &mut controller, &mut artwork, &target);
+    });
+
+    for nodes in [&nodes, &nodes2] {
+        let back = find_one(nodes, Role::Button, &tr("detail-back"));
+        assert!(!back.disabled, "{back:?}");
+    }
 }

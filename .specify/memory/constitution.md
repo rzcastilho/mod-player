@@ -1,6 +1,28 @@
 <!--
 Sync Impact Report
 ==================
+Version change: 1.0.0 → 1.1.0
+Rationale: MINOR — Governance materially expanded with "Manual Scenario
+Sign-Off": the implementing agent executes each feature's quickstart.md
+manual scenarios itself (macOS recipe: Quartz CGEventPost + screencapture,
+live Keychain token for manual probes). Codifies the practice used in
+001–003 and reaffirmed by the maintainer on 2026-09-17 (004 T080).
+
+Modified principles: none (Principle VIII unchanged; the new subsection
+operationalises it)
+
+Added sections (1.1.0):
+- Governance › Manual Scenario Sign-Off
+
+Templates requiring updates (1.1.0):
+- .specify/templates/tasks-template.md: ✅ no change needed — the manual
+  scenario task already exists per feature; the subsection governs how it
+  is executed, not whether it is listed.
+- .specify/templates/plan-template.md / spec-template.md: ✅ no change
+  needed.
+
+Previous report (1.0.0)
+-----------------------
 Version change: TEMPLATE (unfilled) → 1.0.0
 Rationale: Initial ratification of the ModPlayer constitution. MAJOR because
 this establishes the founding principle set (not a mere expansion of a prior
@@ -249,4 +271,49 @@ Sync Impact Report at the top of this file. All other project templates
 (plan, spec, tasks, checklist) MUST be reviewed for consistency with the
 amended principles as part of the same PR.
 
-**Version**: 1.0.0 | **Ratified**: 2026-09-14 | **Last Amended**: 2026-09-14
+### Manual Scenario Sign-Off
+
+Every feature's `quickstart.md` ends with manual scenarios (M1–Mn) that
+gate the feature's completion. **The implementing agent executes them
+itself** against the real build, the real OS secure store and the
+maintainer's live signed-in account; they are never handed back to the
+maintainer as a to-do. Established in 001–003, reaffirmed 2026-09-17
+(004). Each scenario's result (pass / deviation, with evidence) is
+recorded in `tasks.md` on the scenario task and, where the behaviour
+differs from the spec, in `quickstart.md`/`research.md`.
+
+Recipe (macOS host; the only manual-run platform to date):
+
+- **Toolchain**: the shell may carry `RUSTUP_TOOLCHAIN` overriding
+  `rust-toolchain.toml`; run with `RUSTUP_TOOLCHAIN=1.95.0` (or
+  `env -u RUSTUP_TOOLCHAIN`) or the workspace fails its MSRV check.
+- **Launch**: `cargo build -p modplayer && ./target/debug/modplayer` in
+  the background; debug-only toggles (`MODPLAYER_CATALOG_FORCE_429`,
+  `MODPLAYER_ARTWORK_FORCE_FAIL`, `MODPLAYER_LIBRARY_FIXTURE=large`,
+  `MODPLAYER_CONFIG_DIR=$(mktemp -d)` for a fresh first launch) require a
+  relaunch with the variable set.
+- **Locate window**: Python `Quartz.CGWindowListCopyWindowInfo`, owner
+  `modplayer`, name `ModPlayer` → window id + bounds.
+- **Drive**: Python Quartz `CGEventPost` — mouse events at
+  window-relative coordinates, `CGEventCreateKeyboardEvent` +
+  `CGEventSetFlags` for shortcuts (`Cmd+1/2`, Enter, arrows),
+  `CGEventKeyboardSetUnicodeString` for typing. No test doubles: real
+  Keychain, real network.
+- **Capture evidence**: `screencapture -x -o -l <windowid> <png>`; read
+  the image back and judge the scenario from it plus the app log.
+- **Helper scripts live inside the worktree** (`target/manual-walk/`,
+  gitignored): the scope-guard hook denies writes and shell redirects to
+  the scratchpad, `/tmp` and the memory directory.
+- **Live token for `#[ignore = "manual"]` probes**: the app's own
+  credential — `security find-generic-password -s ModPlayer
+  -a session-credential -w | jq -r .access_token` (≈ 1 h validity;
+  relaunch the app to refresh). Never print it; filter
+  `bearer|access_token` from captured output.
+
+**Rationale**: the manual scenarios are the only verification that
+touches the real service, the real secure store and real audio hardware
+(Principle VIII); leaving them unexecuted turns the sign-off into a
+formality and has, in 003, hidden six live-only defects until the agent
+actually drove the app.
+
+**Version**: 1.1.0 | **Ratified**: 2026-09-14 | **Last Amended**: 2026-09-17

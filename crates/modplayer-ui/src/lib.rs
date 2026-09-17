@@ -11,11 +11,16 @@
 //! `specs/001-walking-skeleton/tasks.md`, T087-T095).
 
 pub mod app;
+pub mod artwork;
+pub mod detail_view;
 pub mod device_check;
+pub mod library_view;
 pub mod notifications;
 pub mod now_playing;
 pub mod privacy_notice;
 pub mod queue_view;
+pub mod rows;
+pub mod search_view;
 pub mod settings;
 pub mod shell;
 pub mod sign_in;

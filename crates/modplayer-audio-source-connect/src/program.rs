@@ -73,11 +73,44 @@ impl Marker {
 pub struct ProgramMap {
     pub generation: u64,
     pub order: Vec<TrackId>,
+    /// The slot every `LoadProgram` (re)starts at (`Program::cursor_index`
+    /// → `PlayingTrack::Index`): the first `TrackChanged` after a load is
+    /// expected there.
+    pub cursor_index: u32,
 }
 
 impl ProgramMap {
-    pub fn new(generation: u64, order: Vec<TrackId>) -> Self {
-        Self { generation, order }
+    pub fn new(generation: u64, order: Vec<TrackId>, cursor_index: u32) -> Self {
+        Self {
+            generation,
+            order,
+            cursor_index,
+        }
+    }
+
+    /// The slot the next `TrackChanged` is expected to start:
+    /// `last_index + 1` once something from this program has played,
+    /// otherwise the load's own `cursor_index`.
+    pub fn expected_next(&self, last_index: Option<u32>) -> u32 {
+        last_index.map_or(self.cursor_index, |i| i.wrapping_add(1))
+    }
+
+    /// Resolve a started track to its slot: by uri first
+    /// ([`index_of`](Self::index_of)); failing that, a uri absent from the
+    /// order while the expected slot exists is taken to be *that* slot —
+    /// the service played a **relinked alternative** (`Track.alternatives`)
+    /// in the original's place, which is what the official client does
+    /// silently. The 2026-09-17 manual walk (004 quickstart M4) hit this
+    /// on a saved track whose id had been retired: the alternative's uri
+    /// matched nothing, the start was reported as a foreign reveal, and
+    /// the host collapsed its 395-track context to that one item. A
+    /// genuinely foreign start (a remote client loading another context
+    /// onto this device) is indistinguishable here and is accepted as the
+    /// rarer case; `None` only when nothing is expected at all.
+    pub fn resolve(&self, uri: &str, last_index: Option<u32>) -> Option<u32> {
+        let expected = self.expected_next(last_index);
+        self.index_of(uri, Some(expected))
+            .or_else(|| ((expected as usize) < self.order.len()).then_some(expected))
     }
 
     /// Resolve `uri` to an index in `order`, preferring `expected_next`
@@ -113,6 +146,7 @@ mod tests {
                 track("spotify:track:a"),
                 track("spotify:track:b"),
             ],
+            0,
         );
         assert_eq!(map.index_of("spotify:track:a", Some(1)), Some(1));
         assert_eq!(map.index_of("spotify:track:a", Some(0)), Some(0));
@@ -121,13 +155,51 @@ mod tests {
 
     #[test]
     fn index_of_falls_back_to_first_match_when_expectation_is_wrong() {
-        let map = ProgramMap::new(1, vec![track("spotify:track:a"), track("spotify:track:b")]);
+        let map = ProgramMap::new(
+            1,
+            vec![track("spotify:track:a"), track("spotify:track:b")],
+            0,
+        );
         assert_eq!(map.index_of("spotify:track:b", Some(5)), Some(1));
     }
 
     #[test]
     fn index_of_none_when_absent() {
-        let map = ProgramMap::new(1, vec![track("spotify:track:a")]);
+        let map = ProgramMap::new(1, vec![track("spotify:track:a")], 0);
         assert_eq!(map.index_of("spotify:track:z", None), None);
+    }
+
+    #[test]
+    fn resolve_expects_the_cursor_slot_first_then_the_following_one() {
+        let map = ProgramMap::new(
+            1,
+            vec![
+                track("spotify:track:a"),
+                track("spotify:track:b"),
+                track("spotify:track:c"),
+            ],
+            1,
+        );
+        assert_eq!(map.expected_next(None), 1);
+        assert_eq!(map.expected_next(Some(1)), 2);
+        assert_eq!(map.resolve("spotify:track:b", None), Some(1));
+        assert_eq!(map.resolve("spotify:track:c", Some(1)), Some(2));
+        // A known uri wins over the expectation.
+        assert_eq!(map.resolve("spotify:track:a", Some(1)), Some(0));
+    }
+
+    #[test]
+    fn resolve_treats_an_unknown_uri_as_a_relinked_alternative_in_the_expected_slot() {
+        let map = ProgramMap::new(
+            1,
+            vec![track("spotify:track:a"), track("spotify:track:b")],
+            0,
+        );
+        // First start after the load: the alternative stands in for slot 0.
+        assert_eq!(map.resolve("spotify:track:alt-of-a", None), Some(0));
+        // Next start: slot 1.
+        assert_eq!(map.resolve("spotify:track:alt-of-b", Some(0)), Some(1));
+        // Nothing expected past the end of the order.
+        assert_eq!(map.resolve("spotify:track:alt", Some(1)), None);
     }
 }

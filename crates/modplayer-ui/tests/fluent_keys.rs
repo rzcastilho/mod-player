@@ -22,8 +22,10 @@ const SHELL_AND_NOTIFICATION_KEYS: &[&str] = &[
     "nav-now-playing",
     "nav-plugins",
     "nav-settings",
-    // Placeholder sections.
-    "placeholder-library",
+    // Placeholder sections. `placeholder-library` was retired in
+    // 004-search-and-library-browse (T026/T065: `library_view` replaces
+    // the placeholder wiring point) — `SCAFFOLD_KEYS_MUST_BE_GONE` below
+    // asserts it no longer resolves.
     "placeholder-plugins",
     // Notification area chrome.
     "severity-critical",
@@ -108,19 +110,17 @@ const PLAYBACK_ARG_KEYS: &[&str] = &[
     "banner-playing-elsewhere",
 ];
 
-/// Settings › Playback (device name) and Settings › Developer ("Play from
-/// account") keys added by 003-streaming-playback-and-queue (T062/T063/
-/// T064; contracts/ui-surface.md §3/§5) — resolved via plain `tr`.
+/// Settings › Playback (device name) keys added by
+/// 003-streaming-playback-and-queue (T062/T063/T064; contracts/ui-
+/// surface.md §3/§5) — resolved via plain `tr`. Developer's "Play from
+/// account" keys were retired alongside the scaffold itself in
+/// 004-search-and-library-browse (T062) — `SCAFFOLD_KEYS_MUST_BE_GONE`
+/// below asserts they no longer exist.
 const PLAYBACK_SETTINGS_KEYS: &[&str] = &[
     "setting-device-name",
     "setting-device-name-hint",
     "setting-device-name-desc",
     "setting-device-name-too-long",
-    "setting-play-from-account",
-    "setting-play-from-account-desc",
-    "play-from-account-loading",
-    "play-from-account-empty",
-    "play-from-account-failed",
 ];
 
 /// Every Settings-screen key (US5, T086): the eleven fixed-order category
@@ -255,6 +255,67 @@ const DEVICE_NAMED_KEYS: &[&str] = &[
     "device-available-again",
 ];
 
+/// Search keys (US1, T040; contracts/ui-surface.md §2/§9) with no Fluent
+/// placeholder — resolved via plain `tr`. `nav-search` lives in `app.ftl`
+/// alongside the rest of the nav rail; the rest live in `library.ftl`.
+/// `row-*`/`action-*`/`coming-soon`/`loading`/`detail-back` were already
+/// seeded in Foundational (T027) and are not repeated here.
+const SEARCH_KEYS: &[&str] = &[
+    "nav-search",
+    "search-placeholder",
+    "search-offline",
+    "search-group-tracks",
+    "search-group-albums",
+    "search-group-artists",
+    "search-group-playlists",
+    "refreshing",
+];
+
+/// Search keys that take a Fluent placeholder — resolved via `tr_args`.
+const SEARCH_ARG_KEYS: &[&str] = &["search-no-results", "search-show-more"];
+
+/// Library/detail keys (US2, T066; contracts/ui-surface.md §3/§4/§9) with
+/// no Fluent placeholder — resolved via plain `tr`. `row-*`/`action-play-*`/
+/// `action-add-*`/`action-save-to-library`/`action-pin-offline`/
+/// `coming-soon`/`loading`/`detail-back` were already seeded in
+/// Foundational (T027) and are exercised by `rows.rs`'s own tests, not
+/// repeated here.
+const LIBRARY_KEYS: &[&str] = &[
+    "library-tab-saved-tracks",
+    "library-tab-saved-albums",
+    "library-tab-followed-artists",
+    "library-tab-playlists",
+    "library-tab-recently-played",
+    "library-empty",
+    "library-empty-albums",
+    "library-empty-artists",
+    "library-empty-playlists",
+    "library-empty-recent",
+    "library-first-sync-failed",
+    "library-retry",
+    "action-search",
+    "action-create",
+    "playlist-no-tracks",
+];
+
+/// Library keys that take a Fluent placeholder — resolved via `tr_args`.
+const LIBRARY_ARG_KEYS: &[&str] = &["playlist-owner", "playlist-track-count"];
+
+/// 003's "Play from account" scaffold keys (`developer.rs`'s doc comment,
+/// FR-022) and `placeholder-library` (T026/T065) — retired alongside their
+/// code paths in 004-search-and-library-browse. None of these may resolve
+/// any more: a stray leftover key with no code path would otherwise
+/// silently pass `no_unused_keys_in_playback_and_settings_ftl` simply by
+/// never being tested, rather than by being absent from the `.ftl` files.
+const SCAFFOLD_KEYS_MUST_BE_GONE: &[&str] = &[
+    "placeholder-library",
+    "setting-play-from-account",
+    "setting-play-from-account-desc",
+    "play-from-account-loading",
+    "play-from-account-empty",
+    "play-from-account-failed",
+];
+
 #[test]
 fn every_shell_nav_and_notification_key_resolves() {
     for key in SHELL_AND_NOTIFICATION_KEYS {
@@ -310,6 +371,47 @@ fn every_shell_nav_and_notification_key_resolves() {
         assert_ne!(
             &resolved, key,
             "Fluent key `{key}` is missing from locales/en-US/*.ftl (tr_args() fell back to the raw key)"
+        );
+    }
+
+    for key in SEARCH_KEYS {
+        let resolved = tr(key);
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/*.ftl (tr() fell back to the raw key)"
+        );
+    }
+
+    for key in SEARCH_ARG_KEYS {
+        let resolved = tr_args(
+            key,
+            &[
+                ("query", "abba".to_string()),
+                ("group", "Tracks".to_string()),
+            ],
+        );
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/library.ftl (tr_args() fell back to the raw key)"
+        );
+    }
+
+    for key in LIBRARY_KEYS {
+        let resolved = tr(key);
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/library.ftl (tr() fell back to the raw key)"
+        );
+    }
+
+    for key in LIBRARY_ARG_KEYS {
+        let resolved = tr_args(
+            key,
+            &[("name", "Alex".to_string()), ("count", "3".to_string())],
+        );
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/library.ftl (tr_args() fell back to the raw key)"
         );
     }
 
@@ -393,6 +495,37 @@ fn no_unused_keys_in_playback_and_settings_ftl() {
         assert!(
             tested.contains(key),
             "locales/en-US/settings.ftl defines `{key}`, which no UI code path (and so no test in this file) uses — remove it or wire it up"
+        );
+    }
+}
+
+/// FR-022/T062, T026/T065: the 003 "Play from account" scaffold and the
+/// `placeholder-library` wiring point are gone, not merely unused — none
+/// of their keys resolve, and none of the three `.ftl` files this test
+/// suite covers still define them.
+#[test]
+fn scaffold_keys_no_longer_resolve_or_exist() {
+    for key in SCAFFOLD_KEYS_MUST_BE_GONE {
+        let resolved = tr(key);
+        assert_eq!(
+            &resolved, key,
+            "`{key}` still resolves to a real string — the 003 scaffold (or \
+             its `.ftl` key) was expected gone as of 004-search-and-library-browse"
+        );
+    }
+
+    let app_ftl = include_str!("../../../locales/en-US/app.ftl");
+    let playback_ftl = include_str!("../../../locales/en-US/playback.ftl");
+    let settings_ftl = include_str!("../../../locales/en-US/settings.ftl");
+    let defined: HashSet<&str> = defined_keys(app_ftl)
+        .into_iter()
+        .chain(defined_keys(playback_ftl))
+        .chain(defined_keys(settings_ftl))
+        .collect();
+    for key in SCAFFOLD_KEYS_MUST_BE_GONE {
+        assert!(
+            !defined.contains(key),
+            "`{key}` is still defined in app.ftl/playback.ftl/settings.ftl — remove it with the scaffold"
         );
     }
 }
