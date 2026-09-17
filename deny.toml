@@ -51,6 +51,13 @@ ignore = [
     "RUSTSEC-2026-0099",
     "RUSTSEC-2026-0104",
 ]
+# 005-now-playing-waveform T002 (research R9/R16): `cargo deny check` run
+# after T001 added `thread-priority` 3.1.1 (MIT) to `modplayer-core` /
+# `modplayer-audio-source-connect` and `symphonia` 0.5.5 (MPL-2.0, features
+# `ogg`, `vorbis`, `mp3`) as a direct dependency of
+# `modplayer-audio-source-connect` — no new advisory surfaced by either
+# (`advisories ok, bans ok, licenses ok, sources ok`); symphonia's MPL-2.0
+# is covered by the existing MPL-2.0 allow entry below (see its comment).
 
 [licenses]
 version = 2
@@ -66,7 +73,12 @@ allow = [
     # crates, which all stay MIT OR Apache-2.0 per workspace.package):
     "BSL-1.0",      # clipboard-win, error-code (via arboard, Windows clipboard)
     "ISC",          # libloading (via wgpu-hal/ash and friends); also ring (via ureq/rustls)
-    "MPL-2.0",      # option-ext (via directories/dirs-sys, weak/file-level copyleft, unmodified)
+    "MPL-2.0",      # option-ext (via directories/dirs-sys, weak/file-level copyleft, unmodified);
+                    # also symphonia 0.5.5 + its symphonia-{core,bundle-flac,
+                    # bundle-mp3,codec-vorbis,format-ogg,metadata,utils-xiph}
+                    # crates (005-now-playing-waveform T001/T002, R16/R9):
+                    # unmodified upstream crate, same file-level-copyleft terms
+
     "OFL-1.1",      # epaint_default_fonts' bundled Ubuntu font glyphs
     "Ubuntu-font-1.0", # epaint_default_fonts' bundled Ubuntu font glyphs
     "CDLA-Permissive-2.0", # webpki-roots (via ureq/rustls, Mozilla root certificate list)

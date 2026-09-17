@@ -9,10 +9,18 @@
 
 transport-skip-back = Skip back
 transport-skip-forward = Skip forward
-transport-position = { $position } / { $duration }
+transport-seek = Seek
 now-playing-title = { $title }
 now-playing-artist = { $artist }
 now-playing-empty = No track is playing.
+now-playing-pick-a-track = Pick a track to start playing.
+now-playing-album = { $album }
+waveform-unavailable = Waveform unavailable
+waveform-detail = Waveform detail
+waveform-detail-window = { $start } to { $end }
+time-elapsed = { $time }
+time-remaining = -{ $time }
+waveform-overview-desc = Whole-track waveform. Click or use arrow keys to seek.
 
 ## Status line (buffering / reconnecting / unavailable — Phase 3/6, US1/US4)
 

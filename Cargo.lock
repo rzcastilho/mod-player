@@ -3054,6 +3054,9 @@ dependencies = [
 [[package]]
 name = "modplayer-audio-source"
 version = "0.1.0"
+dependencies = [
+ "proptest",
+]
 
 [[package]]
 name = "modplayer-audio-source-connect"
@@ -3073,7 +3076,9 @@ dependencies = [
  "protobuf",
  "rtrb",
  "serde_json",
+ "symphonia",
  "thiserror 2.0.20",
+ "thread-priority",
  "tokio",
 ]
 
@@ -3099,7 +3104,9 @@ dependencies = [
  "rtrb",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.20",
+ "thread-priority",
  "time",
  "toml",
 ]
@@ -3137,6 +3144,7 @@ dependencies = [
  "modplayer-core",
  "modplayer-engine",
  "modplayer-secure-store",
+ "proptest",
  "time",
  "ureq",
 ]
@@ -5523,6 +5531,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.5",
+]
+
+[[package]]
+name = "thread-priority"
+version = "3.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d2e834949be5111506bb252643498af1514f600d9e1dceedaa42afae155b67f"
+dependencies = [
+ "bitflags 2.13.2",
+ "cfg-if",
+ "libc",
+ "log",
+ "rustversion",
+ "windows 0.62.2",
 ]
 
 [[package]]

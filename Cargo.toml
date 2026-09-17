@@ -51,3 +51,6 @@ http = "1"
 # Required by librespot's Session/Spirc/Player, confined to the receiver
 # crate's dedicated worker thread (research R1).
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+# Below-normal priority for the decode-ahead (modplayer-audio-source-connect)
+# and analysis (modplayer-core) threads (005-now-playing-waveform, research R9).
+thread-priority = "3.1.1"

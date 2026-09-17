@@ -30,7 +30,7 @@ fn synthetic_host_attach_restores_position() {
 }
 
 #[test]
-fn synthetic_host_poll_after_initialize_yields_exactly_registered() {
+fn synthetic_host_poll_after_initialize_yields_registered_then_decoded_store() {
     let mut host = SyntheticHost::new(44_100);
     let events = host.poll();
     assert!(events.is_empty(), "no events before any command");
@@ -40,12 +40,16 @@ fn synthetic_host_poll_after_initialize_yields_exactly_registered() {
         device_id: "0123456789abcdef".to_string(),
     });
     let events = host.poll();
+    assert_eq!(events.len(), 2);
     assert_eq!(
-        events,
-        vec![SourceEvent::Registered {
+        events[0],
+        SourceEvent::Registered {
             device_name: "ModPlayer on Test".to_string()
-        }]
+        }
     );
+    // 005-now-playing-waveform (research R14): the built-in track's
+    // fully-filled `DecodedStore`, right after `Registered`.
+    assert!(matches!(&events[1], SourceEvent::DecodedStore { .. }));
 }
 
 #[test]

@@ -26,6 +26,7 @@ pub mod shell;
 pub mod sign_in;
 pub mod theme;
 pub mod ticker;
+pub mod waveform;
 pub mod welcome;
 pub mod widgets;
 

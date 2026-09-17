@@ -25,7 +25,7 @@ pub mod track;
 use modplayer_audio_source::AudioSource;
 
 pub use host::SyntheticHost;
-pub use scripted::{ScriptedHost, ScriptedHostHandle, ScriptedRt};
+pub use scripted::{DecodeScript, ScriptedHost, ScriptedHostHandle, ScriptedRt};
 pub use tone::TestTone;
 
 /// The built-in deterministic synthetic test track (contracts/audio-source.md):

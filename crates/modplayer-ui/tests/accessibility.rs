@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use egui::accesskit::{Role, Toggled};
-use egui::{Context, Pos2, RawInput, Rect};
+use egui::{Context, Event, Key, Modifiers, Pos2, RawInput, Rect};
 use modplayer_audio_io::{FakeBackend, FakeDevice};
 use modplayer_audio_source::{
     ArtistId, ArtistRef, Availability, CatalogError, LibraryItem, LibraryPage, LibrarySet, Repeat,
@@ -29,8 +29,10 @@ use modplayer_core::{
     ActiveState, NotificationAction, NotificationCenter, PlaybackController, Severity, tr, tr_args,
 };
 use modplayer_engine::{BufferPreset, DeviceId, FrameCount, SampleRate};
+use modplayer_ui::artwork::ArtworkCache;
 use modplayer_ui::detail_view::{self, DetailTarget};
 use modplayer_ui::library_view::{self, LibraryTab, LibraryViewState};
+use modplayer_ui::waveform::WaveformState;
 
 struct TempDir(PathBuf);
 
@@ -128,6 +130,7 @@ struct AccessNode {
     role: Role,
     label: Option<String>,
     value: Option<String>,
+    description: Option<String>,
     toggled: Option<Toggled>,
     disabled: bool,
     labelled_by_something: bool,
@@ -165,6 +168,7 @@ fn render_nodes(render: impl FnMut(&mut egui::Ui)) -> Vec<AccessNode> {
             role: node.role(),
             label: node.label().map(str::to_string),
             value: node.value().map(str::to_string),
+            description: node.description().map(str::to_string),
             toggled: node.toggled(),
             disabled: node.is_disabled(),
             labelled_by_something: !node.labelled_by().is_empty(),
@@ -198,8 +202,12 @@ fn find_one<'a>(nodes: &'a [AccessNode], role: Role, name: &str) -> &'a AccessNo
 fn transport_controls_expose_accessible_names() {
     let (mut controller, _handle, _dir) = active_controller("transport");
     controller.queue_replace(vec![track("a")]);
+    let mut artwork = ArtworkCache::new();
+    let mut waveform = WaveformState::default();
 
-    let nodes = render_nodes(|ui| modplayer_ui::now_playing::show(ui, &mut controller));
+    let nodes = render_nodes(|ui| {
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+    });
 
     // Play/pause, stop, skip back/forward, and the Queue toggle are plain
     // `Button`s whose accessible name is their own label text.
@@ -233,8 +241,12 @@ fn transport_controls_are_disabled_when_playback_is_not_permitted() {
         PlaybackController::new(FakeBackend::new(vec![]), ScriptedHost::new(), store);
     controller.launch();
     assert!(!controller.transport_enabled());
+    let mut artwork = ArtworkCache::new();
+    let mut waveform = WaveformState::default();
 
-    let nodes = render_nodes(|ui| modplayer_ui::now_playing::show(ui, &mut controller));
+    let nodes = render_nodes(|ui| {
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+    });
     let play = find_one(&nodes, Role::Button, &tr("transport-play"));
     assert!(
         play.disabled,
@@ -308,8 +320,12 @@ fn transfer_banner_play_here_button_exposes_its_accessible_name() {
         "test setup: expected Inactive, got {:?}",
         controller.active_state()
     );
+    let mut artwork = ArtworkCache::new();
+    let mut waveform = WaveformState::default();
 
-    let nodes = render_nodes(|ui| modplayer_ui::now_playing::show(ui, &mut controller));
+    let nodes = render_nodes(|ui| {
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+    });
     let play_here = find_one(&nodes, Role::Button, &tr("banner-play-here"));
     assert!(
         !play_here.disabled,
@@ -749,4 +765,214 @@ fn detail_back_button_exposes_its_accessible_name() {
         let back = find_one(nodes, Role::Button, &tr("detail-back"));
         assert!(!back.disabled, "{back:?}");
     }
+}
+
+// 005-now-playing-waveform (T037, contracts/ui-waveform.md §1/§7): the
+// waveform overview is a real `Role::Slider` named `transport-seek` with
+// value text `m:ss / m:ss`; the empty state exposes `now-playing-pick-a-
+// track`; 003's `transport-position` key is gone for good.
+
+#[test]
+fn waveform_overview_is_a_named_slider_with_mmss_value_text() {
+    let (mut controller, _handle, _dir) = active_controller("waveform-overview-a11y");
+    controller.queue_replace(vec![track("a")]);
+    let mut artwork = ArtworkCache::new();
+    let mut waveform = WaveformState::default();
+
+    let nodes = render_nodes(|ui| {
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+    });
+
+    let overview = find_one(&nodes, Role::Slider, &tr("transport-seek"));
+    assert!(!overview.disabled, "{overview:?}");
+    let value = overview
+        .value
+        .as_deref()
+        .expect("the overview slider must carry an `m:ss / m:ss` value text");
+    assert!(
+        value.contains('/'),
+        "expected `m:ss / m:ss`, got `{value}`: {overview:?}"
+    );
+}
+
+#[test]
+fn empty_state_exposes_pick_a_track_and_no_waveform_slider() {
+    let (mut controller, _handle, _dir) = active_controller("waveform-empty-a11y");
+    // No `queue_replace`: `current_track()` stays `None`.
+    let mut artwork = ArtworkCache::new();
+    let mut waveform = WaveformState::default();
+
+    let nodes = render_nodes(|ui| {
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+    });
+
+    assert!(
+        nodes
+            .iter()
+            .any(|n| n.accessible_name() == Some(tr("now-playing-pick-a-track").as_str())),
+        "expected the pick-a-track hint, got {nodes:?}"
+    );
+    assert!(
+        find_all(&nodes, Role::Slider, &tr("transport-seek")).is_empty(),
+        "no waveform overview must render with no current track: {nodes:?}"
+    );
+}
+
+// 005-now-playing-waveform (T047, US2, contracts/ui-waveform.md §1/§3):
+// the waveform detail view is a real `Role::Slider` named `waveform-detail`
+// whose description carries its current window's `m:ss` bounds, and every
+// key of §3 (including the US2 zoom/pan/reset rows) is reachable while a
+// waveform has focus.
+
+#[test]
+fn waveform_detail_is_a_named_slider_with_windowed_description() {
+    let (mut controller, _handle, _dir) = active_controller("waveform-detail-a11y");
+    controller.queue_replace(vec![track("a")]); // 180s — long enough to hold a 30s window off both ends
+
+    // Land the playhead at exactly 1:25 so a never-zoomed (30s, centred)
+    // detail window's bounds are the round `1:10`/`1:40` the description
+    // must contain (data-model.md §5.1's `initial`).
+    controller.play();
+    controller.tick();
+    let sample_rate = controller.source_sample_rate();
+    controller.seek_frames(85 * u64::from(sample_rate));
+    controller.tick();
+    // One render lets the engine apply the queued `Command::Seek` and
+    // publish the new position anchor (Constitution I: commands apply at
+    // buffer boundaries) — mirrors `now_playing.rs`'s own
+    // `position_readout_updates_as_playback_advances`.
+    let _ = controller.backend_mut().render_buffers(1);
+
+    let mut artwork = ArtworkCache::new();
+    let mut waveform = WaveformState::default();
+    let nodes = render_nodes(|ui| {
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+    });
+
+    let detail = find_one(&nodes, Role::Slider, &tr("waveform-detail"));
+    assert!(!detail.disabled, "{detail:?}");
+    let description = detail
+        .description
+        .as_deref()
+        .expect("the detail slider must carry a windowed description");
+    assert!(
+        description.contains("1:10") && description.contains("1:40"),
+        "expected the 30s window bounds around 1:25 (`1:10`..`1:40`), got `{description}`"
+    );
+}
+
+#[test]
+fn every_waveform_key_in_the_contract_table_is_reachable() {
+    let (mut controller, handle, _dir) = active_controller("waveform-keys-a11y");
+    controller.queue_replace(vec![track("a")]);
+    let mut artwork = ArtworkCache::new();
+    let mut waveform = WaveformState::default();
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+
+    // Tab to the overview (egui's default per-frame focus-advance model —
+    // several `Tab`s within one frame's events would only count as one, so
+    // this sends exactly one per frame, like `now_playing.rs`'s own
+    // `tab_focus_named`).
+    let overview_name = tr("transport-seek");
+    let mut focused = false;
+    for _ in 0..40 {
+        let mut input = default_input();
+        input.events.push(Event::Key {
+            key: Key::Tab,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::default(),
+        });
+        let mut output = ctx.run_ui(input, |ui| {
+            modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        });
+        let update = output
+            .platform_output
+            .accesskit_update
+            .take()
+            .expect("accesskit_update should be populated once enabled");
+        output.drop_without_applying_deltas();
+        if update
+            .nodes
+            .iter()
+            .any(|(id, node)| *id == update.focus && node.label() == Some(overview_name.as_str()))
+        {
+            focused = true;
+            break;
+        }
+    }
+    assert!(focused, "Tab must be able to reach the waveform overview");
+
+    let mut press = |key: Key, modifiers: Modifiers| {
+        let mut input = default_input();
+        // `Event::Key`'s own `modifiers` field doesn't reach
+        // `InputState::modifiers` on its own — only `ModifiersChanged`
+        // does (egui 0.36's `begin_pass`).
+        input.events.push(Event::ModifiersChanged(modifiers));
+        input.events.push(Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        });
+        let output = ctx.run_ui(input, |ui| {
+            modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        });
+        output.drop_without_applying_deltas();
+    };
+
+    let alt_shift = Modifiers::ALT | Modifiers::SHIFT;
+    for (key, modifiers) in [
+        (Key::ArrowRight, Modifiers::default()),
+        (Key::ArrowLeft, Modifiers::default()),
+        (Key::ArrowRight, Modifiers::SHIFT),
+        (Key::ArrowLeft, Modifiers::SHIFT),
+        (Key::Home, Modifiers::default()),
+        (Key::End, Modifiers::default()),
+        (Key::Plus, Modifiers::default()),
+        (Key::Minus, Modifiers::default()),
+        (Key::Num0, Modifiers::default()),
+        (Key::ArrowRight, Modifiers::ALT),
+        (Key::ArrowLeft, Modifiers::ALT),
+        (Key::ArrowRight, alt_shift),
+        (Key::ArrowLeft, alt_shift),
+    ] {
+        press(key, modifiers);
+    }
+
+    // Every row above must have reached the waveform (not been swallowed
+    // or misrouted): the seek rows produced at least one
+    // `SourceCommand::Seek`, and the detail window — touched by every
+    // zoom/pan/reset row — is still a valid, non-empty window.
+    assert!(
+        !handle.record_commands().is_empty(),
+        "the seek rows (←/→/Shift+←/→/Home/End) must have reached the source as \
+         `SourceCommand::Seek`"
+    );
+    let detail = waveform
+        .detail
+        .expect("the detail window must still exist after the zoom/pan/reset rows");
+    assert!(detail.width_frames > 0, "{detail:?}");
+}
+
+#[test]
+fn transport_position_key_no_longer_resolves_or_exists() {
+    let resolved = tr("transport-position");
+    assert_eq!(
+        &resolved, "transport-position",
+        "`transport-position` still resolves to a real string — it was expected \
+         removed once the waveform overview replaced the seek slider (005-now-\
+         playing-waveform)"
+    );
+
+    let playback_ftl = include_str!("../../../locales/en-US/playback.ftl");
+    assert!(
+        !playback_ftl
+            .lines()
+            .any(|line| line.trim().starts_with("transport-position ")),
+        "`transport-position` is still defined in playback.ftl — remove it with the seek slider"
+    );
 }

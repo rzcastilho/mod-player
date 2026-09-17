@@ -174,11 +174,15 @@ fn t6_seek_in_stopped_becomes_paused_at_position() {
         state(),
         Input::Seek {
             position_ms: 5_000,
+            position_frames: None,
             buffer_ready: true,
         },
     );
     assert_eq!(state.intent, Intent::Paused);
-    assert!(effects.contains(&Effect::SeekTo { position_ms: 5_000 }));
+    assert!(effects.contains(&Effect::SeekTo {
+        position_ms: 5_000,
+        position_frames: None
+    }));
 }
 
 #[test]
@@ -189,6 +193,7 @@ fn t7_seek_past_end_requests_seek_past_end_advance() {
         s,
         Input::Seek {
             position_ms: 1_500,
+            position_frames: None,
             buffer_ready: true,
         },
     );
@@ -207,11 +212,15 @@ fn t8_seek_while_playing_sets_buffering_when_not_ready() {
         s,
         Input::Seek {
             position_ms: 2_000,
+            position_frames: None,
             buffer_ready: false,
         },
     );
     assert!(state.buffering);
-    assert!(effects.contains(&Effect::SeekTo { position_ms: 2_000 }));
+    assert!(effects.contains(&Effect::SeekTo {
+        position_ms: 2_000,
+        position_frames: None
+    }));
 }
 
 #[test]
@@ -223,10 +232,53 @@ fn t8_seek_while_playing_and_ready_clears_buffering() {
         s,
         Input::Seek {
             position_ms: 2_000,
+            position_frames: None,
             buffer_ready: true,
         },
     );
     assert!(!state.buffering);
+}
+
+// 005-now-playing-waveform, contracts/transport-delta.md §1: a waveform
+// click/keyboard seek carries an exact source-rate frame end to end.
+
+#[test]
+fn seek_frames_carries_exact_frame_to_engine() {
+    let mut s = state();
+    s.intent = Intent::Playing;
+    s.track_len_ms = Some(10_000);
+    let (_, effects) = reduce(
+        s,
+        Input::Seek {
+            position_ms: 2_000,
+            position_frames: Some(88_200),
+            buffer_ready: true,
+        },
+    );
+    assert!(effects.contains(&Effect::SeekTo {
+        position_ms: 2_000,
+        position_frames: Some(88_200),
+    }));
+}
+
+#[test]
+fn seek_frames_clamps_at_track_end() {
+    let mut s = state();
+    s.track_len_ms = Some(1_000);
+    let (_, effects) = reduce(
+        s,
+        Input::Seek {
+            position_ms: 1_500,
+            // A frame far past the track's end must never reach `SeekTo`:
+            // the ms clamp already routes this through `Advance` instead.
+            position_frames: Some(9_999_999),
+            buffer_ready: true,
+        },
+    );
+    assert_eq!(
+        effects,
+        vec![Effect::Queue(QueueOp::Advance(AdvanceReason::SeekPastEnd))]
+    );
 }
 
 #[test]
@@ -305,7 +357,13 @@ fn t10_skip_back_restart_seeks_to_zero() {
             origin: QueueChangeOrigin::UserSkipBack,
         },
     );
-    assert_eq!(effects, vec![Effect::SeekTo { position_ms: 0 }]);
+    assert_eq!(
+        effects,
+        vec![Effect::SeekTo {
+            position_ms: 0,
+            position_frames: None
+        }]
+    );
 }
 
 #[test]

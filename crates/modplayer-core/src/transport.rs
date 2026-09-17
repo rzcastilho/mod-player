@@ -173,9 +173,13 @@ pub enum Effect {
     /// Convert `position_ms` to source frames and seek both the engine and
     /// the source (T6/T8's `Engine(Seek)` + `Source(Seek)` pair) — kept
     /// out of `Command`/`SourceCommand` directly because the reducer has
-    /// no sample-rate context.
+    /// no sample-rate context. `position_frames` (005-now-playing-waveform,
+    /// contracts/transport-delta.md §1), when `Some`, is the exact frame a
+    /// waveform click/keyboard seek resolved to — the controller sends it
+    /// to the engine as-is instead of re-deriving it from `position_ms`.
     SeekTo {
         position_ms: u32,
+        position_frames: Option<u64>,
     },
     /// Ask the controller to build a `Program` from its `Queue`'s current
     /// effective order (at `position_ms`, with `start_playing`) and send
@@ -251,6 +255,11 @@ pub enum Input {
     Stop,
     Seek {
         position_ms: u32,
+        /// The exact source-rate frame the seek target resolved to
+        /// (005-now-playing-waveform, contracts/transport-delta.md §1):
+        /// `Some` from `PlaybackController::seek_frames` (a waveform
+        /// click/keyboard seek), `None` from `seek(Duration)`.
+        position_frames: Option<u64>,
         buffer_ready: bool,
     },
     SkipForward,
@@ -421,22 +430,31 @@ pub fn reduce(mut state: TransportState, input: Input) -> (TransportState, Vec<E
         // T6/T7/T8
         Input::Seek {
             position_ms,
+            position_frames,
             buffer_ready,
         } => {
             let past_end = state.track_len_ms.is_some_and(|len| position_ms >= len);
             if past_end {
                 // T7: clamp handled by the queue's own advance (repeat-one
                 // restarts at 0 via the `Restart` branch of
-                // `QueueChanged`; otherwise the next item loads at 0).
+                // `QueueChanged`; otherwise the next item loads at 0). This
+                // also clamps `position_frames` — a frame past the ms clamp
+                // never reaches `SeekTo`.
                 effects.push(Effect::Queue(QueueOp::Advance(AdvanceReason::SeekPastEnd)));
             } else if state.intent == Intent::Stopped {
                 // T6
                 state.intent = Intent::Paused;
                 state.buffering = false;
-                effects.push(Effect::SeekTo { position_ms });
+                effects.push(Effect::SeekTo {
+                    position_ms,
+                    position_frames,
+                });
             } else {
                 // T8
-                effects.push(Effect::SeekTo { position_ms });
+                effects.push(Effect::SeekTo {
+                    position_ms,
+                    position_frames,
+                });
                 if state.intent == Intent::Playing {
                     state.buffering = !buffer_ready;
                 }
@@ -470,7 +488,10 @@ pub fn reduce(mut state: TransportState, input: Input) -> (TransportState, Vec<E
                 // T12's generation check re-syncs on a mismatch.
             }
             PlaybackChange::Restart => {
-                effects.push(Effect::SeekTo { position_ms: 0 });
+                effects.push(Effect::SeekTo {
+                    position_ms: 0,
+                    position_frames: None,
+                });
             }
             PlaybackChange::EndOfQueue => {
                 state.intent = Intent::Stopped;

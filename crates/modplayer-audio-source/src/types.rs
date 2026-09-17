@@ -14,9 +14,11 @@
 //! builds and returns this same type.
 
 use std::fmt;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::catalog::{AlbumId, ArtistId, ReleaseDate};
+use crate::decoded::DecodedStore;
 
 /// Newtype over the service's stable track identifier in URI form
 /// (`spotify:track:<base62>`). Invariant: non-empty, ASCII, <= 64 bytes.
@@ -352,8 +354,13 @@ pub enum SourceCommand {
 
 /// An event from a `SourceHost` implementor to the `PlaybackController`
 /// (contracts/audio-source-host.md §3). Plain data, `Clone + Debug`, no
-/// secrets.
-#[derive(Debug, Clone, PartialEq)]
+/// secrets. `PartialEq` is hand-implemented below (not derived): `Arc<
+/// DecodedStore>` has no structural `PartialEq` (`DecodedStore` isn't
+/// content-comparable — Constitution V, contracts/decoded-store.md §1) and
+/// `Arc<T>`'s orphan-rule-blocked for a ptr-identity impl here since `Arc`
+/// itself isn't a local type, so `DecodedStore`'s variant compares by
+/// `Arc::ptr_eq` directly.
+#[derive(Debug, Clone)]
 pub enum SourceEvent {
     Registered {
         device_name: String,
@@ -419,6 +426,111 @@ pub enum SourceEvent {
         artists: Vec<crate::catalog::ArtistRef>,
         missing: Vec<String>,
     },
+    /// The current track's retained decoded-PCM store
+    /// (005-now-playing-waveform, contracts/decoded-store.md §1,
+    /// data-model.md §1.2), raised immediately after the `TrackStarted` /
+    /// `BecameActive { context: Some(..) }` whose track it belongs to. A
+    /// `SourceHost` implementor that never decodes ahead never raises this
+    /// (the analysis status for such tracks stays `Pending` unless
+    /// cached). `PartialEq` on the `Arc<DecodedStore>` is `Arc::ptr_eq`
+    /// (identity); `Debug` is `DecodedStore`'s own redacted summary — no
+    /// sample data ever appears in either (Constitution V).
+    DecodedStore {
+        track: TrackId,
+        store: Arc<DecodedStore>,
+    },
+}
+
+impl PartialEq for SourceEvent {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Registered { device_name: a }, Self::Registered { device_name: b }) => a == b,
+            (Self::Deregistered, Self::Deregistered) => true,
+            (Self::Health(a), Self::Health(b)) => a == b,
+            (
+                Self::TrackStarted {
+                    track: at,
+                    program: ap,
+                    position_ms: ams,
+                    playing: apl,
+                },
+                Self::TrackStarted {
+                    track: bt,
+                    program: bp,
+                    position_ms: bms,
+                    playing: bpl,
+                },
+            ) => at == bt && ap == bp && ams == bms && apl == bpl,
+            (Self::Loading { position_ms: a }, Self::Loading { position_ms: b }) => a == b,
+            (Self::Playing { position_ms: a }, Self::Playing { position_ms: b }) => a == b,
+            (Self::Paused { position_ms: a }, Self::Paused { position_ms: b }) => a == b,
+            (Self::Stopped, Self::Stopped) => true,
+            (Self::Seeked { position_ms: a }, Self::Seeked { position_ms: b }) => a == b,
+            (Self::EndOfTrack, Self::EndOfTrack) => true,
+            (Self::Unavailable { track: a }, Self::Unavailable { track: b }) => a == b,
+            (Self::RemoteCommand(a), Self::RemoteCommand(b)) => a == b,
+            (Self::BecameActive { context: a }, Self::BecameActive { context: b }) => a == b,
+            (Self::BecameInactive, Self::BecameInactive) => true,
+            (Self::TierRejected, Self::TierRejected) => true,
+            (
+                Self::SearchResult {
+                    request_id: a,
+                    result: ar,
+                },
+                Self::SearchResult {
+                    request_id: b,
+                    result: br,
+                },
+            ) => a == b && ar == br,
+            (
+                Self::LibraryPage {
+                    request_id: a,
+                    result: ar,
+                },
+                Self::LibraryPage {
+                    request_id: b,
+                    result: br,
+                },
+            ) => a == b && ar == br,
+            (
+                Self::TrackList {
+                    request_id: a,
+                    result: ar,
+                },
+                Self::TrackList {
+                    request_id: b,
+                    result: br,
+                },
+            ) => a == b && ar == br,
+            (
+                Self::Hydrated {
+                    request_id: a,
+                    tracks: at,
+                    albums: aa,
+                    artists: aar,
+                    missing: am,
+                },
+                Self::Hydrated {
+                    request_id: b,
+                    tracks: bt,
+                    albums: ba,
+                    artists: bar,
+                    missing: bm,
+                },
+            ) => a == b && at == bt && aa == ba && aar == bar && am == bm,
+            (
+                Self::DecodedStore {
+                    track: a,
+                    store: astore,
+                },
+                Self::DecodedStore {
+                    track: b,
+                    store: bstore,
+                },
+            ) => a == b && Arc::ptr_eq(astore, bstore),
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]

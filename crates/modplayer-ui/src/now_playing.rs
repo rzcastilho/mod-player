@@ -1,22 +1,30 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! The Now Playing screen (contracts/ui-surface.md §1): track title/artist,
-//! a status line, the full transport (play/pause, stop, skip back/forward,
-//! seek slider, position readout), the master-volume/peak-meter widgets
-//! (unchanged from 001), and inline disabled reasons.
+//! The Now Playing screen (contracts/ui-surface.md §1, extended by
+//! 005-now-playing-waveform's contracts/ui-waveform.md §1): artwork,
+//! title/artists/album, a status line, the full transport (play/pause,
+//! stop, skip back/forward), elapsed/remaining labels either side of a
+//! whole-track waveform overview (replacing 003's seek slider), the
+//! master-volume/peak-meter widgets (unchanged from 001), and inline
+//! disabled reasons.
 
 use std::time::Duration;
 
-use egui::{Button, Id, Key, Modifiers, Slider, Ui};
+use egui::{Button, Id, Key, Modifiers, Ui, Vec2};
 use modplayer_audio_io::OutputBackend;
 use modplayer_audio_source::{SourceHealth, SourceHost};
-use modplayer_core::{ActiveState, Intent, PlaybackController, tr, tr_args};
+use modplayer_core::{ActiveState, AnalysisStatus, Intent, PlaybackController, tr, tr_args};
 
+use crate::artwork::{ArtworkCache, ArtworkState};
 use crate::queue_view;
+use crate::waveform::{
+    self, DetailWindow, DragOrigin, DragPreview, WaveformEvent, WaveformPaint, WaveformState,
+};
+use crate::widgets::initials::initials_placeholder;
 use crate::widgets::{peak_meter, volume};
 
-/// `Left`/`Right` seek step (contracts/ui-surface.md §1).
-const SEEK_STEP: Duration = Duration::from_secs(5);
+/// The artwork square's side length (matches `rows.rs`'s row artwork).
+const ARTWORK_SIZE: f32 = 96.0;
 
 /// Persists the Queue panel's open/closed state across frames in egui's
 /// own per-viewer memory (ui-surface.md §2: reached from Now Playing via a
@@ -25,13 +33,29 @@ fn queue_panel_open_id() -> Id {
     Id::new("now-playing-queue-panel-open")
 }
 
-/// Draw the Now Playing screen, applying any transport/volume change
-/// directly to `controller`.
+/// Draw the Now Playing screen, applying any transport/volume/seek change
+/// directly to `controller`. `waveform` is the session's own waveform
+/// widget state (drag preview, detail window — `App`-owned, like
+/// `artwork`).
 pub fn show<B: OutputBackend, H: SourceHost>(
     ui: &mut Ui,
     controller: &mut PlaybackController<B, H>,
+    artwork: &mut ArtworkCache,
+    waveform: &mut WaveformState,
 ) {
-    show_heading(ui, controller);
+    // A track change drops any in-flight drag preview from the previous
+    // track (data-model.md §5.2) and re-centres the detail window on the
+    // new track's playhead, keeping the previous width if any
+    // (contracts/ui-waveform.md §5) — `show_waveform` applies the latter
+    // once it has computed `playhead_frame`/`len_frames`.
+    let current_id = controller.current_track().map(|item| item.track.id.clone());
+    let track_changed = current_id != waveform.last_track;
+    if track_changed {
+        waveform.drag = None;
+        waveform.last_track = current_id;
+    }
+
+    show_heading(ui, controller, artwork);
     show_status_line(ui, controller);
     show_transfer_banner(ui, controller);
 
@@ -93,7 +117,9 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     });
     ui.memory_mut(|memory| memory.data.insert_temp(queue_id, queue_open));
 
-    show_seek_slider(ui, controller, available);
+    if controller.current_track().is_some() {
+        show_waveform(ui, controller, waveform, available, track_changed);
+    }
 
     if let Some(new_volume) = volume::master_volume(ui, controller.master_volume()) {
         controller.set_master_volume(new_volume);
@@ -110,8 +136,8 @@ pub fn show<B: OutputBackend, H: SourceHost>(
 
     // Position advances at the audio-clock rate (>= 60 Hz, FR-006/SC-003)
     // independent of egui's own input-driven repaint cadence; keep the
-    // screen repainting while playing so the readout/slider stay live even
-    // with no mouse/keyboard activity.
+    // screen repainting while playing so the readout/waveform playhead
+    // stay live even with no mouse/keyboard activity.
     if controller.transport_state().intent == Intent::Playing {
         ui.ctx().request_repaint_after(Duration::from_millis(16));
     }
@@ -120,22 +146,71 @@ pub fn show<B: OutputBackend, H: SourceHost>(
 fn show_heading<B: OutputBackend, H: SourceHost>(
     ui: &mut Ui,
     controller: &PlaybackController<B, H>,
+    artwork: &mut ArtworkCache,
 ) {
     match controller.current_track() {
         Some(item) => {
-            ui.heading(tr_args(
-                "now-playing-title",
-                &[("title", item.track.title.clone())],
-            ));
-            if !item.track.artists.is_empty() {
-                ui.label(tr_args(
-                    "now-playing-artist",
-                    &[("artist", item.track.artists.join(", "))],
-                ));
-            }
+            ui.horizontal(|ui| {
+                draw_artwork(
+                    ui,
+                    artwork,
+                    item.track.artwork_url.as_deref(),
+                    artwork_name(item),
+                );
+                ui.vertical(|ui| {
+                    ui.heading(tr_args(
+                        "now-playing-title",
+                        &[("title", item.track.title.clone())],
+                    ));
+                    if !item.track.artists.is_empty() {
+                        ui.label(tr_args(
+                            "now-playing-artist",
+                            &[("artist", item.track.artists.join(", "))],
+                        ));
+                    }
+                    if let Some(album) = &item.track.album {
+                        ui.label(tr_args("now-playing-album", &[("album", album.clone())]));
+                    }
+                });
+            });
         }
         None => {
             ui.heading(tr("now-playing-empty"));
+            ui.label(tr("now-playing-pick-a-track"));
+        }
+    }
+}
+
+/// The name [`initials_placeholder`] derives from on a `Failed`/no-URL
+/// artwork (contracts/ui-waveform.md §1: "initials placeholder(album
+/// title, 96)") — the track's own title when it has no album (mirrors
+/// `rows.rs`'s `artwork_name`).
+fn artwork_name(item: &modplayer_core::QueueItem) -> &str {
+    item.track.album.as_deref().unwrap_or(&item.track.title)
+}
+
+/// Draw the 96px artwork square: the decoded texture when `Ready`, a
+/// neutral square while `Loading`, and the initials placeholder on
+/// `Failed` or no URL at all (contracts/ui-waveform.md §1, FR-020).
+fn draw_artwork(ui: &mut Ui, artwork: &mut ArtworkCache, url: Option<&str>, name: &str) {
+    let state = url.map(|url| artwork.get(ui.ctx(), url));
+    match state {
+        Some(ArtworkState::Ready(texture_id)) => {
+            ui.add(egui::Image::from_texture((
+                texture_id,
+                Vec2::splat(ARTWORK_SIZE),
+            )));
+        }
+        Some(ArtworkState::Loading) => {
+            let (rect, _response) =
+                ui.allocate_exact_size(Vec2::splat(ARTWORK_SIZE), egui::Sense::hover());
+            if ui.is_rect_visible(rect) {
+                ui.painter()
+                    .rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
+            }
+        }
+        Some(ArtworkState::Failed) | None => {
+            initials_placeholder(ui, name, ARTWORK_SIZE);
         }
     }
 }
@@ -186,65 +261,226 @@ fn show_transfer_banner<B: OutputBackend, H: SourceHost>(
     });
 }
 
-fn show_seek_slider<B: OutputBackend, H: SourceHost>(
+/// Elapsed label, the waveform overview (with the detail window
+/// highlighted), the remaining label, and the waveform detail
+/// (contracts/ui-waveform.md §1) — only called with a current track
+/// (`show`'s empty-state branch skips this whole block, FR-015).
+fn show_waveform<B: OutputBackend, H: SourceHost>(
     ui: &mut Ui,
     controller: &mut PlaybackController<B, H>,
+    waveform: &mut WaveformState,
     available: bool,
+    track_changed: bool,
 ) {
-    let duration = controller
+    // A Connect track always plays at 44.1 kHz; `source_sample_rate()`
+    // only reports it once a `TrackStarted`/`BecameActive` has actually
+    // reached the engine, so fall back to it here rather than divide by
+    // zero for the interval between `queue_replace` and first playback.
+    let sample_rate = match controller.source_sample_rate() {
+        0 => 44_100,
+        rate => rate,
+    };
+    let track_len_ms = controller
         .transport_state()
         .track_len_ms
-        .map(|ms| Duration::from_millis(u64::from(ms)))
-        .unwrap_or(Duration::ZERO);
-    let duration_secs = duration.as_secs_f64().max(0.001);
-    let mut position_secs = controller.position().as_secs_f64().min(duration_secs);
+        .or_else(|| {
+            controller
+                .current_track()
+                .map(|item| item.track.duration_ms)
+        })
+        .unwrap_or(0);
+    let len_frames = (u64::from(track_len_ms) * u64::from(sample_rate)) / 1000;
 
-    ui.horizontal(|ui| {
-        ui.label(tr_args(
-            "transport-position",
-            &[
-                ("position", format_mmss(controller.position())),
-                ("duration", format_mmss(duration)),
-            ],
-        ));
-        let slider_text = format!(
-            "{} / {}",
-            format_mmss(Duration::from_secs_f64(position_secs)),
-            format_mmss(duration)
-        );
-        let response = ui.add_enabled(
-            available,
-            Slider::new(&mut position_secs, 0.0..=duration_secs)
-                .show_value(false)
-                .text(slider_text),
-        );
+    let playhead_frame = match waveform.preview_frame() {
+        Some(frame) => frame,
+        None => duration_to_frames(controller.position(), sample_rate),
+    }
+    .min(len_frames);
+    let playing = controller.transport_state().intent == Intent::Playing;
 
-        let mut commit = response.drag_stopped();
-        if response.has_focus() {
-            ui.input(|input| {
-                if input.key_pressed(Key::ArrowLeft) {
-                    position_secs = (position_secs - SEEK_STEP.as_secs_f64()).max(0.0);
-                    commit = true;
-                } else if input.key_pressed(Key::ArrowRight) {
-                    position_secs = (position_secs + SEEK_STEP.as_secs_f64()).min(duration_secs);
-                    commit = true;
-                } else if input.key_pressed(Key::Home) {
-                    position_secs = 0.0;
-                    commit = true;
-                } else if input.key_pressed(Key::End) {
-                    position_secs = duration_secs;
-                    commit = true;
-                }
-            });
-        }
-        if commit {
-            controller.seek(Duration::from_secs_f64(position_secs));
-        }
-    });
+    // Follow application order (contracts/ui-waveform.md §5), applied
+    // before either widget paints so both show the same, already-updated
+    // window this frame.
+    let mut detail = match waveform.detail {
+        Some(previous) if track_changed => previous.recenter(playhead_frame, len_frames),
+        Some(previous) => previous,
+        None => DetailWindow::initial(playhead_frame, len_frames, sample_rate),
+    };
+    if waveform.drag.is_none() {
+        detail = detail.follow_playhead(playhead_frame, playing, len_frames);
+    }
+
+    // Cloned (Arc pointer copies, not the peak data itself) rather than
+    // borrowed, so this doesn't tie a `&controller` borrow across the
+    // `apply_waveform_event` calls below (each of which needs `&mut
+    // controller` for a committed seek).
+    let snapshot = controller.analysis().cloned();
+    let status = snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.status)
+        .unwrap_or(AnalysisStatus::Pending);
+    let peaks = snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.peaks.clone());
+    let peaks = peaks.as_deref();
+    let unavailable_text = tr("waveform-unavailable");
+
+    ui.label(tr_args(
+        "time-elapsed",
+        &[("time", format_mmss_frames(playhead_frame, sample_rate))],
+    ));
+
+    let previewing = waveform.drag.is_some();
+    let overview_paint = WaveformPaint {
+        status,
+        peaks,
+        playhead: Some(playhead_frame),
+        unavailable_text: &unavailable_text,
+        highlight: Some(detail.start_frame..(detail.start_frame + detail.width_frames)),
+    };
+    let (_overview_response, overview_event) = waveform::overview(
+        ui,
+        len_frames,
+        sample_rate,
+        playhead_frame,
+        previewing,
+        available,
+        &overview_paint,
+    );
+    if let Some(event) = overview_event {
+        apply_waveform_event(
+            event,
+            controller,
+            waveform,
+            &mut detail,
+            len_frames,
+            sample_rate,
+            playhead_frame,
+            DragOrigin::Overview,
+        );
+    }
+
+    let remaining_frames = len_frames.saturating_sub(playhead_frame);
+    ui.label(tr_args(
+        "time-remaining",
+        &[("time", format_mmss_frames(remaining_frames, sample_rate))],
+    ));
+
+    let detail_paint = WaveformPaint {
+        status,
+        peaks,
+        playhead: Some(playhead_frame),
+        unavailable_text: &unavailable_text,
+        highlight: None,
+    };
+    let (_detail_response, detail_event) = waveform::detail(
+        ui,
+        detail.start_frame..(detail.start_frame + detail.width_frames),
+        sample_rate,
+        playhead_frame,
+        previewing,
+        available,
+        &detail_paint,
+    );
+    if let Some(event) = detail_event {
+        apply_waveform_event(
+            event,
+            controller,
+            waveform,
+            &mut detail,
+            len_frames,
+            sample_rate,
+            playhead_frame,
+            DragOrigin::Detail,
+        );
+    }
+
+    waveform.detail = Some(detail);
 }
 
-/// `"m:ss"` (no leading-zero minutes; contracts/ui-surface.md's
-/// `transport-position`/seek-slider text).
+/// Apply one [`WaveformEvent`] from either waveform widget
+/// (contracts/ui-waveform.md §2-3, §5): `Preview`/`Commit`/`CancelDrag`
+/// touch `waveform.drag` and the controller exactly as US1 did; the
+/// zoom/pan/reset rows (new in US2) always target the single shared
+/// `detail` window regardless of which widget produced them, since the
+/// overview has no zoom of its own (contracts/ui-waveform.md §2's "on the
+/// overview the anchor is the playhead").
+#[allow(clippy::too_many_arguments)]
+fn apply_waveform_event<B: OutputBackend, H: SourceHost>(
+    event: WaveformEvent,
+    controller: &mut PlaybackController<B, H>,
+    waveform: &mut WaveformState,
+    detail: &mut DetailWindow,
+    len_frames: u64,
+    sample_rate: u32,
+    playhead_frame: u64,
+    origin: DragOrigin,
+) {
+    match event {
+        WaveformEvent::Preview(frame) => {
+            waveform.drag = Some(DragPreview {
+                target_frame: frame,
+                origin,
+            });
+        }
+        WaveformEvent::Commit(frame) => {
+            waveform.drag = None;
+            controller.seek_frames(frame);
+            if !detail.contains(frame) {
+                *detail = detail.recenter(frame, len_frames);
+            }
+        }
+        WaveformEvent::CancelDrag => {
+            waveform.drag = None;
+        }
+        WaveformEvent::Zoom {
+            anchor_frame,
+            factor,
+        } => {
+            *detail = detail
+                .zoom_about(anchor_frame, factor, len_frames, sample_rate)
+                .suspend_follow_if_outside(playhead_frame);
+        }
+        WaveformEvent::Pan { delta_frames } => {
+            *detail = detail
+                .pan(delta_frames, len_frames)
+                .suspend_follow_if_outside(playhead_frame);
+        }
+        WaveformEvent::ZoomStep { zoom_in } => {
+            *detail = detail
+                .zoom_step(playhead_frame, zoom_in, len_frames, sample_rate)
+                .suspend_follow_if_outside(playhead_frame);
+        }
+        WaveformEvent::PanStep { fraction } => {
+            let delta_frames = (fraction * detail.width_frames as f64).round() as i64;
+            *detail = detail
+                .pan(delta_frames, len_frames)
+                .suspend_follow_if_outside(playhead_frame);
+        }
+        WaveformEvent::Reset => {
+            *detail = detail.reset(len_frames, sample_rate);
+        }
+    }
+}
+
+/// `duration.as_secs_f64() * sample_rate`, rounded — the inverse of
+/// `waveform`'s own frame-to-duration conversions, used only for the
+/// playhead's frame position (display precision; the real seek path is
+/// always `seek_frames` with an already-integral frame).
+fn duration_to_frames(duration: Duration, sample_rate: u32) -> u64 {
+    (duration.as_secs_f64() * f64::from(sample_rate.max(1))).round() as u64
+}
+
+/// `"m:ss"` for a frame count at `sample_rate` (no leading-zero minutes;
+/// contracts/ui-waveform.md's `time-elapsed`/`time-remaining`).
+fn format_mmss_frames(frame: u64, sample_rate: u32) -> String {
+    format_mmss(Duration::from_secs_f64(
+        frame as f64 / f64::from(sample_rate.max(1)),
+    ))
+}
+
+/// `"m:ss"` (no leading-zero minutes; contracts/ui-surface.md's former
+/// seek-slider text, now `time-elapsed`/`time-remaining`).
 fn format_mmss(duration: Duration) -> String {
     let total = duration.as_secs();
     format!("{}:{:02}", total / 60, total % 60)
@@ -259,5 +495,17 @@ mod tests {
         assert_eq!(format_mmss(Duration::from_secs(5)), "0:05");
         assert_eq!(format_mmss(Duration::from_secs(65)), "1:05");
         assert_eq!(format_mmss(Duration::from_secs(3661)), "61:01");
+    }
+
+    #[test]
+    fn format_mmss_frames_matches_duration_based_formatting() {
+        assert_eq!(format_mmss_frames(5 * 44_100, 44_100), "0:05");
+        assert_eq!(format_mmss_frames(0, 44_100), "0:00");
+    }
+
+    #[test]
+    fn duration_to_frames_round_trips_whole_seconds() {
+        assert_eq!(duration_to_frames(Duration::from_secs(1), 44_100), 44_100);
+        assert_eq!(duration_to_frames(Duration::ZERO, 44_100), 0);
     }
 }

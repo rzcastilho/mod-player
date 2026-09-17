@@ -22,3 +22,5 @@ image.workspace = true
 [dev-dependencies]
 time.workspace = true
 modplayer-audio-source-synthetic = { path = "../modplayer-audio-source-synthetic", version = "0.1.0" }
+# waveform::coords round-trip proptest (005, Constitution VIII).
+proptest.workspace = true
