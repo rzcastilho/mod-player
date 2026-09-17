@@ -42,7 +42,6 @@ pub struct SettingsScreen {
     cached_settings: AudioSettings,
     about: AboutScreen,
     playback: playback::PlaybackScreen,
-    developer_play_from_account: developer::PlayFromAccountState,
 }
 
 impl SettingsScreen {
@@ -57,25 +56,7 @@ impl SettingsScreen {
             cached_settings: controller.settings_store().load().settings,
             about: AboutScreen::default(),
             playback: playback::PlaybackScreen::new(controller),
-            developer_play_from_account: developer::PlayFromAccountState::default(),
         }
-    }
-
-    /// React to a `PlaybackController::take_account_tracks` reply for the
-    /// Developer screen's "Play from account" (Stage 2, spec Amendment
-    /// 2026-09-16) — called by `App` regardless of which Settings category
-    /// is currently shown, since the request may resolve on a later frame
-    /// than the one the screen was open on.
-    pub fn handle_account_tracks_result(
-        &mut self,
-        request_id: u64,
-        result: &Result<
-            Vec<modplayer_audio_source::TrackRef>,
-            modplayer_audio_source::AccountReadError,
-        >,
-    ) -> developer::PlayFromAccountOutcome {
-        self.developer_play_from_account
-            .handle_account_tracks(request_id, result)
     }
 }
 
@@ -148,12 +129,7 @@ pub fn show<B: OutputBackend, H: SourceHost>(
             (None, Vec::new())
         }
         SettingsCategory::Developer => {
-            developer::show(
-                ui,
-                controller,
-                account,
-                &mut screen.developer_play_from_account,
-            );
+            developer::show(ui, controller);
             (None, Vec::new())
         }
         SettingsCategory::Account => (None, account::show(ui, account)),

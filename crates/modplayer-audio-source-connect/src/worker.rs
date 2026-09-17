@@ -22,6 +22,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
@@ -38,7 +39,9 @@ use librespot_core::session::Session;
 use librespot_playback::config::PlayerConfig;
 use librespot_playback::mixer::{Mixer, NoOpVolume};
 use librespot_playback::player::{Player, PlayerEvent};
-use modplayer_audio_source::{Program, SourceCommand, SourceEvent, SourceHealth, SourceRtShared};
+use modplayer_audio_source::{
+    CatalogError, Program, SourceCommand, SourceEvent, SourceHealth, SourceRtShared,
+};
 use rtrb::Producer;
 
 use crate::credentials::ReceiverCredentials;
@@ -47,6 +50,18 @@ use crate::health::{self, Backoff};
 use crate::mixer::HostMixer;
 use crate::program::{Marker, ProgramMap};
 use crate::sink::RingSink;
+
+/// The session's one `MapperState`, shared by the command loop and the
+/// player-event task (see `apply_load_program`).
+type SharedMapper = Arc<Mutex<MapperState>>;
+
+/// The mapper holds no invariant a panic mid-update could break (two
+/// `Option`s), so a poisoned lock is simply recovered.
+fn lock_mapper(mapper: &SharedMapper) -> std::sync::MutexGuard<'_, MapperState> {
+    mapper
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// How long the player-event task waits for a `TrackChanged` after an
 /// unsolicited `SessionConnected` before falling back to
@@ -176,6 +191,13 @@ fn run(
     // genuine remote transfer and suppress its context seeding (US3). Set by
     // the player-event task alongside every `BecameActive`/`BecameInactive`.
     let device_active = Arc::new(AtomicBool::new(false));
+    // Catalog concurrency cap (004-search-and-library-browse, contracts/
+    // catalog-source.md §3 "Threads"): further `SearchCatalog`/
+    // `FetchLibrary`/`FetchTrackList`/`HydrateRefs` commands queue FIFO
+    // behind this semaphore rather than each spawning unbounded tasks.
+    // Created once per worker thread (outlives session reconnects, unlike
+    // `session`/`spirc`).
+    let catalog_semaphore = Arc::new(tokio::sync::Semaphore::new(crate::catalog::MAX_CONCURRENT));
     let mut backoff = Backoff::new();
     let mut sample_tx = Some(sample_tx);
     // Built exactly once (`RingSink`'s producer is move-only); subsequent
@@ -298,9 +320,17 @@ fn run(
         // track actually starts.
         let preload_window_open = Arc::new(AtomicBool::new(false));
 
-        let mut mapper = MapperState::default();
+        // One `MapperState` per session, shared between the command loop
+        // (which records each `LoadProgram` in it) and the player-event
+        // task (which resolves `TrackChanged` against that program). The
+        // 2026-09-17 manual walk (004 quickstart M4) found these had been
+        // three independent `MapperState::default()`s, so the event task
+        // never saw a program: every `TrackChanged` mapped to
+        // `program: None` → `TrackRevealed`, and the host collapsed its
+        // whole context to the single revealed track.
+        let mapper: SharedMapper = Arc::new(Mutex::new(MapperState::default()));
         if let Some(program) = pending_program.take() {
-            apply_load_program(&spirc, &mut mapper, &program, &player, &preload_window_open);
+            apply_load_program(&spirc, &mapper, &program, &player, &preload_window_open);
         }
 
         let ended = Arc::new(AtomicBool::new(false));
@@ -321,8 +351,8 @@ fn run(
             let transfer_requested = Arc::clone(&transfer_requested);
             let device_active = Arc::clone(&device_active);
             let preload_window_open = Arc::clone(&preload_window_open);
+            let mapper = Arc::clone(&mapper);
             runtime.spawn(async move {
-                let mut mapper = MapperState::default();
                 let mut player_events = player_events;
                 // `Some(deadline)` while waiting to see whether an
                 // unsolicited `SessionConnected` is a transfer-in with a
@@ -424,7 +454,10 @@ fn run(
                     }
 
                     let written = written_frames_for_task.load(Ordering::Acquire);
-                    let (source_event, marker) = events::map(event, &mut mapper, &mixer, written);
+                    let (source_event, marker) = {
+                        let mut mapper = lock_mapper(&mapper);
+                        events::map(event, &mut mapper, &mixer, written)
+                    };
                     if let Some(marker) = marker {
                         let _ = marker_forward_tx.send(marker);
                     }
@@ -444,6 +477,7 @@ fn run(
             &spirc,
             &player,
             &mixer,
+            &mapper,
             &cmd_rx,
             &mut marker_tx,
             &marker_forward_rx,
@@ -454,6 +488,7 @@ fn run(
             runtime.handle(),
             &session,
             &event_tx,
+            &catalog_semaphore,
         );
 
         match outcome {
@@ -538,6 +573,7 @@ fn command_loop(
     spirc: &Spirc,
     player: &Arc<Player>,
     mixer: &Arc<HostMixer>,
+    mapper: &SharedMapper,
     cmd_rx: &Receiver<SourceCommand>,
     marker_tx: &mut Producer<Marker>,
     marker_forward_rx: &Receiver<Marker>,
@@ -548,8 +584,8 @@ fn command_loop(
     runtime: &tokio::runtime::Handle,
     session: &Session,
     event_tx: &Sender<SourceEvent>,
+    catalog_semaphore: &Arc<tokio::sync::Semaphore>,
 ) -> SessionOutcome {
-    let mut mapper = MapperState::default();
     loop {
         // Forward any markers the event-mapper task produced since we
         // last looked (non-blocking: the RT ring is drained by the audio
@@ -579,7 +615,7 @@ fn command_loop(
                     transfer_requested.store(true, Ordering::Release);
                     let _ = spirc.activate();
                 }
-                apply_load_program(spirc, &mut mapper, &program, player, preload_window_open);
+                apply_load_program(spirc, mapper, &program, player, preload_window_open);
             }
             Ok(SourceCommand::Play) => {
                 let _ = spirc.play();
@@ -617,17 +653,129 @@ fn command_loop(
                 transfer_requested.store(true, Ordering::Release);
                 let _ = spirc.activate();
             }
-            Ok(SourceCommand::ListAccountTracks { request_id, limit }) => {
-                // "Play from account" over the session (spec Amendment
-                // 2026-09-16): fetch off the command loop so a slow metadata
-                // round-trip never stalls transport commands, and reply
-                // through the same event channel the UI already drains.
-                let session = session.clone();
+            // Catalog commands (004-search-and-library-browse, contracts/
+            // catalog-source.md §1/§3): every one runs as a
+            // `runtime.spawn`ed task behind `catalog_semaphore` — never on
+            // this command loop, never on the RT thread (the retired
+            // `ListAccountTracks` used the same pattern before T061 removed
+            // it). `SearchCatalog`/`HydrateRefs` are fulfilled by
+            // `catalog::search`/`catalog::hydrate` (US1, T036/T037);
+            // `FetchLibrary`/`FetchTrackList` by `catalog::{collection,
+            // playlists, track_lists}` (US2, T057-T059).
+            Ok(SourceCommand::SearchCatalog {
+                request_id,
+                query,
+                kinds,
+                offset,
+                limit,
+            }) => {
+                // `MODPLAYER_CATALOG_FORCE_429` (quickstart M12, US3 T072):
+                // short-circuits every catalog command to the same
+                // `RateLimited` reply the real endpoint would give, without
+                // ever dispatching to the network.
+                if crate::catalog::force_rate_limited() {
+                    let _ = event_tx.send(SourceEvent::SearchResult {
+                        request_id,
+                        result: Err(CatalogError::RateLimited {
+                            retry_after_ms: None,
+                        }),
+                    });
+                } else {
+                    let semaphore = Arc::clone(catalog_semaphore);
+                    let event_tx = event_tx.clone();
+                    let session = session.clone();
+                    runtime.spawn(async move {
+                        let _permit = semaphore.acquire().await;
+                        let result =
+                            crate::catalog::search::search(&session, &query, &kinds, offset, limit)
+                                .await;
+                        let _ = event_tx.send(SourceEvent::SearchResult { request_id, result });
+                    });
+                }
+            }
+            Ok(SourceCommand::FetchLibrary {
+                request_id,
+                set,
+                page,
+                limit,
+            }) => {
+                if crate::catalog::force_rate_limited() {
+                    let _ = event_tx.send(SourceEvent::LibraryPage {
+                        request_id,
+                        result: Err(CatalogError::RateLimited {
+                            retry_after_ms: None,
+                        }),
+                    });
+                } else {
+                    let semaphore = Arc::clone(catalog_semaphore);
+                    let event_tx = event_tx.clone();
+                    let session = session.clone();
+                    runtime.spawn(async move {
+                        let _permit = semaphore.acquire().await;
+                        let result = match set {
+                            modplayer_audio_source::LibrarySet::Playlists => {
+                                crate::catalog::playlists::fetch(&session, page, limit).await
+                            }
+                            _ => {
+                                crate::catalog::collection::fetch(&session, set, page, limit).await
+                            }
+                        };
+                        let _ = event_tx.send(SourceEvent::LibraryPage { request_id, result });
+                    });
+                }
+            }
+            Ok(SourceCommand::FetchTrackList { request_id, source }) => {
+                if crate::catalog::force_rate_limited() {
+                    let _ = event_tx.send(SourceEvent::TrackList {
+                        request_id,
+                        result: Err(CatalogError::RateLimited {
+                            retry_after_ms: None,
+                        }),
+                    });
+                } else {
+                    let semaphore = Arc::clone(catalog_semaphore);
+                    let event_tx = event_tx.clone();
+                    let session = session.clone();
+                    runtime.spawn(async move {
+                        let _permit = semaphore.acquire().await;
+                        let result = crate::catalog::track_lists::fetch(&session, &source).await;
+                        let _ = event_tx.send(SourceEvent::TrackList { request_id, result });
+                    });
+                }
+            }
+            Ok(SourceCommand::HydrateRefs {
+                request_id,
+                tracks,
+                albums,
+                artists,
+            }) => {
+                // `HydrateRefs` has no `Result` reply (contracts/catalog-
+                // source.md §2): forcing a rate limit here would have
+                // nowhere to surface, so the override only touches the
+                // four request/reply commands `worker.rs` and the UI
+                // actually degrade on (Search/Library/detail/track-list).
+                let semaphore = Arc::clone(catalog_semaphore);
                 let event_tx = event_tx.clone();
+                let session = session.clone();
                 runtime.spawn(async move {
-                    let result = crate::account_read::fetch_account_tracks(session, limit).await;
-                    let _ = event_tx.send(SourceEvent::AccountTracks { request_id, result });
+                    let _permit = semaphore.acquire().await;
+                    let (tracks, albums, artists, missing) =
+                        crate::catalog::hydrate::hydrate(&session, &tracks, &albums, &artists)
+                            .await;
+                    let _ = event_tx.send(SourceEvent::Hydrated {
+                        request_id,
+                        tracks,
+                        albums,
+                        artists,
+                        missing,
+                    });
                 });
+            }
+            Ok(SourceCommand::CancelCatalog { .. }) => {
+                // Best effort (contracts/catalog-source.md §1): no
+                // in-flight cancellation tracking in this slice; a late
+                // reply is still delivered and the host discards it by
+                // `request_id`.
             }
             Ok(SourceCommand::ReportState { .. }) => {
                 // FR-025/rule T24 ("every input that changes intent,
@@ -658,12 +806,16 @@ fn command_loop(
 
 fn apply_load_program(
     spirc: &Spirc,
-    mapper: &mut MapperState,
+    mapper: &SharedMapper,
     program: &Program,
     player: &Player,
     preload_window_open: &AtomicBool,
 ) {
-    mapper.set_program(ProgramMap::new(program.generation, program.order.clone()));
+    lock_mapper(mapper).set_program(ProgramMap::new(
+        program.generation,
+        program.order.clone(),
+        program.cursor_index,
+    ));
     let _ = spirc.repeat(program.repeat_all);
     let _ = spirc.repeat_track(program.repeat_one);
     let uris: Vec<String> = program

@@ -13,6 +13,12 @@
 //! - Every context item is visited at most once per shuffle cycle (no
 //!   duplicate `MoveTo` for the same still-present item between two
 //!   wraps).
+//!
+//! 004-search-and-library-browse (T018) extends the operation sequence
+//! with `replace_context_at` (**Play now** on a row) and
+//! `play_next_tracks` (**Play next** on an album/playlist/artist row,
+//! contracts/library-and-search-core.md §2) so the same invariants are
+//! checked with both new operations interleaved.
 
 use modplayer_audio_source::{Availability, Repeat, TrackId, TrackRef};
 use modplayer_core::queue::{AdvanceReason, HISTORY_LIMIT, PlaybackChange, Queue, QueueRng};
@@ -62,6 +68,8 @@ enum Op {
     MarkUnavailable(usize),
     PlayNextTrack(usize),
     SkipBack(u32),
+    ReplaceContextAt(usize, usize),
+    PlayNextTracks(Vec<usize>),
 }
 
 fn op_strategy() -> impl Strategy<Value = Op> {
@@ -78,6 +86,8 @@ fn op_strategy() -> impl Strategy<Value = Op> {
         (0usize..12).prop_map(Op::MarkUnavailable),
         (0usize..12).prop_map(Op::PlayNextTrack),
         (0u32..6_000).prop_map(Op::SkipBack),
+        (1usize..=6, 0usize..12).prop_map(|(len, cursor)| Op::ReplaceContextAt(len, cursor)),
+        prop::collection::vec(0usize..12, 0..4).prop_map(Op::PlayNextTracks),
     ]
 }
 
@@ -139,6 +149,14 @@ proptest! {
                 }
                 Op::SkipBack(position_ms) => {
                     q.skip_back(position_ms);
+                }
+                Op::ReplaceContextAt(len, cursor) => {
+                    let new_tracks: Vec<TrackRef> = (0..len).map(track).collect();
+                    q.replace_context_at(new_tracks, cursor);
+                }
+                Op::PlayNextTracks(seeds) => {
+                    let new_tracks: Vec<TrackRef> = seeds.iter().copied().map(track).collect();
+                    q.play_next_tracks(new_tracks);
                 }
             }
 

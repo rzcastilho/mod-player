@@ -16,6 +16,8 @@
 use std::fmt;
 use std::time::{Duration, Instant};
 
+use crate::catalog::{AlbumId, ArtistId, ReleaseDate};
+
 /// Newtype over the service's stable track identifier in URI form
 /// (`spotify:track:<base62>`). Invariant: non-empty, ASCII, <= 64 bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -58,11 +60,17 @@ impl fmt::Display for TrackId {
     }
 }
 
-/// Whether the service will currently serve a track (data-model.md §1.2).
+/// Whether the service will currently serve a track (data-model.md §1.2,
+/// widened 004-search-and-library-browse DM-2, research R10).
+/// `Unavailable` is renamed `UnavailableRegion`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Availability {
+    /// Playable.
     Available,
-    Unavailable,
+    /// Not licensed for the session's country.
+    UnavailableRegion,
+    /// No longer on the service.
+    Removed,
 }
 
 /// Repeat mode (FR-013/014). Shared by `modplayer-core::queue::Queue` and
@@ -109,21 +117,44 @@ impl VolumePercent {
     }
 }
 
-/// Track metadata (data-model.md §1.2, DM-2 narrowed to this slice).
+/// Track metadata (data-model.md §1.2/1.3, DM-2 extended
+/// 004-search-and-library-browse, research R10).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrackRef {
     pub id: TrackId,
     pub title: String,
     pub artists: Vec<String>,
+    /// Parallel to `artists`; may be empty for 003-era refs never passed
+    /// through `with_extras`.
+    pub artist_ids: Vec<ArtistId>,
     pub album: Option<String>,
+    pub album_id: Option<AlbumId>,
     pub artwork_url: Option<String>,
     pub duration_ms: u32,
+    /// "E" badge (FR-008).
+    pub explicit: bool,
+    pub release_date: Option<ReleaseDate>,
     pub availability: Availability,
+}
+
+/// Extended `TrackRef` fields beyond 003's constructor (data-model.md
+/// §1.3, FR-008), applied via `TrackRef::with_extras` so `TrackRef::new`'s
+/// signature — and every 003 call site — stays unchanged. Fields default
+/// to "unknown"/absent, matching a 003-era ref that never saw hydrated
+/// extended metadata.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TrackRefExtras {
+    pub artist_ids: Vec<ArtistId>,
+    pub album_id: Option<AlbumId>,
+    pub explicit: bool,
+    pub release_date: Option<ReleaseDate>,
 }
 
 impl TrackRef {
     /// Construct a `TrackRef`, applying the title fallback (data-model.md
     /// §1.2: "falls back to 'Unknown title' when the service omits it").
+    /// New (004) fields default (`with_extras` sets them from hydrated
+    /// extended metadata).
     pub fn new(
         id: TrackId,
         title: impl Into<String>,
@@ -143,11 +174,44 @@ impl TrackRef {
             id,
             title,
             artists,
+            artist_ids: Vec::new(),
             album,
+            album_id: None,
             artwork_url,
             duration_ms,
+            explicit: false,
+            release_date: None,
             availability,
         }
+    }
+
+    /// Apply extended fields not covered by `new` (data-model.md §1.3),
+    /// e.g. from hydrated extended metadata (research R4).
+    ///
+    /// ```
+    /// use modplayer_audio_source::{Availability, TrackId, TrackRef, TrackRefExtras};
+    ///
+    /// let track = TrackRef::new(
+    ///     TrackId::new("spotify:track:a").expect("valid"),
+    ///     "Song",
+    ///     vec!["Artist".to_string()],
+    ///     None,
+    ///     None,
+    ///     1000,
+    ///     Availability::Available,
+    /// )
+    /// .with_extras(TrackRefExtras {
+    ///     explicit: true,
+    ///     ..TrackRefExtras::default()
+    /// });
+    /// assert!(track.explicit);
+    /// ```
+    pub fn with_extras(mut self, extras: TrackRefExtras) -> Self {
+        self.artist_ids = extras.artist_ids;
+        self.album_id = extras.album_id;
+        self.explicit = extras.explicit;
+        self.release_date = extras.release_date;
+        self
     }
 }
 
@@ -242,23 +306,48 @@ pub enum SourceCommand {
         position_ms: u32,
         repeat: Repeat,
     },
-    /// List up to `limit` playable tracks from the signed-in account, via
-    /// the source's own session (spec Amendment 2026-09-16: the public Web
-    /// API 429s a Keymaster token, so "Play from account" sources tracks
-    /// through the session's metadata client instead). The reply is a
-    /// `SourceEvent::AccountTracks` carrying the same `request_id`.
-    ListAccountTracks {
+    /// Free-text catalog search (contracts/catalog-source.md §1, FR-001).
+    /// Reply: `SourceEvent::SearchResult` with the same `request_id`.
+    SearchCatalog {
         request_id: u64,
+        query: String,
+        kinds: Vec<crate::catalog::SearchKind>,
+        offset: u32,
+        /// Capped at 50 by the contract.
         limit: u8,
     },
-}
-
-/// Why a `SourceCommand::ListAccountTracks` could not be fulfilled.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AccountReadError {
-    /// The source has no session, the session read failed, or the account
-    /// exposes no playable tracks to seed from.
-    Unavailable,
+    /// One page of an account library set (contracts/catalog-source.md §1,
+    /// FR-009). Reply: `SourceEvent::LibraryPage` with the same
+    /// `request_id`.
+    FetchLibrary {
+        request_id: u64,
+        set: crate::catalog::LibrarySet,
+        page: Option<String>,
+        /// Capped at 200 by the contract.
+        limit: u16,
+    },
+    /// The full ordered track list of an album, playlist or artist's top
+    /// tracks (contracts/catalog-source.md §1). Reply:
+    /// `SourceEvent::TrackList` with the same `request_id`.
+    FetchTrackList {
+        request_id: u64,
+        source: crate::catalog::TrackListSource,
+    },
+    /// Batched identity hydration (contracts/catalog-source.md §1, research
+    /// R4). At most 100 ids total across the three lists. Reply:
+    /// `SourceEvent::Hydrated` with the same `request_id`.
+    HydrateRefs {
+        request_id: u64,
+        tracks: Vec<TrackId>,
+        albums: Vec<crate::catalog::AlbumId>,
+        artists: Vec<crate::catalog::ArtistId>,
+    },
+    /// Best-effort cancellation of an in-flight catalog request
+    /// (contracts/catalog-source.md §1): no reply of its own; a late reply
+    /// to `request_id` may still arrive and is discarded by the host.
+    CancelCatalog {
+        request_id: u64,
+    },
 }
 
 /// An event from a `SourceHost` implementor to the `PlaybackController`
@@ -302,12 +391,33 @@ pub enum SourceEvent {
     },
     BecameInactive,
     TierRejected,
-    /// Reply to `SourceCommand::ListAccountTracks` with the same
-    /// `request_id`. `Ok(vec)` (possibly empty) on a successful read,
-    /// `Err` when the session could not supply tracks.
-    AccountTracks {
+    /// Reply to `SourceCommand::SearchCatalog` (contracts/catalog-source.md
+    /// §2).
+    SearchResult {
         request_id: u64,
-        result: Result<Vec<TrackRef>, AccountReadError>,
+        result: Result<crate::catalog::SearchPage, crate::catalog::CatalogError>,
+    },
+    /// Reply to `SourceCommand::FetchLibrary` (contracts/catalog-source.md
+    /// §2).
+    LibraryPage {
+        request_id: u64,
+        result: Result<crate::catalog::LibraryPage, crate::catalog::CatalogError>,
+    },
+    /// Reply to `SourceCommand::FetchTrackList` (contracts/catalog-
+    /// source.md §2).
+    TrackList {
+        request_id: u64,
+        result: Result<crate::catalog::TrackList, crate::catalog::CatalogError>,
+    },
+    /// Reply to `SourceCommand::HydrateRefs` (contracts/catalog-source.md
+    /// §2 rule 7): `missing` lists requested URIs the service no longer
+    /// knows; the host maps a missing *track* to `Availability::Removed`.
+    Hydrated {
+        request_id: u64,
+        tracks: Vec<TrackRef>,
+        albums: Vec<crate::catalog::AlbumRef>,
+        artists: Vec<crate::catalog::ArtistRef>,
+        missing: Vec<String>,
     },
 }
 

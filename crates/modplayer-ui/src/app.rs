@@ -28,14 +28,16 @@ use modplayer_core::{
     STATUS_PAGE_URL, Severity, tr,
 };
 
+use crate::artwork::ArtworkCache;
+use crate::detail_view::{self, DetailOutcome, DetailTarget};
 use crate::device_check::DeviceCheckScreen;
+use crate::library_view::{self, LibraryOutcome};
 use crate::settings::SettingsScreen;
-use crate::settings::developer::PlayFromAccountOutcome;
 use crate::shell::{Section, Shell};
 use crate::sign_in::{self, SignInScreen, TierResult};
 use crate::ticker::Ticker;
 use crate::welcome::{self, WelcomeScreen};
-use crate::{notifications, now_playing, settings, theme};
+use crate::{notifications, now_playing, search_view, settings, theme};
 
 /// Upper bound between UI frames while the app is running (≈ 30 Hz).
 const REPAINT_INTERVAL: Duration = Duration::from_millis(33);
@@ -78,6 +80,19 @@ pub struct App<B: OutputBackend, H: SourceHost> {
     /// check ("another device is already active") and a reconnect after a
     /// later `BecameInactive`.
     pending_device_name_request: Option<RequestId>,
+    /// Off-thread artwork fetch/decode cache (004-search-and-library-
+    /// browse, contracts/ui-surface.md §6): lives for the signed-in
+    /// session, cleared on sign-out (design note 8) alongside `search`/
+    /// `library` state.
+    artwork: ArtworkCache,
+    /// The Library view's own frame-persistent state (selected tab, US2
+    /// T065) — constructed once and reused like `shell`/`settings`.
+    library_view: library_view::LibraryViewState,
+    /// The single-level detail-navigation stack (US2 T065): `Some` while an
+    /// album/playlist/artist detail is open over the Library view; nothing
+    /// in this slice opens a detail view from another detail view, so one
+    /// level is enough.
+    library_detail: Option<detail_view::DetailTarget>,
 }
 
 impl<B: OutputBackend, H: SourceHost> App<B, H> {
@@ -138,6 +153,9 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
             settings,
             device_check,
             pending_device_name_request: None,
+            artwork: ArtworkCache::new(),
+            library_view: library_view::LibraryViewState::default(),
+            library_detail: None,
         }
     }
 
@@ -176,26 +194,6 @@ impl<B: OutputBackend, H: SourceHost> eframe::App for App<B, H> {
         let account_events = self.account.tick();
         for event in account_events {
             self.handle_account_event(&ctx, event);
-        }
-        // "Play from account" replies come from the source's session (Stage
-        // 2, spec Amendment 2026-09-16), not the Web API — drain and route
-        // them the same way the old `ReadResult` path did.
-        for (request_id, result) in self.controller.take_account_tracks() {
-            match self
-                .settings
-                .handle_account_tracks_result(request_id, &result)
-            {
-                PlayFromAccountOutcome::Ready(tracks) => {
-                    self.controller.queue_replace(tracks);
-                    self.controller.play();
-                }
-                PlayFromAccountOutcome::Failed => {
-                    self.controller
-                        .notifications_mut()
-                        .raise(Severity::Warning, "play-from-account-failed");
-                }
-                PlayFromAccountOutcome::Ignored => {}
-            }
         }
         self.request_other_device_name_if_needed();
 
@@ -334,6 +332,9 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
                 // Design note 7: deregister the Connect device *before*
                 // processing 002's own report of the sign-out.
                 self.controller.clear_for_sign_out();
+                // Design note 8 (004-search-and-library-browse): the
+                // artwork cache is per-session state too.
+                self.artwork = ArtworkCache::new();
                 let joined = categories
                     .iter()
                     .map(|key| tr(key))
@@ -362,6 +363,7 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
             AccountEvent::SessionRevoked => {
                 // Design note 7, same ordering as `SignedOut` above.
                 self.controller.clear_for_sign_out();
+                self.artwork = ArtworkCache::new();
                 self.controller.notifications_mut().raise_with_action(
                     Severity::Critical,
                     "session-revoked",
@@ -374,14 +376,11 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
         }
     }
 
-    /// Route an `AccountEvent::ReadResult` to the Settings › Developer
-    /// screen's "Play from account" state (T063, contracts/account-read-
-    /// delta.md §3) — queues and plays the tracks on success, or raises the
-    /// `play-from-account-failed` notification on a definitive non-
-    /// `Forbidden` failure (the `Forbidden`/empty cases are already shown
-    /// inline by the screen itself) — or, when it is instead the transfer
-    /// banner's own in-flight request, to the controller's `Inactive`
-    /// device name (US3 T077).
+    /// Route an `AccountEvent::ReadResult` to the transfer banner's own
+    /// in-flight request, updating the controller's `Inactive` device name
+    /// (US3 T077). 003's "Play from account" once routed through here too;
+    /// it was retired in 004-search-and-library-browse (T062) in favour of
+    /// the Library view.
     fn handle_read_result(
         &mut self,
         request_id: modplayer_account::RequestId,
@@ -401,8 +400,6 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
                 self.controller.set_other_device_name(name);
             }
         }
-        // "Play from account" no longer arrives via `ReadResult` — it is
-        // sourced from the session and drained in `ui()` (Stage 2).
     }
 
     /// Fetch the other Connect device's name (US3 T077, FR-016/019,
@@ -449,7 +446,19 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
         }
 
         match self.shell.section {
-            Section::Library => crate::shell::library_placeholder(ui),
+            // The library_placeholder wiring point shell.rs used to own is
+            // dropped (004-search-and-library-browse, T026); Section::Library
+            // now renders the real Library view, with a single-level
+            // detail-navigation stack layered over it (T065).
+            Section::Library => self.show_library(ui),
+            Section::Search => {
+                search_view::show(
+                    ui,
+                    &mut self.controller,
+                    &mut self.artwork,
+                    &mut self.shell.focus_search_requested,
+                );
+            }
             Section::NowPlaying => now_playing::show(ui, &mut self.controller),
             Section::Plugins => crate::shell::plugins_placeholder(ui),
             Section::Settings => {
@@ -466,6 +475,45 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
                 for event in events {
                     self.handle_account_event(&ctx, event);
                 }
+            }
+        }
+    }
+
+    /// The Library view, with the single-level detail-navigation stack
+    /// (US2 T065) layered over it: a detail target open takes over the
+    /// whole panel until **Back**; otherwise the tabbed Library view
+    /// itself, whose outcomes (open a detail, or focus Search from an
+    /// empty state) are handled here since they cross this view's own
+    /// scope (library_view.rs's doc comment).
+    fn show_library(&mut self, ui: &mut Ui) {
+        if let Some(target) = self.library_detail.clone() {
+            let outcome = detail_view::show(ui, &mut self.controller, &mut self.artwork, &target);
+            if outcome == DetailOutcome::Back {
+                self.library_detail = None;
+            }
+            return;
+        }
+
+        let outcome = library_view::show(
+            ui,
+            &mut self.controller,
+            &mut self.artwork,
+            &mut self.library_view,
+        );
+        match outcome {
+            LibraryOutcome::None => {}
+            LibraryOutcome::FocusSearch => {
+                self.shell.section = Section::Search;
+                self.shell.focus_search_requested = true;
+            }
+            LibraryOutcome::OpenAlbum(id) => {
+                self.library_detail = Some(DetailTarget::Album(id));
+            }
+            LibraryOutcome::OpenPlaylist(id) => {
+                self.library_detail = Some(DetailTarget::Playlist(id));
+            }
+            LibraryOutcome::OpenArtist(id) => {
+                self.library_detail = Some(DetailTarget::Artist(id));
             }
         }
     }

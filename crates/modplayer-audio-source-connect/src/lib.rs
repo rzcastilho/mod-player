@@ -19,7 +19,7 @@
 //! taking one from the caller, keeping temp-directory hygiene the
 //! receiver's own concern (contract §6).
 
-mod account_read;
+pub mod catalog;
 mod credentials;
 mod events;
 mod health;

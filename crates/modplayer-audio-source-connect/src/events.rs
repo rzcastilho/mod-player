@@ -29,8 +29,12 @@ pub struct MapperState {
 }
 
 impl MapperState {
+    /// Record a new `LoadProgram`. Every load restarts playback at the
+    /// program's `cursor_index`, so the "what starts next" expectation is
+    /// reset with it (`ProgramMap::expected_next`).
     pub fn set_program(&mut self, program: ProgramMap) {
         self.program = Some(program);
+        self.last_index = None;
     }
 }
 
@@ -84,9 +88,8 @@ pub fn map(
             let Some(track) = track_ref_from_audio_item(&audio_item) else {
                 return (None, None);
             };
-            let expected_next = state.last_index.map(|i| i.wrapping_add(1));
             let program = state.program.as_ref().and_then(|map| {
-                map.index_of(&track.id.to_string(), expected_next)
+                map.resolve(&track.id.to_string(), state.last_index)
                     .map(|idx| (map.generation, idx))
             });
             if let Some((_, idx)) = program {

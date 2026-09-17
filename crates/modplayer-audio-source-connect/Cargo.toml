@@ -17,10 +17,19 @@ librespot-audio.workspace = true
 librespot-metadata.workspace = true
 librespot-protocol.workspace = true
 protobuf.workspace = true
+http.workspace = true
+# 004-search-and-library-browse: opaque wire-safe encoding for
+# `LibraryPage.next_page` (research R3's collection2v2 pagination token),
+# already a workspace dependency (modplayer-account, `002`).
+base64.workspace = true
 tokio.workspace = true
 rtrb.workspace = true
 thiserror.workspace = true
 getrandom.workspace = true
+# 004-search-and-library-browse: parses the mercury `searchview` JSON body
+# (research R2/R13) — already a workspace dependency (`modplayer-core`'s
+# persistence, research R13), this crate is simply a new in-workspace user.
+serde_json.workspace = true
 
 [dev-dependencies]
 assert_no_alloc.workspace = true
