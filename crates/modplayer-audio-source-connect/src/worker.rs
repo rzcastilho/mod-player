@@ -40,16 +40,36 @@ use librespot_playback::config::PlayerConfig;
 use librespot_playback::mixer::{Mixer, NoOpVolume};
 use librespot_playback::player::{Player, PlayerEvent};
 use modplayer_audio_source::{
-    CatalogError, Program, SourceCommand, SourceEvent, SourceHealth, SourceRtShared,
+    CatalogError, DecodedStore, Program, SourceCommand, SourceEvent, SourceHealth, SourceRtShared,
 };
-use rtrb::Producer;
+use rtrb::{Consumer, Producer};
 
 use crate::credentials::ReceiverCredentials;
+use crate::decode_ahead::{self, DecodeAheadHandle, ForceFail};
 use crate::events::{self, MapperState};
 use crate::health::{self, Backoff};
 use crate::mixer::HostMixer;
 use crate::program::{Marker, ProgramMap};
 use crate::sink::RingSink;
+
+/// The decode-ahead thread for whatever track is current, shared between
+/// the player-event task (which spawns a fresh one per `TrackChanged`, its
+/// `Drop` stopping the previous one) and `command_loop` (which forwards
+/// seek hints into it and stops it on `Stop`/`Shutdown`) — 005-now-
+/// playing-waveform, contracts/connect-source-delta.md §1-2.
+type SharedDecodeAhead = Arc<Mutex<Option<DecodeAheadHandle>>>;
+
+/// Pop-and-drop every store the RT half has retired since the last call
+/// (research R1's drop discipline: the RT never drops a store itself —
+/// this is the one place, on the worker thread, a store's last `Arc` is
+/// ever actually freed). Called once per `command_loop` iteration and
+/// immediately before every `marker_tx.push` (contracts/connect-source-
+/// delta.md §2).
+fn drain_retired(retired_rx: &mut Consumer<Arc<DecodedStore>>) {
+    while let Ok(store) = retired_rx.pop() {
+        drop(store);
+    }
+}
 
 /// The session's one `MapperState`, shared by the command loop and the
 /// player-event task (see `apply_load_program`).
@@ -111,16 +131,21 @@ impl WorkerHandles {
 /// Spawn the worker thread. Returns `None` on an OS-level failure to
 /// spawn a thread (vanishingly rare); the caller reports `Health(
 /// Unavailable)` in that case.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn(
     device_name: String,
     config: WorkerConfig,
     event_tx: Sender<SourceEvent>,
     sample_tx: Producer<f32>,
     marker_tx: Producer<Marker>,
+    retired_rx: Consumer<Arc<DecodedStore>>,
     shared: Arc<SourceRtShared>,
     initial_program: Option<Program>,
 ) -> Option<WorkerHandles> {
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<SourceCommand>();
+    // Read once at worker spawn (contracts/connect-source-delta.md §1);
+    // never affects the `Player`.
+    let force_fail = ForceFail::from_env();
     let builder = thread::Builder::new().name("connect-worker".to_string());
     let spawned = builder.spawn(move || {
         run(
@@ -130,8 +155,10 @@ pub fn spawn(
             event_tx,
             sample_tx,
             marker_tx,
+            retired_rx,
             shared,
             initial_program,
+            force_fail,
         )
     });
     match spawned {
@@ -155,8 +182,10 @@ fn run(
     event_tx: Sender<SourceEvent>,
     sample_tx: Producer<f32>,
     mut marker_tx: Producer<Marker>,
+    mut retired_rx: Consumer<Arc<DecodedStore>>,
     _shared: Arc<SourceRtShared>,
     mut pending_program: Option<Program>,
+    force_fail: ForceFail,
 ) {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -174,6 +203,11 @@ fn run(
 
     let written_frames = Arc::new(AtomicU64::new(0));
     let mixer = Arc::new(HostMixer::new(config.initial_volume_pct));
+    // 005-now-playing-waveform: the current track's decode-ahead thread,
+    // shared across reconnects (a session loss never touches it —
+    // decode-ahead speaks to `AudioFile`/`audio_key()` directly, not
+    // through `Spirc`/`Player`).
+    let decode_ahead: SharedDecodeAhead = Arc::new(Mutex::new(None));
     // Set just before `spirc.activate()`/`spirc.transfer(None)`
     // (`RequestTransferHere`) and cleared the moment the resulting
     // `SessionConnected` is observed — tells the player-event task whether
@@ -352,7 +386,33 @@ fn run(
             let device_active = Arc::clone(&device_active);
             let preload_window_open = Arc::clone(&preload_window_open);
             let mapper = Arc::clone(&mapper);
+            let decode_ahead = Arc::clone(&decode_ahead);
+            let session_for_decode = session.clone();
+            let runtime_handle = runtime.handle().clone();
             runtime.spawn(async move {
+                // 005-now-playing-waveform (contracts/connect-source-
+                // delta.md §1-2): stop the previous track's decode-ahead
+                // (its `Drop` does the stopping) and spawn a fresh one for
+                // `audio_item`, before the `TrackStart` marker that
+                // carries its store is pushed.
+                let spawn_decode_ahead = |audio_item: &librespot_metadata::audio::AudioItem| {
+                    let len_frames = u64::from(audio_item.duration_ms)
+                        * u64::from(crate::rt::SAMPLE_RATE)
+                        / 1000;
+                    let store = DecodedStore::new(crate::rt::SAMPLE_RATE, len_frames);
+                    let handle = decode_ahead::spawn(
+                        session_for_decode.clone(),
+                        audio_item.clone(),
+                        Arc::clone(&store),
+                        runtime_handle.clone(),
+                        force_fail,
+                    );
+                    let mut guard = decode_ahead
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    *guard = Some(handle);
+                    store
+                };
                 let mut player_events = player_events;
                 // `Some(deadline)` while waiting to see whether an
                 // unsolicited `SessionConnected` is a transfer-in with a
@@ -416,9 +476,13 @@ fn run(
                         // `BecameActive`, not a plain `TrackStarted`
                         // (avoiding a spurious `Queue::reveal` for the
                         // same track `TransferContext::current` already
-                        // names).
+                        // names). The store is created — and the
+                        // decode-ahead spawned — before this marker, per
+                        // contracts/connect-source-delta.md §1's ordering.
+                        let store = spawn_decode_ahead(audio_item);
                         let written = written_frames_for_task.load(Ordering::Acquire);
-                        let _ = marker_forward_tx.send(Marker::track_start(written));
+                        let _ = marker_forward_tx
+                            .send(Marker::track_start(written, Arc::clone(&store)));
                         let context =
                             events::track_ref_from_audio_item(audio_item).map(|current| {
                                 modplayer_audio_source::TransferContext {
@@ -429,12 +493,17 @@ fn run(
                                     repeat: None,
                                 }
                             });
+                        let track_id = events::track_ref_from_audio_item(audio_item)
+                            .map(|track_ref| track_ref.id);
                         device_active.store(true, Ordering::Release);
                         if event_tx
                             .send(SourceEvent::BecameActive { context })
                             .is_err()
                         {
                             break;
+                        }
+                        if let Some(track) = track_id {
+                            let _ = event_tx.send(SourceEvent::DecodedStore { track, store });
                         }
                         continue;
                     }
@@ -453,10 +522,29 @@ fn run(
                         _ => {}
                     }
 
+                    // The store is created — and the decode-ahead spawned
+                    // — before `events::map` builds the `TrackStart`
+                    // marker that carries it (contracts/connect-source-
+                    // delta.md §1's ordering).
+                    let decoded_store = if let PlayerEvent::TrackChanged { audio_item } = &event {
+                        Some((
+                            events::track_ref_from_audio_item(audio_item).map(|t| t.id),
+                            spawn_decode_ahead(audio_item),
+                        ))
+                    } else {
+                        None
+                    };
+
                     let written = written_frames_for_task.load(Ordering::Acquire);
                     let (source_event, marker) = {
                         let mut mapper = lock_mapper(&mapper);
-                        events::map(event, &mut mapper, &mixer, written)
+                        events::map(
+                            event,
+                            &mut mapper,
+                            &mixer,
+                            written,
+                            decoded_store.as_ref().map(|(_, store)| Arc::clone(store)),
+                        )
                     };
                     if let Some(marker) = marker {
                         let _ = marker_forward_tx.send(marker);
@@ -465,8 +553,13 @@ fn run(
                         if matches!(source_event, SourceEvent::BecameInactive) {
                             device_active.store(false, Ordering::Release);
                         }
+                        let is_track_started =
+                            matches!(source_event, SourceEvent::TrackStarted { .. });
                         if event_tx.send(source_event).is_err() {
                             break;
+                        }
+                        if is_track_started && let Some((Some(track), store)) = decoded_store {
+                            let _ = event_tx.send(SourceEvent::DecodedStore { track, store });
                         }
                     }
                 }
@@ -481,6 +574,8 @@ fn run(
             &cmd_rx,
             &mut marker_tx,
             &marker_forward_rx,
+            &mut retired_rx,
+            &decode_ahead,
             &ended,
             &transfer_requested,
             &device_active,
@@ -490,6 +585,7 @@ fn run(
             &event_tx,
             &catalog_semaphore,
         );
+        drain_retired(&mut retired_rx);
 
         match outcome {
             SessionOutcome::Shutdown => {
@@ -577,6 +673,8 @@ fn command_loop(
     cmd_rx: &Receiver<SourceCommand>,
     marker_tx: &mut Producer<Marker>,
     marker_forward_rx: &Receiver<Marker>,
+    retired_rx: &mut Consumer<Arc<DecodedStore>>,
+    decode_ahead: &SharedDecodeAhead,
     ended: &AtomicBool,
     transfer_requested: &AtomicBool,
     device_active: &AtomicBool,
@@ -587,15 +685,25 @@ fn command_loop(
     catalog_semaphore: &Arc<tokio::sync::Semaphore>,
 ) -> SessionOutcome {
     loop {
+        // Once per iteration (contracts/connect-source-delta.md §2), plus
+        // immediately before every marker push below.
+        drain_retired(retired_rx);
+
         // Forward any markers the event-mapper task produced since we
         // last looked (non-blocking: the RT ring is drained by the audio
         // callback, this is just relaying into it).
         while let Ok(marker) = marker_forward_rx.try_recv() {
+            drain_retired(retired_rx);
             let _ = marker_tx.push(marker);
         }
 
         match cmd_rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(SourceCommand::Shutdown) => return SessionOutcome::Shutdown,
+            Ok(SourceCommand::Shutdown) => {
+                *decode_ahead
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                return SessionOutcome::Shutdown;
+            }
             Ok(SourceCommand::Deregister) => return SessionOutcome::Deregistered,
             Ok(SourceCommand::Retry) => return SessionOutcome::Retry,
             Ok(SourceCommand::SetDeviceName(name)) => return SessionOutcome::SetDeviceName(name),
@@ -626,9 +734,26 @@ fn command_loop(
             Ok(SourceCommand::Stop) => {
                 let _ = spirc.pause();
                 let _ = spirc.set_position_ms(0);
+                // Contracts/connect-source-delta.md §2: `Stop` (like
+                // `Shutdown`/the next `TrackChanged`) stops the current
+                // decode-ahead — dropping it here runs its `Drop`.
+                *decode_ahead
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
             }
             Ok(SourceCommand::Seek(ms)) => {
                 let _ = spirc.set_position_ms(ms);
+                // Forward the seek target as a frame hint to the current
+                // decode-ahead (contracts/connect-source-delta.md §2),
+                // checked by it between packets.
+                if let Some(handle) = decode_ahead
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                {
+                    let frame = (u64::from(ms) * u64::from(crate::rt::SAMPLE_RATE)) / 1000;
+                    handle.seek_hint(frame);
+                }
             }
             Ok(SourceCommand::SkipNext) => {
                 let _ = spirc.next();

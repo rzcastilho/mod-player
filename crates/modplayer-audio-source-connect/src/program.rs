@@ -6,29 +6,53 @@
 //! `TrackChanged` event corresponds to) — contracts/connect-source.md §1,
 //! §3, data-model.md §5.
 
-use modplayer_audio_source::TrackId;
+use std::sync::Arc;
+
+use modplayer_audio_source::{DecodedStore, TrackId};
 
 /// What a [`Marker`] tells `ConnectRtSource::fill` to do once the RT
 /// consumer's cumulative consumed-frame count reaches `at_written_frame`
 /// (research R4; contracts/audio-source-host.md §4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum MarkerKind {
     /// A new track's first frame: reset the local track-position baseline
-    /// to 0 and bump `track_seq`.
-    TrackStart,
+    /// to 0, bump `track_seq`, and swap in the new track's decoded store
+    /// (005-now-playing-waveform, contracts/connect-source-delta.md §2,
+    /// data-model.md §2.2). The replaced store is *moved* into the
+    /// retirement ring by `ConnectRtSource` as this marker applies — the
+    /// RT half never drops a store `Arc` itself (research R1).
+    TrackStart { store: Arc<DecodedStore> },
     /// The current track ended in the ring (bookkeeping only; the host
     /// mirrors `SourceEvent::EndOfTrack` separately over the event
     /// channel — this marker does not by itself change RT state).
     TrackEnd,
     /// A discontinuous position update (post-seek `Playing`/`Seeked`):
-    /// set the local track-position baseline to `position_frames`.
+    /// set the ring's position baseline to `position_frames` (and the
+    /// local track-position baseline too, when on the `Ring` feed —
+    /// contracts/connect-source-delta.md §3 rule 4: ignored on `Store`).
     Reposition,
+}
+
+impl PartialEq for MarkerKind {
+    /// `TrackStart`'s store compares by `Arc::ptr_eq` (identity) —
+    /// `DecodedStore` is not itself content-comparable (Constitution V,
+    /// contracts/decoded-store.md §1), matching `SourceEvent`'s own
+    /// `PartialEq`.
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::TrackStart { store: a }, Self::TrackStart { store: b }) => Arc::ptr_eq(a, b),
+            (Self::TrackEnd, Self::TrackEnd) | (Self::Reposition, Self::Reposition) => true,
+            _ => false,
+        }
+    }
 }
 
 /// One boundary event, stamped against the sink's write-side frame count
 /// so the RT side applies it in exact temporal order relative to the
-/// samples it is popping (never against wall-clock time).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// samples it is popping (never against wall-clock time). No longer
+/// `Copy` (005-now-playing-waveform): `TrackStart` carries an
+/// `Arc<DecodedStore>`, moved through the `rtrb` marker ring.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Marker {
     pub kind: MarkerKind,
     /// The sink's `written_frames` value at (or after) which this marker
@@ -39,9 +63,13 @@ pub struct Marker {
 }
 
 impl Marker {
-    pub fn track_start(at_written_frame: u64) -> Self {
+    /// `store` is the new track's `DecodedStore`, already created by the
+    /// decode-ahead spawn path before this marker is pushed (contracts/
+    /// connect-source-delta.md §1's ordering: store → marker →
+    /// `TrackStarted`/`BecameActive` → `SourceEvent::DecodedStore`).
+    pub fn track_start(at_written_frame: u64, store: Arc<DecodedStore>) -> Self {
         Self {
-            kind: MarkerKind::TrackStart,
+            kind: MarkerKind::TrackStart { store },
             at_written_frame,
             position_frames: 0,
         }

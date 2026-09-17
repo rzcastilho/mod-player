@@ -6,8 +6,10 @@
 
 use std::sync::Arc;
 
-use modplayer_audio_source::{AudioSource, SourceRtShared};
+use modplayer_audio_source::{AudioSource, DecodedStore, SourceRtShared};
 use rtrb::RingBuffer;
+
+const RETIRED_CAPACITY: usize = 65;
 
 #[path = "../src/program.rs"]
 #[allow(dead_code)]
@@ -23,6 +25,7 @@ use rt::ConnectRtSource;
 fn track_end_then_track_start_at_the_same_boundary_advances_seq_exactly_once() {
     let (mut sample_tx, sample_rx) = RingBuffer::<f32>::new(64);
     let (mut marker_tx, marker_rx) = RingBuffer::<Marker>::new(8);
+    let (retired_tx, _retired_rx) = RingBuffer::<Arc<DecodedStore>>::new(RETIRED_CAPACITY);
     let shared = Arc::new(SourceRtShared::new());
     let starting_seq = shared.track_seq();
 
@@ -30,13 +33,14 @@ fn track_end_then_track_start_at_the_same_boundary_advances_seq_exactly_once() {
     // the order the worker would emit them: the old track's `TrackEnd`
     // strictly before the new track's `TrackStart` (contract §3).
     let _ = marker_tx.push(Marker::track_end(0));
-    let _ = marker_tx.push(Marker::track_start(0));
+    let store = DecodedStore::new(44_100, 4);
+    let _ = marker_tx.push(Marker::track_start(0, store));
     for _ in 0..4 {
         let _ = sample_tx.push(0.0);
         let _ = sample_tx.push(0.0);
     }
 
-    let mut source = ConnectRtSource::new(sample_rx, marker_rx, Arc::clone(&shared), 0);
+    let mut source = ConnectRtSource::new(sample_rx, marker_rx, Arc::clone(&shared), 0, retired_tx);
     let mut out = [0.0f32; 4]; // 2 frames
     source.fill(&mut out);
 
@@ -56,17 +60,19 @@ fn track_end_then_track_start_at_the_same_boundary_advances_seq_exactly_once() {
 fn markers_due_at_a_later_boundary_do_not_apply_early() {
     let (mut sample_tx, sample_rx) = RingBuffer::<f32>::new(64);
     let (mut marker_tx, marker_rx) = RingBuffer::<Marker>::new(8);
+    let (retired_tx, _retired_rx) = RingBuffer::<Arc<DecodedStore>>::new(RETIRED_CAPACITY);
     let shared = Arc::new(SourceRtShared::new());
     let starting_seq = shared.track_seq();
 
     // Due only once 100 frames have been consumed — far beyond this
     // buffer's 2 frames, so it must not apply yet.
-    let _ = marker_tx.push(Marker::track_start(100));
+    let store = DecodedStore::new(44_100, 4);
+    let _ = marker_tx.push(Marker::track_start(100, store));
     for _ in 0..4 {
         let _ = sample_tx.push(0.0);
         let _ = sample_tx.push(0.0);
     }
-    let mut source = ConnectRtSource::new(sample_rx, marker_rx, shared.clone(), 500);
+    let mut source = ConnectRtSource::new(sample_rx, marker_rx, shared.clone(), 500, retired_tx);
     let mut out = [0.0f32; 4];
     source.fill(&mut out);
 

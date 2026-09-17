@@ -36,6 +36,7 @@ use crate::settings::SettingsScreen;
 use crate::shell::{Section, Shell};
 use crate::sign_in::{self, SignInScreen, TierResult};
 use crate::ticker::Ticker;
+use crate::waveform::WaveformState;
 use crate::welcome::{self, WelcomeScreen};
 use crate::{notifications, now_playing, search_view, settings, theme};
 
@@ -93,6 +94,10 @@ pub struct App<B: OutputBackend, H: SourceHost> {
     /// in this slice opens a detail view from another detail view, so one
     /// level is enough.
     library_detail: Option<detail_view::DetailTarget>,
+    /// The Now Playing waveform widgets' own session state (005-now-
+    /// playing-waveform, data-model.md §5.2: drag preview, detail window)
+    /// — constructed once and reused like `library_view`/`settings`.
+    waveform: WaveformState,
 }
 
 impl<B: OutputBackend, H: SourceHost> App<B, H> {
@@ -156,6 +161,7 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
             artwork: ArtworkCache::new(),
             library_view: library_view::LibraryViewState::default(),
             library_detail: None,
+            waveform: WaveformState::default(),
         }
     }
 
@@ -335,6 +341,7 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
                 // Design note 8 (004-search-and-library-browse): the
                 // artwork cache is per-session state too.
                 self.artwork = ArtworkCache::new();
+                self.waveform = WaveformState::default();
                 let joined = categories
                     .iter()
                     .map(|key| tr(key))
@@ -364,6 +371,7 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
                 // Design note 7, same ordering as `SignedOut` above.
                 self.controller.clear_for_sign_out();
                 self.artwork = ArtworkCache::new();
+                self.waveform = WaveformState::default();
                 self.controller.notifications_mut().raise_with_action(
                     Severity::Critical,
                     "session-revoked",
@@ -459,7 +467,12 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
                     &mut self.shell.focus_search_requested,
                 );
             }
-            Section::NowPlaying => now_playing::show(ui, &mut self.controller),
+            Section::NowPlaying => now_playing::show(
+                ui,
+                &mut self.controller,
+                &mut self.artwork,
+                &mut self.waveform,
+            ),
             Section::Plugins => crate::shell::plugins_placeholder(ui),
             Section::Settings => {
                 let (device_check, events) = settings::show(

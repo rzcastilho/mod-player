@@ -7,3 +7,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+
+[dev-dependencies]
+# `store_read_back_is_identity_for_any_aligned_write_sequence` (005-now-
+# playing-waveform, T008, Constitution VIII).
+proptest.workspace = true

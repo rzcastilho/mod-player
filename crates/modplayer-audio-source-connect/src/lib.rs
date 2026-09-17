@@ -21,12 +21,14 @@
 
 pub mod catalog;
 mod credentials;
+mod decode_ahead;
 mod events;
 mod health;
 mod mixer;
 mod program;
 mod rt;
 mod sink;
+mod subfile;
 mod tmp;
 mod worker;
 
@@ -35,7 +37,8 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
 use modplayer_audio_source::{
-    BufferStatus, Program, SourceCommand, SourceEvent, SourceHealth, SourceHost, SourceRtShared,
+    BufferStatus, DecodedStore, Program, SourceCommand, SourceEvent, SourceHealth, SourceHost,
+    SourceRtShared,
 };
 use rtrb::RingBuffer;
 
@@ -46,6 +49,11 @@ pub use rt::ConnectRtSource;
 const RING_CAPACITY: usize = 16_384;
 /// Marker ring capacity (contract §5).
 const MARKER_CAPACITY: usize = 64;
+/// Retirement-ring capacity (005-now-playing-waveform, research R1):
+/// `MARKER_CAPACITY + 1`, so the RT's `retired.push` can never observe
+/// `Full` — see `rt.rs`'s `retire`/`parked` and `worker.rs`'s
+/// `drain_retired`.
+const RETIRED_CAPACITY: usize = MARKER_CAPACITY + 1;
 /// `Shutdown`'s "synchronous best effort" budget (contract §2).
 const SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 /// `BufferStatus::ready` threshold: at least a quarter-second of stereo
@@ -101,6 +109,18 @@ pub struct ConnectSource {
     worker: Option<worker::WorkerHandles>,
     pending_sample_tx: Option<rtrb::Producer<f32>>,
     pending_marker_tx: Option<rtrb::Producer<Marker>>,
+    /// The retirement ring's consumer, pended for the worker exactly like
+    /// `pending_sample_tx`/`pending_marker_tx` — reversed direction
+    /// (`ConnectRtSource` is this ring's *producer*, built immediately in
+    /// `attach()`; the worker is its consumer, handed this at
+    /// `Initialize`).
+    pending_retired_rx: Option<rtrb::Consumer<Arc<DecodedStore>>>,
+    /// The current track's decoded store, for `BufferStatus::
+    /// current_prefetched` only (005-now-playing-waveform). No "previous
+    /// store" bookkeeping here — the RT never drops a store itself
+    /// (research R1), so this handle is dropped freely on the next
+    /// `DecodedStore`/`Stop`.
+    current_store: Option<Arc<DecodedStore>>,
     /// The last `LoadProgram` sent, resent on `SetDeviceName`'s
     /// re-registration and on a fresh worker (re)spawn (contract §2).
     last_program: Option<Program>,
@@ -127,6 +147,8 @@ impl ConnectSource {
             worker: None,
             pending_sample_tx: None,
             pending_marker_tx: None,
+            pending_retired_rx: None,
+            current_store: None,
             last_program: None,
             health: SourceHealth::Ok,
             tmp_dir: None,
@@ -142,10 +164,12 @@ impl ConnectSource {
         }
         self.device_name = device_name;
         self.device_id = device_id;
-        let (Some(sample_tx), Some(marker_tx)) =
-            (self.pending_sample_tx.take(), self.pending_marker_tx.take())
-        else {
-            // `attach()` (which builds the ring) must run before
+        let (Some(sample_tx), Some(marker_tx), Some(retired_rx)) = (
+            self.pending_sample_tx.take(),
+            self.pending_marker_tx.take(),
+            self.pending_retired_rx.take(),
+        ) else {
+            // `attach()` (which builds the rings) must run before
             // `Initialize` is ever sent — the controller always opens its
             // stream at launch, before any account permission is known.
             // Defensive fallback for an out-of-order call.
@@ -170,6 +194,7 @@ impl ConnectSource {
             self.event_tx.clone(),
             sample_tx,
             marker_tx,
+            retired_rx,
             Arc::clone(&self.shared),
             self.last_program.clone(),
         );
@@ -189,13 +214,20 @@ impl SourceHost for ConnectSource {
     fn attach(&mut self, position_frames: u64) -> Self::Rt {
         let (sample_tx, sample_rx) = RingBuffer::<f32>::new(RING_CAPACITY);
         let (marker_tx, marker_rx) = RingBuffer::<Marker>::new(MARKER_CAPACITY);
+        // Retirement ring (research R1): `ConnectRtSource` is the
+        // producer (built here, immediately), the worker is the consumer
+        // (pended until `Initialize`, like `pending_sample_tx`/
+        // `pending_marker_tx`'s reversed counterparts).
+        let (retired_tx, retired_rx) = RingBuffer::<Arc<DecodedStore>>::new(RETIRED_CAPACITY);
         self.pending_sample_tx = Some(sample_tx);
         self.pending_marker_tx = Some(marker_tx);
+        self.pending_retired_rx = Some(retired_rx);
         ConnectRtSource::new(
             sample_rx,
             marker_rx,
             Arc::clone(&self.shared),
             position_frames,
+            retired_tx,
         )
     }
 
@@ -221,6 +253,15 @@ impl SourceHost for ConnectSource {
                     worker.send(cmd);
                 }
             }
+            SourceCommand::Stop => {
+                // 005-now-playing-waveform: no "previous store" retention
+                // rule — the RT never drops a store itself (research R1),
+                // so this handle is dropped freely here.
+                self.current_store = None;
+                if let Some(worker) = &self.worker {
+                    worker.send(cmd);
+                }
+            }
             other => {
                 if let Some(worker) = &self.worker {
                     worker.send(other);
@@ -235,6 +276,9 @@ impl SourceHost for ConnectSource {
             if let SourceEvent::Health(health) = &event {
                 self.health = health.clone();
             }
+            if let SourceEvent::DecodedStore { store, .. } = &event {
+                self.current_store = Some(Arc::clone(store));
+            }
             events.push(event);
         }
         events
@@ -245,7 +289,10 @@ impl SourceHost for ConnectSource {
         BufferStatus {
             ring_fill_frames,
             ready: ring_fill_frames >= READY_THRESHOLD_FRAMES,
-            current_prefetched: false,
+            current_prefetched: self
+                .current_store
+                .as_ref()
+                .is_some_and(|store| store.state() == modplayer_audio_source::StoreState::Complete),
             next: None,
         }
     }

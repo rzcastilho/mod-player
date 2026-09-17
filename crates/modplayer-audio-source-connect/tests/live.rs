@@ -13,7 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use modplayer_audio_source::{
-    AudioSource, LibrarySet, Program, SearchKind, SourceCommand, SourceEvent, SourceHost, TrackId,
+    AudioSource, DecodedStore, LibrarySet, Program, SearchKind, SourceCommand, SourceEvent,
+    SourceHost, TrackId,
 };
 use modplayer_audio_source_connect::{
     ConnectConfig, ConnectSource, CredentialError, ReceiverCredentials,
@@ -116,6 +117,106 @@ fn plays_five_seconds_of_a_real_track() {
     assert!(
         non_silent_frames >= 176_400,
         "expected at least 176400 non-silent frames (4s @ 44.1kHz), got {non_silent_frames}"
+    );
+
+    source.command(SourceCommand::Shutdown);
+}
+
+/// T056 (US3, contracts/connect-source-delta.md §5): the decode-ahead
+/// thread must cover the whole track well before real-time playback has
+/// consumed even a quarter of it, and a seek hint into a still-undecoded
+/// region must be covered within a few seconds.
+#[test]
+#[ignore = "manual"]
+fn decode_ahead_fills_store_faster_than_playback() {
+    let Ok(_) = std::env::var("MODPLAYER_TEST_ACCESS_TOKEN") else {
+        panic!("set MODPLAYER_TEST_ACCESS_TOKEN to run this manual test");
+    };
+
+    let mut source = ConnectSource::new(ConnectConfig {
+        device_name: "ModPlayer Live Test".to_string(),
+        device_id: "0123456789abcdef0123456789abcdef".to_string(),
+        credentials: Arc::new(EnvCredentials),
+    });
+
+    let rt = source.attach(0);
+    let shared = source.rt_shared();
+
+    source.command(SourceCommand::Initialize {
+        device_name: "ModPlayer Live Test".to_string(),
+        device_id: "0123456789abcdef0123456789abcdef".to_string(),
+    });
+
+    let track = TrackId::new(test_track_uri()).expect("valid test track uri");
+    let mut registered = false;
+    let mut store: Option<Arc<DecodedStore>> = None;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+
+    while std::time::Instant::now() < deadline && store.is_none() {
+        for event in source.poll() {
+            match event {
+                SourceEvent::Registered { .. } => {
+                    registered = true;
+                    source.command(SourceCommand::LoadProgram(Program {
+                        order: vec![track.clone()],
+                        cursor_index: 0,
+                        position_ms: 0,
+                        start_playing: true,
+                        repeat_all: false,
+                        repeat_one: false,
+                        generation: 1,
+                    }));
+                }
+                SourceEvent::DecodedStore { store: s, .. } => store = Some(s),
+                SourceEvent::Health(health) => println!("health: {health:?}"),
+                other => println!("event: {other:?}"),
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    assert!(registered, "must register with the service");
+    let store = store.expect("a SourceEvent::DecodedStore within the deadline");
+    let len_frames = store.len_frames().max(1);
+    let quarter_frames = len_frames / 4;
+
+    // Pull audio through the RT half at real time while independently
+    // polling the decode-ahead's own coverage (never through the store's
+    // raw sample accessor — `covered_frames`/`covers` only, Constitution V).
+    let mut rt = rt;
+    let mut buffer = vec![0.0f32; 4096];
+    let read_deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let mut reached_full_coverage = false;
+    while std::time::Instant::now() < read_deadline {
+        rt.fill(&mut buffer);
+        if store.covered_frames() >= len_frames {
+            reached_full_coverage = true;
+            break;
+        }
+        if shared.consumed_frames() >= quarter_frames {
+            break; // failure: 25% consumed before full coverage
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        reached_full_coverage,
+        "decode-ahead must cover the whole track ({len_frames} frames) before playback \
+         consumes 25% of it (consumed {} frames, covered {} frames)",
+        shared.consumed_frames(),
+        store.covered_frames()
+    );
+
+    // A seek hint at 75% must be covered within 3s.
+    let target_frame = (len_frames * 3) / 4;
+    let target_ms = ((target_frame * 1000) / u64::from(store.sample_rate())) as u32;
+    source.command(SourceCommand::Seek(target_ms));
+    let seek_deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < seek_deadline && !store.covers(target_frame) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        store.covers(target_frame),
+        "a 75% seek hint must be covered within 3s"
     );
 
     source.command(SourceCommand::Shutdown);

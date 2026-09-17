@@ -18,9 +18,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use modplayer_audio_source::{
-    AlbumRef, ArtistRef, AudioSource, BufferStatus, CatalogError, LibraryPage, LibrarySet, Program,
-    RemoteCommand, SearchPage, SourceCommand, SourceEvent, SourceHealth, SourceHost,
-    SourceRtShared, TrackId, TrackList, TrackListSource, TrackRef, TransferContext,
+    AlbumRef, ArtistRef, AudioSource, BufferStatus, CatalogError, DecodedStore, LibraryPage,
+    LibrarySet, Program, RemoteCommand, SearchPage, SourceCommand, SourceEvent, SourceHealth,
+    SourceHost, SourceRtShared, TrackId, TrackList, TrackListSource, TrackRef, TransferContext,
 };
 
 /// Scripted reply to the next `SourceCommand::HydrateRefs`
@@ -33,6 +33,68 @@ pub struct HydratedReply {
     pub albums: Vec<AlbumRef>,
     pub artists: Vec<ArtistRef>,
     pub missing: Vec<String>,
+}
+
+/// How a scripted `SourceEvent::TrackStarted` should (or shouldn't) grow a
+/// `DecodedStore` behind it (005-now-playing-waveform, contracts/
+/// decoded-store.md §3, research R14). Set with
+/// `ScriptedHostHandle::script_decode`; applies to every `TrackStarted`
+/// emitted after the call until replaced. `#[default]` is `None`: a
+/// scripted host raises no store unless a test opts in, matching every
+/// pre-005 `ScriptedHost` test's expectations unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DecodeScript {
+    /// Never emit a `DecodedStore` for the next `TrackStarted`(s).
+    #[default]
+    None,
+    /// Fill the whole store immediately, `Complete`.
+    Instant,
+    /// Fill `frames_per_tick` more frames on each `poll()` call, `Complete`
+    /// once the whole track is covered.
+    Progressive { frames_per_tick: u32 },
+    /// Fill only the first `frame` frames, then `Failed` (a decode error
+    /// partway through).
+    FailAt { frame: u64 },
+    /// Fill the whole store with silence (`0.0`), `Complete` — distinct
+    /// from `Instant`'s non-silent tone, for the analysis silence-
+    /// detection tests (A7).
+    Silent,
+}
+
+/// Progressive-fill bookkeeping advanced by `poll()` (contracts/decoded-
+/// store.md §3's `Progressive { frames_per_tick }`).
+#[derive(Debug)]
+struct ProgressiveFill {
+    store: Arc<DecodedStore>,
+    written: u64,
+    len_frames: u64,
+    frames_per_tick: u64,
+    rate: u32,
+}
+
+/// A deterministic, bounded `[-1, 1)` mono tone (duplicated to both
+/// channels unless `silent`), a pure function of `frame` — the scripted
+/// stores' fill content. Distinct from `fixture_sample` (which is keyed by
+/// `track_index`, for `ScriptedRt`'s audible output): a scripted store's
+/// content only needs to be deterministic and non-silent, never mixed with
+/// `ScriptedRt`'s own signal (research R14: "keeps generating its tone
+/// independent of the store").
+fn decode_tone(frame: u64, rate: u32, silent: bool) -> f32 {
+    if silent {
+        return 0.0;
+    }
+    let phase = (220.0 * frame as f64 / f64::from(rate.max(1))).fract();
+    (phase as f32 * std::f32::consts::TAU).sin() * 0.5
+}
+
+fn make_tone_buf(from_frame: u64, count: u64, rate: u32, silent: bool) -> Vec<f32> {
+    let mut buf = Vec::with_capacity((count * 2) as usize);
+    for i in 0..count {
+        let sample = decode_tone(from_frame + i, rate, silent);
+        buf.push(sample);
+        buf.push(sample);
+    }
+    buf
 }
 
 /// `query.trim()`, used as the key for scripted search replies so a
@@ -117,6 +179,18 @@ struct Shared {
     track_list_scripts: HashMap<TrackListSource, VecDeque<Result<TrackList, CatalogError>>>,
     /// Scripted hydration replies, consumed FIFO by the next `HydrateRefs`.
     hydrate_scripts: VecDeque<HydratedReply>,
+    /// The sample rate `ScriptedRt::sample_rate` produces — also used to
+    /// size a scripted `DecodedStore` from a `TrackRef`'s `duration_ms`
+    /// (005-now-playing-waveform, research R14). Set once in
+    /// `ScriptedHost::new`; `#[derive(Default)]` leaves it `0`, which would
+    /// make every scripted store zero-length, so `new` overwrites it.
+    sample_rate: u32,
+    /// How the next scripted `TrackStarted`(s) should grow a
+    /// `DecodedStore` — `ScriptedHostHandle::script_decode`.
+    decode_script: DecodeScript,
+    /// The in-flight `Progressive` fill, if any, advanced one step per
+    /// `poll()` call.
+    progressive: Option<ProgressiveFill>,
 }
 
 impl Shared {
@@ -125,6 +199,75 @@ impl Shared {
     fn schedule_catalog_reply(&mut self, event: SourceEvent) {
         let deadline = self.clock.now() + self.catalog_delay;
         self.pending_catalog.push((deadline, event));
+    }
+}
+
+/// Build (and, for every variant but `Progressive`, fully fill) a
+/// `DecodedStore` for `track` per `lock.decode_script`, registering a
+/// `ProgressiveFill` in `lock.progressive` for later `poll()` calls to
+/// advance when that variant is scripted. Returns `None` for
+/// `DecodeScript::None` (no store raised at all).
+fn build_decoded_store_event(lock: &mut Shared, track: &TrackRef) -> Option<SourceEvent> {
+    if lock.decode_script == DecodeScript::None {
+        return None;
+    }
+    let rate = lock.sample_rate.max(1);
+    let len_frames = (u64::from(track.duration_ms) * u64::from(rate) / 1000).max(1);
+    let store = DecodedStore::new(rate, len_frames);
+
+    match lock.decode_script {
+        DecodeScript::None => unreachable!("checked above"),
+        DecodeScript::Instant => {
+            let buf = make_tone_buf(0, len_frames, rate, false);
+            store.write_frames(0, &buf);
+            store.set_complete(len_frames);
+        }
+        DecodeScript::Silent => {
+            let buf = make_tone_buf(0, len_frames, rate, true);
+            store.write_frames(0, &buf);
+            store.set_complete(len_frames);
+        }
+        DecodeScript::FailAt { frame } => {
+            let cap = frame.min(len_frames);
+            let buf = make_tone_buf(0, cap, rate, false);
+            store.write_frames(0, &buf);
+            store.set_failed();
+        }
+        DecodeScript::Progressive { frames_per_tick } => {
+            lock.progressive = Some(ProgressiveFill {
+                store: Arc::clone(&store),
+                written: 0,
+                len_frames,
+                frames_per_tick: u64::from(frames_per_tick.max(1)),
+                rate,
+            });
+        }
+    }
+
+    Some(SourceEvent::DecodedStore {
+        track: track.id.clone(),
+        store,
+    })
+}
+
+/// Advance any in-flight `Progressive` fill by one `frames_per_tick` step
+/// (called from `poll()`); completes the store once fully covered.
+fn advance_progressive(lock: &mut Shared) {
+    let Some(progress) = lock.progressive.as_mut() else {
+        return;
+    };
+    if progress.written >= progress.len_frames {
+        lock.progressive = None;
+        return;
+    }
+    let remaining = progress.len_frames - progress.written;
+    let step = progress.frames_per_tick.min(remaining);
+    let buf = make_tone_buf(progress.written, step, progress.rate, false);
+    let written = progress.store.write_frames(progress.written, &buf);
+    progress.written += written as u64;
+    if progress.written >= progress.len_frames {
+        progress.store.set_complete(progress.len_frames);
+        lock.progressive = None;
     }
 }
 
@@ -205,8 +348,31 @@ impl ScriptedHostHandle {
     /// mid-track `Loading`/`Playing` pair with no accompanying
     /// `LoadProgram` (an underrun and its recovery), or a natural
     /// `EndOfTrack` the reducer's downgrade rule (T22) needs to observe.
+    ///
+    /// 005-now-playing-waveform (research R14, contracts/decoded-store.md
+    /// §3): a `SourceEvent::TrackStarted` additionally raises a
+    /// `SourceEvent::DecodedStore` right behind it, filled per the current
+    /// `script_decode` setting — unless that setting is `DecodeScript::
+    /// None` (the default), which raises none, matching every pre-005
+    /// `ScriptedHost` test unchanged.
     pub fn emit(&self, event: SourceEvent) {
-        self.lock().events.push_back(event);
+        let mut lock = self.lock();
+        let extra = match &event {
+            SourceEvent::TrackStarted { track, .. } => build_decoded_store_event(&mut lock, track),
+            _ => None,
+        };
+        lock.events.push_back(event);
+        if let Some(extra) = extra {
+            lock.events.push_back(extra);
+        }
+    }
+
+    /// Set how the next scripted `TrackStarted`(s) should grow a
+    /// `DecodedStore` (005-now-playing-waveform, research R14). Applies
+    /// from the next `TrackStarted` `emit`ted (directly or via `.emit()`
+    /// delegation) onward, until replaced.
+    pub fn script_decode(&self, script: DecodeScript) {
+        self.lock().decode_script = script;
     }
 
     /// How many `SourceCommand::LoadProgram` this host has received so far
@@ -300,12 +466,16 @@ pub struct ScriptedHost {
 
 impl ScriptedHost {
     pub fn new() -> Self {
+        let sample_rate = 44_100;
         Self {
             handle: ScriptedHostHandle {
-                shared: Arc::new(Mutex::new(Shared::default())),
+                shared: Arc::new(Mutex::new(Shared {
+                    sample_rate,
+                    ..Shared::default()
+                })),
             },
             rt_shared: Arc::new(SourceRtShared::new()),
-            sample_rate: 44_100,
+            sample_rate,
         }
     }
 
@@ -350,6 +520,11 @@ impl ScriptedHost {
     /// See `ScriptedHostHandle::emit`.
     pub fn emit(&self, event: SourceEvent) {
         self.handle.emit(event);
+    }
+
+    /// See `ScriptedHostHandle::script_decode`.
+    pub fn script_decode(&self, script: DecodeScript) {
+        self.handle.script_decode(script);
     }
 
     /// See `ScriptedHostHandle::script_search`.
@@ -537,6 +712,9 @@ impl SourceHost for ScriptedHost {
 
     fn poll(&mut self) -> Vec<SourceEvent> {
         let mut lock = self.lock();
+        // 005-now-playing-waveform (research R14): advance one
+        // `Progressive` fill step, if one is in flight.
+        advance_progressive(&mut lock);
         let mut events: Vec<SourceEvent> = lock.events.drain(..).collect();
         let now = lock.clock.now();
         let (ready, pending): (Vec<_>, Vec<_>) = lock
@@ -704,6 +882,125 @@ mod tests {
             host.poll(),
             vec![SourceEvent::RemoteCommand(RemoteCommand::Play)]
         );
+    }
+
+    fn track_ref(id: &str, duration_ms: u32) -> TrackRef {
+        TrackRef::new(
+            track(id),
+            "Title",
+            vec!["Artist".to_string()],
+            None,
+            None,
+            duration_ms,
+            Availability::Available,
+        )
+    }
+
+    #[test]
+    fn decode_script_none_emits_no_store() {
+        let mut host = ScriptedHost::new();
+        host.emit(SourceEvent::TrackStarted {
+            track: track_ref("a", 1_000),
+            program: None,
+            position_ms: 0,
+            playing: true,
+        });
+        let events = host.poll();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], SourceEvent::TrackStarted { .. }));
+    }
+
+    #[test]
+    fn decode_script_instant_fills_the_whole_store_complete() {
+        let mut host = ScriptedHost::new();
+        host.script_decode(DecodeScript::Instant);
+        host.emit(SourceEvent::TrackStarted {
+            track: track_ref("a", 1_000),
+            program: None,
+            position_ms: 0,
+            playing: true,
+        });
+        let events = host.poll();
+        assert_eq!(events.len(), 2);
+        match &events[1] {
+            SourceEvent::DecodedStore { track: t, store } => {
+                assert_eq!(*t, track("a"));
+                assert_eq!(store.state(), modplayer_audio_source::StoreState::Complete);
+                assert_eq!(store.covered_frames(), store.len_frames());
+            }
+            other => panic!("expected DecodedStore, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_script_silent_fills_zeros_complete() {
+        let mut host = ScriptedHost::new();
+        host.script_decode(DecodeScript::Silent);
+        host.emit(SourceEvent::TrackStarted {
+            track: track_ref("a", 100),
+            program: None,
+            position_ms: 0,
+            playing: true,
+        });
+        let events = host.poll();
+        let SourceEvent::DecodedStore { store, .. } = &events[1] else {
+            panic!("expected DecodedStore");
+        };
+        assert_eq!(store.state(), modplayer_audio_source::StoreState::Complete);
+        let mut peaks = vec![modplayer_audio_source::PeakBucket::default(); 1];
+        let count = store.fold_peaks(0, u32::try_from(store.len_frames()).unwrap(), &mut peaks);
+        assert_eq!(count, 1);
+        assert_eq!(peaks[0].min, 0);
+        assert_eq!(peaks[0].max, 0);
+    }
+
+    #[test]
+    fn decode_script_fail_at_stops_early_and_fails() {
+        let mut host = ScriptedHost::new();
+        host.script_decode(DecodeScript::FailAt { frame: 10 });
+        host.emit(SourceEvent::TrackStarted {
+            track: track_ref("a", 1_000),
+            program: None,
+            position_ms: 0,
+            playing: true,
+        });
+        let events = host.poll();
+        let SourceEvent::DecodedStore { store, .. } = &events[1] else {
+            panic!("expected DecodedStore");
+        };
+        assert_eq!(store.state(), modplayer_audio_source::StoreState::Failed);
+        assert_eq!(store.covered_frames(), 10);
+    }
+
+    #[test]
+    fn decode_script_progressive_advances_on_poll_then_completes() {
+        let mut host = ScriptedHost::new();
+        host.script_decode(DecodeScript::Progressive {
+            frames_per_tick: 10,
+        });
+        host.emit(SourceEvent::TrackStarted {
+            track: track_ref("a", 1), // small: duration_ms=1 -> ~44 frames at 44.1kHz
+            program: None,
+            position_ms: 0,
+            playing: true,
+        });
+        let events = host.poll();
+        let SourceEvent::DecodedStore { store, .. } = &events[1] else {
+            panic!("expected DecodedStore");
+        };
+        let store = Arc::clone(store);
+        assert_eq!(store.state(), modplayer_audio_source::StoreState::Filling);
+        assert!(store.covered_frames() <= 10);
+
+        // Keep polling until the progressive fill completes.
+        for _ in 0..1_000 {
+            if store.state() != modplayer_audio_source::StoreState::Filling {
+                break;
+            }
+            let _ = host.poll();
+        }
+        assert_eq!(store.state(), modplayer_audio_source::StoreState::Complete);
+        assert_eq!(store.covered_frames(), store.len_frames());
     }
 
     #[test]

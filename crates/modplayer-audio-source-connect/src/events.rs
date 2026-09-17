@@ -15,8 +15,12 @@
 //! reason and stands only as this function's own record of the plain
 //! (unsolicited-context-free) case `worker.rs` falls back to on a timeout.
 
+use std::sync::Arc;
+
 use librespot_playback::player::PlayerEvent;
-use modplayer_audio_source::{Availability, RemoteCommand, SourceEvent, TrackId, TrackRef};
+use modplayer_audio_source::{
+    Availability, DecodedStore, RemoteCommand, SourceEvent, TrackId, TrackRef,
+};
 
 use crate::mixer::{HostMixer, to_pct};
 use crate::program::{Marker, ProgramMap};
@@ -76,12 +80,18 @@ pub fn track_ref_from_audio_item(item: &librespot_metadata::audio::AudioItem) ->
 
 /// Map one `PlayerEvent` to the `SourceEvent` (if any) and RT `Marker` (if
 /// any) it implies (contract §3). `written_frames` is the sink's current
-/// cumulative write count, used to stamp markers.
+/// cumulative write count, used to stamp markers. `store` (005-now-
+/// playing-waveform, contracts/connect-source-delta.md §1) is the new
+/// track's already-created `DecodedStore` — `Some` only for `TrackChanged`,
+/// built by the caller (`worker.rs`) right before this call so the
+/// resulting `TrackStart` marker can carry it; ignored for every other
+/// event.
 pub fn map(
     event: PlayerEvent,
     state: &mut MapperState,
     mixer: &HostMixer,
     written_frames: u64,
+    store: Option<Arc<DecodedStore>>,
 ) -> (Option<SourceEvent>, Option<Marker>) {
     match event {
         PlayerEvent::TrackChanged { audio_item } => {
@@ -101,7 +111,8 @@ pub fn map(
                 position_ms: 0,
                 playing: true,
             };
-            (Some(event), Some(Marker::track_start(written_frames)))
+            let marker = store.map(|store| Marker::track_start(written_frames, store));
+            (Some(event), marker)
         }
         PlayerEvent::Loading { position_ms, .. } => {
             (Some(SourceEvent::Loading { position_ms }), None)
@@ -207,6 +218,7 @@ mod tests {
             &mut state,
             &mixer,
             0,
+            None,
         );
         assert_eq!(event, None);
         assert_eq!(marker, None);
@@ -221,6 +233,7 @@ mod tests {
             &mut state,
             &mixer,
             0,
+            None,
         );
         assert_eq!(
             event,
@@ -245,6 +258,7 @@ mod tests {
             &mut state,
             &mixer,
             1234,
+            None,
         );
         assert_eq!(event, Some(SourceEvent::EndOfTrack));
         assert_eq!(marker, Some(Marker::track_end(1234)));

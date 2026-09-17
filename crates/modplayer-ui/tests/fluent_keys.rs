@@ -63,6 +63,13 @@ const PLAYBACK_KEYS: &[&str] = &[
     "transport-skip-back",
     "transport-skip-forward",
     "now-playing-empty",
+    // 005-now-playing-waveform: waveform overview/detail (contracts/
+    // ui-waveform.md §1).
+    "transport-seek",
+    "now-playing-pick-a-track",
+    "waveform-unavailable",
+    "waveform-detail",
+    "waveform-overview-desc",
     // Status line.
     "status-buffering",
     "status-no-device",
@@ -103,12 +110,23 @@ const PLAYBACK_KEYS: &[&str] = &[
 /// Now Playing / queue / transfer-banner keys that take a Fluent
 /// placeholder — resolved via `tr_args` with a stand-in value.
 const PLAYBACK_ARG_KEYS: &[&str] = &[
-    "transport-position",
     "now-playing-title",
     "now-playing-artist",
+    "now-playing-album",
     "queue-row",
     "banner-playing-elsewhere",
 ];
+
+/// 005-now-playing-waveform's waveform-detail-window key: templated with
+/// `$start`/`$end` (contracts/ui-waveform.md §1). Used by the detail
+/// widget's own accessible description (US2, T043) and by
+/// `waveform-detail-window`'s own fluent_keys coverage here regardless,
+/// since the key already exists in `playback.ftl` (T004).
+const PLAYBACK_WINDOW_ARG_KEYS: &[&str] = &["waveform-detail-window"];
+
+/// 005-now-playing-waveform's `time-elapsed`/`time-remaining`: templated
+/// with `$time` (an already-formatted `m:ss` string).
+const PLAYBACK_TIME_ARG_KEYS: &[&str] = &["time-elapsed", "time-remaining"];
 
 /// Settings › Playback (device name) keys added by
 /// 003-streaming-playback-and-queue (T062/T063/T064; contracts/ui-
@@ -435,13 +453,31 @@ fn every_shell_nav_and_notification_key_resolves() {
         let resolved = tr_args(
             key,
             &[
-                ("position", "0:00".to_string()),
-                ("duration", "3:45".to_string()),
                 ("title", "Example Track".to_string()),
                 ("artist", "Example Artist".to_string()),
+                ("album", "Example Album".to_string()),
                 ("device", "Example Device".to_string()),
             ],
         );
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/playback.ftl (tr_args() fell back to the raw key)"
+        );
+    }
+
+    for key in PLAYBACK_WINDOW_ARG_KEYS {
+        let resolved = tr_args(
+            key,
+            &[("start", "1:10".to_string()), ("end", "1:40".to_string())],
+        );
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/playback.ftl (tr_args() fell back to the raw key)"
+        );
+    }
+
+    for key in PLAYBACK_TIME_ARG_KEYS {
+        let resolved = tr_args(key, &[("time", "1:23".to_string())]);
         assert_ne!(
             &resolved, key,
             "Fluent key `{key}` is missing from locales/en-US/playback.ftl (tr_args() fell back to the raw key)"
@@ -481,6 +517,8 @@ fn no_unused_keys_in_playback_and_settings_ftl() {
         .chain(ACCOUNT_KEYS)
         .chain(PLAYBACK_KEYS)
         .chain(PLAYBACK_ARG_KEYS)
+        .chain(PLAYBACK_WINDOW_ARG_KEYS)
+        .chain(PLAYBACK_TIME_ARG_KEYS)
         .chain(PLAYBACK_SETTINGS_KEYS)
         .copied()
         .collect();

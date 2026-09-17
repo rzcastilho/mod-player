@@ -18,6 +18,7 @@
 //! (contracts/catalog-source.md).
 
 pub mod catalog;
+pub mod decoded;
 pub mod host;
 pub mod types;
 
@@ -27,6 +28,7 @@ pub use catalog::{
     SearchGroupPage, SearchHit, SearchKind, SearchPage, TrackList, TrackListSource,
     pack_request_id, unpack_request_id,
 };
+pub use decoded::{CHUNK_FRAMES, DecodedStore, MAX_STORE_FRAMES, PeakBucket, StoreState};
 pub use host::{SourceHost, SourceRtShared};
 pub use types::{
     Availability, BufferStatus, Intent, Program, RemoteCommand, Repeat, SourceCommand, SourceEvent,

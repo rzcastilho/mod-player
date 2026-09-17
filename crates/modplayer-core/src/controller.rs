@@ -33,6 +33,7 @@ use modplayer_engine::{
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 
+use crate::analysis::{AnalysisPaths, AnalysisService, AnalysisSnapshot};
 use crate::device_policy::{self, DeviceLostOutcome, DeviceResolution, DeviceWarning};
 use crate::library::index::SyncOutcome;
 use crate::library::{
@@ -281,6 +282,18 @@ pub struct PlaybackController<B: OutputBackend, H: SourceHost> {
     /// `Launch` trigger, since the very first `tick()` that finds the
     /// controller online is exactly that edge.
     was_online_for_sync: bool,
+
+    /// The Analysis Service (005-now-playing-waveform, contracts/
+    /// analysis-service.md, contracts/transport-delta.md §2): folds the
+    /// current track's `DecodedStore` into waveform peaks off the UI
+    /// thread. `tick()` drains it; `analysis()` exposes the latest
+    /// snapshot.
+    analysis: AnalysisService,
+    /// The track id `analysis` is currently attached to (or was last
+    /// synced against), so `sync_analysis_attachment` only detaches/
+    /// reattaches on an actual change of `queue.current()` (transport-
+    /// delta.md §2 "current track changes (any path)").
+    last_analysis_track: Option<TrackId>,
 }
 
 /// [`PlaybackController::library_track_list`]'s reply state (contracts/
@@ -390,6 +403,8 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
             track_list_in_flight: HashMap::new(),
             last_recorded_play_track: None,
             was_online_for_sync: false,
+            analysis: AnalysisService::new(AnalysisPaths::resolve()),
+            last_analysis_track: None,
         }
     }
 
@@ -620,6 +635,16 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         self.queue.current()
     }
 
+    /// The source's sample rate (44 100 Hz for Connect), `0` before the
+    /// first `SourceEvent::TrackStarted`/`BecameActive` has told the engine
+    /// what it is (005-now-playing-waveform): the waveform's `TimeSpace`
+    /// needs it to map pixels to the exact frame indices `seek_frames`
+    /// expects (contracts/ui-waveform.md §4 "Track length for the
+    /// coordinate space").
+    pub fn source_sample_rate(&self) -> u32 {
+        self.source_sample_rate
+    }
+
     /// The effective Connect device name: the user's custom name, or the
     /// service/platform default when none is set (FR-001).
     pub fn device_name(&self) -> String {
@@ -678,6 +703,12 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
     pub fn clear_for_sign_out(&mut self) {
         self.stop();
         self.queue = Queue::new();
+        // `queue` is reset directly above rather than through `dispatch`,
+        // so `sync_analysis_attachment`'s post-`dispatch` hook never runs
+        // for this change — detach explicitly (contracts/transport-
+        // delta.md §2).
+        self.analysis.detach();
+        self.last_analysis_track = None;
         if self.registered_or_pending {
             self.registered_or_pending = false;
             self.source_host.command(SourceCommand::Deregister);
@@ -720,6 +751,8 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
     pub fn shutdown(&mut self) {
         self.stop();
         self.source_host.command(SourceCommand::Shutdown);
+        // Contracts/transport-delta.md §2: after the source `Shutdown`.
+        self.analysis.shutdown();
         self.stream = None;
         // Anything still inside the persist debounce window (the track that
         // just started, the page that just merged) is written now, and the
@@ -919,6 +952,28 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         let buffer_ready = self.source_host.buffer_status().ready;
         self.dispatch(Input::Seek {
             position_ms,
+            position_frames: None,
+            buffer_ready,
+        });
+    }
+
+    /// `seek_frames` (005-now-playing-waveform, contracts/transport-
+    /// delta.md §1): sample-accurate seek to an exact source-rate frame —
+    /// a waveform click or keyboard seek. `position_ms` is derived from
+    /// `frame` at the current `source_sample_rate` (for
+    /// `SourceCommand::Seek` and cluster reporting, R8); the exact frame
+    /// itself carries through to the engine's `Command::Seek` unchanged by
+    /// that ms round trip.
+    pub fn seek_frames(&mut self, frame: u64) {
+        let position_ms = if self.source_sample_rate == 0 {
+            0
+        } else {
+            u32::try_from((frame * 1000) / u64::from(self.source_sample_rate)).unwrap_or(u32::MAX)
+        };
+        let buffer_ready = self.source_host.buffer_status().ready;
+        self.dispatch(Input::Seek {
+            position_ms,
+            position_frames: Some(frame),
             buffer_ready,
         });
     }
@@ -1195,6 +1250,34 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         self.tick_search();
         self.tick_library();
         self.flush_persistence();
+        self.analysis.drain();
+    }
+
+    /// The current track's latest waveform analysis, if any (contracts/
+    /// analysis-service.md §1, contracts/transport-delta.md §2).
+    pub fn analysis(&self) -> Option<&Arc<AnalysisSnapshot>> {
+        self.analysis.latest()
+    }
+
+    /// Detach/reattach the Analysis Service whenever `queue.current()`
+    /// actually changed since the last check — covers every path a
+    /// current-track change can take (skip, end of track, queue replace,
+    /// unavailable skip, transfer-out) with one check rather than one per
+    /// `Input` variant (contracts/transport-delta.md §2). `stop()` never
+    /// changes `queue.current()`, so this is naturally a no-op for it
+    /// (FR-017: a stopped-with-current-track keeps its waveform).
+    fn sync_analysis_attachment(&mut self) {
+        let current_id = self.queue.current().map(|item| item.track.id.clone());
+        if current_id == self.last_analysis_track {
+            return;
+        }
+        self.analysis.detach();
+        if let Some(item) = self.queue.current() {
+            let len_frames = self.ms_to_frames(item.track.duration_ms);
+            self.analysis
+                .attach(item.track.id.clone(), self.source_sample_rate, len_frames);
+        }
+        self.last_analysis_track = current_id;
     }
 
     /// Drive `SearchSession`'s debounce timer every tick
@@ -1409,6 +1492,13 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
                     self.route_hydrated(request_id, tracks, albums, artists, missing);
                     continue;
                 }
+                SourceEvent::DecodedStore { track, store } => {
+                    // Routed directly rather than through the reducer
+                    // (contracts/transport-delta.md §2): `attach_store`
+                    // itself ignores a store for a non-current track.
+                    self.analysis.attach_store(track, store);
+                    continue;
+                }
                 _ => {}
             }
             if let Some(input) = map_source_event(event) {
@@ -1537,6 +1627,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         if confirms_playing && is_actively_playing(&self.transport_state) {
             self.record_play_log_if_new_track();
         }
+        self.sync_analysis_attachment();
     }
 
     /// research R11: record a `PlayLog` entry on the `TrackStarted ->
@@ -1577,8 +1668,11 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
                     }
                     self.source_host.command(cmd);
                 }
-                Effect::SeekTo { position_ms } => {
-                    let frames = self.ms_to_frames(position_ms);
+                Effect::SeekTo {
+                    position_ms,
+                    position_frames,
+                } => {
+                    let frames = position_frames.unwrap_or_else(|| self.ms_to_frames(position_ms));
                     self.push_command_retrying(Command::Seek(frames));
                     self.source_host.command(SourceCommand::Seek(position_ms));
                 }

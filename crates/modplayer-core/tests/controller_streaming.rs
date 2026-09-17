@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use modplayer_audio_io::{FakeBackend, FakeDevice};
 use modplayer_audio_source::{
-    AlbumId, Availability, LibraryItem, LibraryPage, LibrarySet, RemoteCommand, Repeat,
-    SearchGroupPage, SearchHit, SearchKind, SearchPage, SourceEvent, SourceHealth, TrackId,
-    TrackList, TrackListSource, TrackRef, TransferContext, VolumePercent,
+    AlbumId, Availability, DecodedStore, LibraryItem, LibraryPage, LibrarySet, RemoteCommand,
+    Repeat, SearchGroupPage, SearchHit, SearchKind, SearchPage, SourceCommand, SourceEvent,
+    SourceHealth, TrackId, TrackList, TrackListSource, TrackRef, TransferContext, VolumePercent,
 };
 use modplayer_audio_source_synthetic::scripted::HydratedReply;
 use modplayer_audio_source_synthetic::{ScriptedHost, ScriptedHostHandle};
@@ -253,6 +253,137 @@ fn seek_on_buffered_audio_lands_at_the_requested_position() {
         (29_950..=30_050).contains(&position_ms),
         "seek must land within 50 ms of the requested position, got {position_ms}ms"
     );
+}
+
+// 005-now-playing-waveform, contracts/transport-delta.md §1: a waveform
+// seek carries an exact frame to the engine and its millisecond mirror to
+// the source, unchanged by the controller.
+
+#[test]
+fn seek_frames_pushes_exact_engine_command_and_ms_to_source() {
+    let (mut controller, handle, _dir) = ready_controller();
+    controller.queue_replace(vec![track("a")]);
+    controller.play();
+    controller.tick();
+
+    // An arbitrary exact frame, deliberately not on a round-ms boundary.
+    let frame = 44_100u64 * 12 + 37;
+    controller.seek_frames(frame);
+    controller.tick();
+    let _ = controller.backend_mut().render_buffers(1);
+
+    let expected_ms = (frame * 1000) / 44_100;
+    let last_seek_ms = handle
+        .record_commands()
+        .into_iter()
+        .rev()
+        .find_map(|cmd| match cmd {
+            SourceCommand::Seek(ms) => Some(ms),
+            _ => None,
+        })
+        .unwrap_or_else(|| unreachable!("expected a SourceCommand::Seek"));
+    assert_eq!(u64::from(last_seek_ms), expected_ms);
+
+    let position_ms = controller.position().as_millis() as i128;
+    let expected_ms = i128::from(expected_ms);
+    assert!(
+        (expected_ms - 50..=expected_ms + 50).contains(&position_ms),
+        "engine position {position_ms}ms not near the exact seeked frame's {expected_ms}ms"
+    );
+}
+
+// 005-now-playing-waveform, contracts/transport-delta.md §2: the Analysis
+// Service tracks whatever `queue.current()` actually is, and a
+// `DecodedStore` event never reaches a track it wasn't raised for.
+
+/// Poll `tick()` until `controller.analysis()` satisfies `matches`, or
+/// `timeout` elapses (the analysis thread publishes asynchronously).
+fn wait_for_analysis(
+    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+    timeout: Duration,
+    matches: impl Fn(&modplayer_core::AnalysisSnapshot) -> bool,
+) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        controller.tick();
+        if let Some(snapshot) = controller.analysis()
+            && matches(snapshot)
+        {
+            return true;
+        }
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn track_change_detaches_then_attaches_analysis() {
+    let (mut controller, _handle, _dir) = ready_controller();
+    let id_a = track("a").id;
+    let id_b = track("b").id;
+    controller.queue_replace(vec![track("a"), track("b")]);
+    controller.play();
+    controller.tick();
+
+    assert!(
+        wait_for_analysis(&mut controller, Duration::from_secs(2), |s| s.track == id_a),
+        "expected analysis to attach to the first current track"
+    );
+
+    controller.skip_forward();
+
+    assert!(
+        wait_for_analysis(&mut controller, Duration::from_secs(2), |s| s.track == id_b),
+        "expected analysis to detach the old track and attach the new current one"
+    );
+}
+
+#[test]
+fn decoded_store_event_reaches_analysis_for_current_track_only() {
+    let (mut controller, handle, _dir) = ready_controller();
+    let id_a = track("a").id;
+    controller.queue_replace(vec![track("a")]);
+    controller.play();
+    controller.tick();
+
+    assert!(
+        wait_for_analysis(&mut controller, Duration::from_secs(2), |s| s.track == id_a),
+        "expected analysis to attach to the current track"
+    );
+
+    // A store for a track that is *not* current must never reach the
+    // attached-track's analysis (contracts/transport-delta.md §2).
+    let stale_id = TrackId::new("spotify:track:not-current").unwrap_or_else(|_| unreachable!());
+    let store = DecodedStore::new(44_100, 4_410);
+    let interleaved: Vec<f32> = (0..4_410u64)
+        .flat_map(|i| {
+            let s = if i % 2 == 0 { 0.5 } else { -0.5 };
+            [s, s]
+        })
+        .collect();
+    store.write_frames(0, &interleaved);
+    store.set_complete(4_410);
+    handle.emit(SourceEvent::DecodedStore {
+        track: stale_id.clone(),
+        store,
+    });
+
+    for _ in 0..40 {
+        controller.tick();
+        std::thread::sleep(Duration::from_millis(5));
+        if let Some(snapshot) = controller.analysis() {
+            assert_ne!(
+                snapshot.track, stale_id,
+                "a store for a non-current track must never surface in analysis"
+            );
+        }
+    }
+    let snapshot = controller
+        .analysis()
+        .unwrap_or_else(|| unreachable!("track A's own attachment must still be present"));
+    assert_eq!(snapshot.track, id_a);
 }
 
 // T068 (US2): `sync_program` debounce, mode switch on mutation, wrap
@@ -868,6 +999,35 @@ fn sign_out_stops_clears_and_deregisters() {
         ),
         "expected NotRegistered{{SignedOut}}, got {:?}",
         controller.active_state()
+    );
+}
+
+#[test]
+fn sign_out_detaches_analysis() {
+    // Polish (Phase 7): `clear_for_sign_out()` must detach the Analysis
+    // Service along with everything else it clears — `analysis()` reads
+    // `None` afterwards, never a stale snapshot for the track that was
+    // playing (contracts/analysis-service.md A9-adjacent, controller.rs's
+    // `clear_for_sign_out`).
+    let (mut controller, _handle, _dir) = ready_controller();
+    controller.set_playback_permitted(true, None);
+    controller.tick();
+    controller.queue_replace(vec![track("a")]);
+    controller.play();
+    controller.tick();
+
+    assert!(
+        wait_for_analysis(&mut controller, Duration::from_secs(2), |_| true),
+        "expected analysis to attach to the current track before sign-out"
+    );
+    assert!(controller.analysis().is_some());
+
+    controller.clear_for_sign_out();
+    controller.tick();
+
+    assert!(
+        controller.analysis().is_none(),
+        "sign-out must detach analysis, not leave the last track's snapshot behind"
     );
 }
 
