@@ -24,6 +24,7 @@ use modplayer_audio_source::{
 };
 use modplayer_audio_source_synthetic::ScriptedHost;
 use modplayer_audio_source_synthetic::scripted::HydratedReply;
+use modplayer_core::actions::{Chord, HostAction, Platform};
 use modplayer_core::markers::CueSlot;
 use modplayer_core::settings::SettingsStore;
 use modplayer_core::{
@@ -33,6 +34,7 @@ use modplayer_engine::{BufferPreset, DeviceId, FrameCount, SampleRate};
 use modplayer_ui::artwork::ArtworkCache;
 use modplayer_ui::detail_view::{self, DetailTarget};
 use modplayer_ui::library_view::{self, LibraryTab, LibraryViewState};
+use modplayer_ui::settings::controls::{self, ControlsScreen};
 use modplayer_ui::waveform::WaveformState;
 
 struct TempDir(PathBuf);
@@ -1041,7 +1043,40 @@ fn press_marker_key(
     // `every_waveform_key_in_the_contract_table_is_reachable`).
     input.events.push(Event::ModifiersChanged(modifiers));
     input.events.push(key_event(key, modifiers));
+    // A release in the same frame: egui's own `InputState::begin_pass`
+    // derives `repeat` from whether `key` is still in its `keys_down` set
+    // (it ignores the `repeat` field an integration sends), so without
+    // this the *next* press of the same physical key (e.g. `Num1` for
+    // both `Shift+1` and plain `1`) would arrive auto-marked
+    // `repeat: true` and FR-019 would correctly, but here unwantedly,
+    // drop it for a non-`repeats_while_held` action.
+    input.events.push(Event::Key {
+        key,
+        physical_key: None,
+        pressed: false,
+        repeat: false,
+        modifiers,
+    });
     let output = ctx.run_ui(input, |ui| {
+        // 007, contracts/ui-actions.md §1: run the dispatcher exactly as
+        // `App::ui` does, since the view-level marker/loop/cue shortcuts
+        // and the focused-marker nudge keys are now the catalog, not
+        // `now_playing::show`'s own (removed) handlers.
+        let claims = modplayer_ui::actions::claims_snapshot(&ui.ctx().clone());
+        modplayer_ui::actions::clear_claims(&ui.ctx().clone());
+        let scope = modplayer_core::actions::ScopeState {
+            now_playing_shown: true,
+            marker_focused: waveform.focused_marker.is_some(),
+        };
+        let mut shell = modplayer_ui::Shell::default();
+        modplayer_ui::actions::dispatch_and_invoke(
+            &ui.ctx().clone(),
+            &claims,
+            &scope,
+            controller,
+            &mut shell,
+            waveform,
+        );
         modplayer_ui::now_playing::show(ui, controller, artwork, waveform)
     });
     output.drop_without_applying_deltas();
@@ -1485,5 +1520,158 @@ fn every_focused_marker_key_is_reachable() {
     assert_eq!(
         waveform.focused_marker, None,
         "`Delete` must also return focus to the detail waveform"
+    );
+}
+
+// -- 007-keyboard-actions-and-shortcuts, T067: Settings › Controls --------
+
+/// A bare controller with no device/track state — `settings::controls`
+/// only ever reads/mutates `controller.actions()` (mirrors `tests/
+/// controls.rs`'s own `fresh_controller`, minus the accesskit-specific
+/// bits already provided by this file's `render_nodes`).
+fn fresh_bare_controller(label: &str) -> (PlaybackController<FakeBackend, ScriptedHost>, TempDir) {
+    let (store, dir) = fresh_store(label);
+    let controller = PlaybackController::new(FakeBackend::new(vec![]), ScriptedHost::new(), store);
+    (controller, dir)
+}
+
+fn platform_now() -> Platform {
+    if Context::default().os().is_mac() {
+        Platform::Mac
+    } else {
+        Platform::Other
+    }
+}
+
+#[test]
+fn controls_filter_box_is_labelled() {
+    let (mut controller, _dir) = fresh_bare_controller("controls-filter-a11y");
+    let mut screen = ControlsScreen::default();
+    let nodes = render_nodes(|ui| controls::show(ui, &mut controller, &mut screen, None));
+
+    let text_inputs: Vec<_> = nodes.iter().filter(|n| n.role == Role::TextInput).collect();
+    assert_eq!(
+        text_inputs.len(),
+        1,
+        "expected exactly one Role::TextInput node, got {text_inputs:?}"
+    );
+    assert!(
+        text_inputs[0].labelled_by_something,
+        "the filter box must be associated with the \"{}\" label via labelled_by: {:?}",
+        tr("controls-filter"),
+        text_inputs[0]
+    );
+}
+
+#[test]
+fn controls_reset_all_and_row_controls_expose_accessible_names_and_stay_enabled() {
+    let (mut controller, _dir) = fresh_bare_controller("controls-row-a11y");
+    let mut screen = ControlsScreen::default();
+    let nodes = render_nodes(|ui| controls::show(ui, &mut controller, &mut screen, None));
+
+    let reset_all = find_one(&nodes, Role::Button, &tr("controls-reset-all"));
+    assert!(!reset_all.disabled);
+
+    assert!(
+        !find_all(&nodes, Role::Button, &tr("controls-add-binding")).is_empty(),
+        "every row must expose an \"Add binding\" button"
+    );
+
+    let action = HostAction::NavLibrary;
+    let reset_name = tr_args(
+        "controls-reset-action",
+        &[("action", tr(action.label_key()))],
+    );
+    let reset = find_one(&nodes, Role::Button, &reset_name);
+    assert!(!reset.disabled);
+}
+
+#[test]
+fn controls_binding_chip_and_remove_button_expose_accessible_names() {
+    let (mut controller, _dir) = fresh_bare_controller("controls-chip-a11y");
+    let mut screen = ControlsScreen::default();
+    let nodes = render_nodes(|ui| controls::show(ui, &mut controller, &mut screen, None));
+
+    let chord = Chord::parse("L").unwrap_or_else(|_| unreachable!()); // ToggleLoop's default.
+    let display = chord.display(platform_now());
+    let chip_text = tr_args("controls-binding-chip", &[("binding", display.clone())]);
+    assert!(
+        nodes
+            .iter()
+            .any(|n| n.accessible_name() == Some(chip_text.as_str())),
+        "the binding chip must expose its accessible name: {nodes:?}"
+    );
+
+    let remove_name = tr_args("controls-remove-binding", &[("binding", display)]);
+    let remove = find_one(&nodes, Role::Button, &remove_name);
+    assert!(!remove.disabled);
+}
+
+#[test]
+fn controls_capture_control_exposes_accessible_name_and_role() {
+    let (mut controller, _dir) = fresh_bare_controller("controls-capture-a11y");
+    let action = HostAction::NavLibrary;
+    let mut screen = ControlsScreen {
+        capture: Some(action),
+        ..Default::default()
+    };
+    let nodes = render_nodes(|ui| controls::show(ui, &mut controller, &mut screen, None));
+
+    let accessible = tr_args("controls-capture", &[("action", tr(action.label_key()))]);
+    let node = find_one(&nodes, Role::Button, &accessible);
+    assert!(!node.disabled);
+}
+
+#[test]
+fn controls_disabled_row_shows_inactive_suffix_and_keeps_controls_enabled() {
+    let (mut controller, _dir) = fresh_bare_controller("controls-disabled-a11y");
+    let mut screen = ControlsScreen::default();
+    let nodes = render_nodes(|ui| controls::show(ui, &mut controller, &mut screen, None));
+
+    let action = HostAction::TempoStepUp;
+    let expected_label = format!("{} {}", tr(action.label_key()), tr("controls-inactive"));
+    assert!(
+        nodes
+            .iter()
+            .any(|n| n.accessible_name() == Some(expected_label.as_str())),
+        "a disabled row's label must expose the `(inactive)` suffix: {nodes:?}"
+    );
+
+    let reset_name = tr_args(
+        "controls-reset-action",
+        &[("action", tr(action.label_key()))],
+    );
+    let reset = find_one(&nodes, Role::Button, &reset_name);
+    assert!(
+        !reset.disabled,
+        "a disabled action's own controls must stay enabled (FR-012)"
+    );
+}
+
+/// FR-014's "logical Tab order": the filter box must precede "Reset all to
+/// defaults" (`render_nodes`'s node list preserves AccessKit's own frame
+/// order for widgets drawn directly one after another, this file's own
+/// doc comment on [`find_all`]) — both sit at the top of the page, ahead
+/// of the per-category, per-row content.
+#[test]
+fn controls_tab_order_is_filter_then_reset_all() {
+    let (mut controller, _dir) = fresh_bare_controller("controls-tab-order");
+    let mut screen = ControlsScreen::default();
+    let nodes = render_nodes(|ui| controls::show(ui, &mut controller, &mut screen, None));
+
+    let filter_index = nodes
+        .iter()
+        .position(|n| n.role == Role::TextInput)
+        .unwrap_or_else(|| panic!("filter box not found: {nodes:?}"));
+    let reset_all_index = nodes
+        .iter()
+        .position(|n| {
+            n.role == Role::Button && n.accessible_name() == Some(tr("controls-reset-all").as_str())
+        })
+        .unwrap_or_else(|| panic!("\"Reset all to defaults\" button not found: {nodes:?}"));
+
+    assert!(
+        filter_index < reset_all_index,
+        "the filter box must precede \"Reset all to defaults\" in the reading/Tab order"
     );
 }

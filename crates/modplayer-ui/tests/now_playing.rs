@@ -17,6 +17,7 @@ use egui::{Context, Event, Key, Modifiers, PointerButton, Pos2, RawInput, Rect};
 use modplayer_audio_io::{FakeBackend, FakeDevice};
 use modplayer_audio_source::{Availability, SourceCommand, SourceHealth, TrackId, TrackRef};
 use modplayer_audio_source_synthetic::{ScriptedHost, ScriptedHostHandle};
+use modplayer_core::actions::ScopeState;
 use modplayer_core::markers::{CueSlot, TrackMarkers};
 use modplayer_core::settings::SettingsStore;
 use modplayer_core::transport::Intent;
@@ -24,6 +25,7 @@ use modplayer_core::{NotRegisteredReason, PlaybackController, tr};
 use modplayer_engine::{BufferPreset, DeviceId, FrameCount, SampleRate};
 use modplayer_ui::artwork::{ArtworkCache, ArtworkState};
 use modplayer_ui::waveform::{DetailWindow, DragOrigin, DragPreview, TimeSpace, WaveformState};
+use modplayer_ui::{Shell, actions};
 
 struct TempDir(PathBuf);
 
@@ -978,7 +980,34 @@ fn run_key_frame<B: modplayer_audio_io::OutputBackend, H: modplayer_audio_source
         repeat: false,
         modifiers,
     });
+    input.events.push(Event::Key {
+        key,
+        physical_key: None,
+        pressed: false,
+        repeat: false,
+        modifiers,
+    });
     let mut output = ctx.run_ui(input, |ui| {
+        // 007, contracts/ui-actions.md §1: run the dispatcher exactly as
+        // `App::ui` does before now_playing::show re-points this file's
+        // `I`/`O`/`L` keyboard-table tests at the catalog (T047); every
+        // key here not in the catalog (waveform seek/zoom/pan, `Tab`)
+        // simply falls through untouched, as before.
+        let claims = actions::claims_snapshot(&ui.ctx().clone());
+        actions::clear_claims(&ui.ctx().clone());
+        let scope = ScopeState {
+            now_playing_shown: true,
+            marker_focused: waveform.focused_marker.is_some(),
+        };
+        let mut shell = Shell::default();
+        actions::dispatch_and_invoke(
+            &ui.ctx().clone(),
+            &claims,
+            &scope,
+            controller,
+            &mut shell,
+            waveform,
+        );
         modplayer_ui::now_playing::show(ui, controller, artwork, waveform)
     });
     let update = output

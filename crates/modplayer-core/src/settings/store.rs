@@ -31,24 +31,34 @@ pub enum SettingsWarning {
     NewerVersion,
     /// One or more enum fields held an unrecognised value.
     InvalidValue(Vec<InvalidField>),
+    /// One or more `[keybindings]` entries were dropped in isolation
+    /// (007, contracts/keymap-settings.md): an unknown action id, a
+    /// value that isn't an array of strings, or an unparseable chord
+    /// string. Lists the dropped action ids.
+    InvalidKeybindings(Vec<String>),
 }
 
 impl SettingsWarning {
-    /// The Fluent message key for this warning (contracts/settings-file.md).
+    /// The Fluent message key for this warning (contracts/settings-file.md;
+    /// `InvalidKeybindings` — contracts/keymap-settings.md).
     pub fn message_key(&self) -> &'static str {
         match self {
             SettingsWarning::Unreadable => "settings-unreadable",
             SettingsWarning::NewerVersion => "settings-newer-version",
             SettingsWarning::InvalidValue(_) => "settings-invalid-value",
+            SettingsWarning::InvalidKeybindings(_) => "keybindings-invalid-entries",
         }
     }
 }
 
-/// The result of a `SettingsStore::load()` call.
+/// The result of a `SettingsStore::load()` call. `warnings` holds, in
+/// order, `InvalidValue` (if any) then `InvalidKeybindings` (if any) —
+/// or `Unreadable`/`NewerVersion` alone, since those short-circuit the
+/// rest of the load (contracts/keymap-settings.md).
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadOutcome {
     pub settings: AudioSettings,
-    pub warning: Option<SettingsWarning>,
+    pub warnings: Vec<SettingsWarning>,
 }
 
 /// Errors saving settings. Loading never returns an error: every failure
@@ -96,7 +106,7 @@ impl SettingsStore {
         if !self.path.exists() {
             return LoadOutcome {
                 settings: AudioSettings::default(),
-                warning: None,
+                warnings: Vec::new(),
             };
         }
 
@@ -105,7 +115,7 @@ impl SettingsStore {
             Err(_) => {
                 return LoadOutcome {
                     settings: AudioSettings::default(),
-                    warning: Some(SettingsWarning::Unreadable),
+                    warnings: vec![SettingsWarning::Unreadable],
                 };
             }
         };
@@ -115,7 +125,7 @@ impl SettingsStore {
             Err(_) => {
                 return LoadOutcome {
                     settings: AudioSettings::default(),
-                    warning: Some(SettingsWarning::Unreadable),
+                    warnings: vec![SettingsWarning::Unreadable],
                 };
             }
         };
@@ -123,17 +133,19 @@ impl SettingsStore {
         if raw.schema_version > SCHEMA_VERSION {
             return LoadOutcome {
                 settings: AudioSettings::default(),
-                warning: Some(SettingsWarning::NewerVersion),
+                warnings: vec![SettingsWarning::NewerVersion],
             };
         }
 
-        let (settings, invalid) = raw.into_settings();
-        let warning = if invalid.is_empty() {
-            None
-        } else {
-            Some(SettingsWarning::InvalidValue(invalid))
-        };
-        LoadOutcome { settings, warning }
+        let (settings, invalid, invalid_keybindings) = raw.into_settings();
+        let mut warnings = Vec::new();
+        if !invalid.is_empty() {
+            warnings.push(SettingsWarning::InvalidValue(invalid));
+        }
+        if !invalid_keybindings.is_empty() {
+            warnings.push(SettingsWarning::InvalidKeybindings(invalid_keybindings));
+        }
+        LoadOutcome { settings, warnings }
     }
 
     /// Save `settings`, serializing the full struct and replacing the file
@@ -211,7 +223,7 @@ mod tests {
         let (store, _dir) = temp_store();
         let outcome = store.load();
         assert_eq!(outcome.settings, AudioSettings::default());
-        assert_eq!(outcome.warning, None);
+        assert!(outcome.warnings.is_empty());
     }
 
     #[test]
@@ -221,7 +233,7 @@ mod tests {
         store.save(&settings).expect("save");
         let outcome = store.load();
         assert_eq!(outcome.settings, settings);
-        assert_eq!(outcome.warning, None);
+        assert!(outcome.warnings.is_empty());
     }
 
     #[test]
@@ -230,7 +242,7 @@ mod tests {
         let content = "schema_version = 1\n\n[audio]\nlimiter_ceiling_db = 3.0\nmaster_volume = 250\n\n[audio.safe_volume]\ncap = -5\n";
         fs::write(store.path(), content).expect("write");
         let outcome = store.load();
-        assert_eq!(outcome.warning, None);
+        assert!(outcome.warnings.is_empty());
         assert_eq!(outcome.settings.limiter_ceiling_db.db(), -0.1);
         assert_eq!(outcome.settings.master_volume.value(), 100);
         assert_eq!(outcome.settings.safe_volume.cap.value(), 0);
@@ -242,7 +254,7 @@ mod tests {
         fs::write(store.path(), "this is not { valid toml").expect("write");
         let outcome = store.load();
         assert_eq!(outcome.settings, AudioSettings::default());
-        assert_eq!(outcome.warning, Some(SettingsWarning::Unreadable));
+        assert_eq!(outcome.warnings, vec![SettingsWarning::Unreadable]);
     }
 
     #[test]
@@ -262,7 +274,7 @@ mod tests {
 
         let outcome = store.load();
         assert_eq!(outcome.settings, original);
-        assert_eq!(outcome.warning, None);
+        assert!(outcome.warnings.is_empty());
     }
 
     #[test]
@@ -271,7 +283,7 @@ mod tests {
         let content = "schema_version = 1\nsome_future_top_level_key = true\n\n[audio]\nbuffer_preset = \"safe\"\nunknown_audio_key = 123\n";
         fs::write(store.path(), content).expect("write");
         let outcome = store.load();
-        assert_eq!(outcome.warning, None);
+        assert!(outcome.warnings.is_empty());
         assert_eq!(outcome.settings.buffer_preset, BufferPreset::Safe);
     }
 
@@ -283,7 +295,7 @@ mod tests {
 
         let outcome = store.load();
         assert_eq!(outcome.settings, AudioSettings::default());
-        assert_eq!(outcome.warning, Some(SettingsWarning::NewerVersion));
+        assert_eq!(outcome.warnings, vec![SettingsWarning::NewerVersion]);
 
         let after = fs::read_to_string(store.path()).expect("read");
         assert_eq!(before, after, "load() must not rewrite the file");

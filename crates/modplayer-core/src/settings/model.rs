@@ -11,10 +11,14 @@
 //! without failing the whole parse. `settings/store.rs` turns one into the
 //! other and reports which fields (if any) fell back to a default.
 
+use std::collections::BTreeMap;
+
 use modplayer_engine::{BufferPreset, CeilingDb, DeviceId, SafeVolume, Theme, VolumePercent};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+
+use crate::actions::{Chord, HostAction, KeymapOverrides};
 
 /// Current on-disk schema version (contracts/settings-file.md).
 pub const SCHEMA_VERSION: u32 = 1;
@@ -68,6 +72,11 @@ pub struct AudioSettings {
     /// multiplies by 10). Clamped `1..=1000` silently — no `InvalidField`
     /// variant, matching `master_volume`/`safe_volume.cap`'s precedent.
     pub nudge_step_ms: u16,
+    /// `[keybindings]` shadow state (007, data-model.md §2, §5): only the
+    /// actions whose effective bindings differ from the shipped catalog
+    /// default. Compared in `PartialEq` like every other field, so a
+    /// round-trip test catches a regression here too.
+    pub keybinding_overrides: KeymapOverrides,
     pub schema_version: u32,
 }
 
@@ -85,6 +94,7 @@ impl Default for AudioSettings {
             device_name: None,
             connect_device_id: None,
             nudge_step_ms: DEFAULT_NUDGE_STEP_MS,
+            keybinding_overrides: KeymapOverrides::default(),
             schema_version: SCHEMA_VERSION,
         }
     }
@@ -194,6 +204,12 @@ pub struct RawSettings {
     pub playback: RawPlayback,
     #[serde(default)]
     pub markers: RawMarkers,
+    /// `[keybindings]` (007, contracts/keymap-settings.md): action id ->
+    /// arbitrary TOML value, so one malformed entry's *shape* (not an
+    /// array, or an array with a non-string) never fails the whole file
+    /// — only that entry is dropped, in `into_settings`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub keybindings: BTreeMap<String, toml::Value>,
 }
 
 fn default_schema_version() -> u32 {
@@ -209,6 +225,7 @@ impl Default for RawSettings {
             disclosure: RawDisclosure::default(),
             playback: RawPlayback::default(),
             markers: RawMarkers::default(),
+            keybindings: BTreeMap::new(),
         }
     }
 }
@@ -393,15 +410,45 @@ impl RawSettings {
             markers: RawMarkers {
                 nudge_step_ms: i64::from(settings.nudge_step_ms),
             },
+            keybindings: settings
+                .keybinding_overrides
+                .iter()
+                .map(|(action, chords)| {
+                    let value = toml::Value::Array(
+                        chords
+                            .iter()
+                            .map(|c| toml::Value::String(c.encode()))
+                            .collect(),
+                    );
+                    (action.id().to_string(), value)
+                })
+                .collect(),
         }
     }
 
     /// Validate and clamp into the domain type. Out-of-range numbers are
     /// clamped silently (the newtype constructors do this); an
     /// unrecognised enum string falls back to its field default and is
-    /// reported in the returned list (contracts/settings-file.md).
-    pub fn into_settings(self) -> (AudioSettings, Vec<InvalidField>) {
+    /// reported in the returned list (contracts/settings-file.md). The
+    /// third element lists every `[keybindings]` entry dropped in
+    /// isolation (contracts/keymap-settings.md): an unknown action id, a
+    /// value that isn't an array of strings, or a chord string that
+    /// fails `Chord::parse` drops that whole entry, never a partial
+    /// binding list; duplicate chords within one entry are deduplicated
+    /// silently (first occurrence kept), with no warning.
+    pub fn into_settings(self) -> (AudioSettings, Vec<InvalidField>, Vec<String>) {
         let mut invalid = Vec::new();
+        let mut dropped_keybindings = Vec::new();
+        let mut keybinding_overrides = KeymapOverrides::default();
+        for (id, value) in &self.keybindings {
+            match decode_keybinding_entry(value) {
+                Some(chords) => match HostAction::parse(id) {
+                    Some(action) => keybinding_overrides.set(action, chords),
+                    None => dropped_keybindings.push(id.clone()),
+                },
+                None => dropped_keybindings.push(id.clone()),
+            }
+        }
 
         let buffer_preset = match self.audio.buffer_preset.as_str() {
             "performance" => BufferPreset::Performance,
@@ -480,11 +527,30 @@ impl RawSettings {
             device_name,
             connect_device_id,
             nudge_step_ms: clamp_nudge_step_ms(self.markers.nudge_step_ms),
+            keybinding_overrides,
             schema_version: self.schema_version,
         };
 
-        (settings, invalid)
+        (settings, invalid, dropped_keybindings)
     }
+}
+
+/// Decode one `[keybindings]` entry's value into a deduplicated chord
+/// list, or `None` if its shape is wrong (not an array, or an array
+/// holding a non-string) or any element fails [`Chord::parse`] — in
+/// which case the whole entry is dropped, never a partial list
+/// (contracts/keymap-settings.md).
+fn decode_keybinding_entry(value: &toml::Value) -> Option<Vec<Chord>> {
+    let array = value.as_array()?;
+    let mut chords = Vec::with_capacity(array.len());
+    for item in array {
+        let raw = item.as_str()?;
+        let chord = Chord::parse(raw).ok()?;
+        if !chords.contains(&chord) {
+            chords.push(chord);
+        }
+    }
+    Some(chords)
 }
 
 #[cfg(test)]
@@ -514,8 +580,9 @@ mod tests {
     fn round_trips_through_raw() {
         let settings = AudioSettings::default();
         let raw = RawSettings::from_settings(&settings);
-        let (round_tripped, invalid) = raw.into_settings();
+        let (round_tripped, invalid, dropped) = raw.into_settings();
         assert!(invalid.is_empty());
+        assert!(dropped.is_empty());
         assert_eq!(round_tripped, settings);
     }
 
@@ -525,8 +592,9 @@ mod tests {
         raw.audio.limiter_ceiling_db = 3.0;
         raw.audio.master_volume = 250;
         raw.audio.safe_volume.cap = -5;
-        let (settings, invalid) = raw.into_settings();
+        let (settings, invalid, dropped) = raw.into_settings();
         assert!(invalid.is_empty());
+        assert!(dropped.is_empty());
         assert_eq!(settings.limiter_ceiling_db.db(), -0.1);
         assert_eq!(settings.master_volume.value(), 100);
         assert_eq!(settings.safe_volume.cap.value(), 0);
@@ -537,7 +605,8 @@ mod tests {
         let mut raw = RawSettings::default();
         raw.audio.buffer_preset = "turbo".to_string();
         raw.appearance.theme = "midnight".to_string();
-        let (settings, invalid) = raw.into_settings();
+        let (settings, invalid, dropped) = raw.into_settings();
+        assert!(dropped.is_empty());
         assert_eq!(settings.buffer_preset, BufferPreset::default());
         assert_eq!(settings.theme, Theme::default());
         assert_eq!(
@@ -548,8 +617,9 @@ mod tests {
 
     #[test]
     fn absent_disclosure_section_means_never_acknowledged() {
-        let (settings, invalid) = RawSettings::default().into_settings();
+        let (settings, invalid, dropped) = RawSettings::default().into_settings();
         assert!(invalid.is_empty());
+        assert!(dropped.is_empty());
         assert_eq!(settings.disclosure, None);
     }
 
@@ -563,8 +633,9 @@ mod tests {
             ..AudioSettings::default()
         };
         let raw = RawSettings::from_settings(&settings);
-        let (round_tripped, invalid) = raw.into_settings();
+        let (round_tripped, invalid, dropped) = raw.into_settings();
         assert!(invalid.is_empty());
+        assert!(dropped.is_empty());
         assert_eq!(round_tripped, settings);
     }
 
@@ -573,7 +644,7 @@ mod tests {
         let mut raw = RawSettings::default();
         raw.disclosure.acknowledged_version = 0;
         raw.disclosure.acknowledged_at = Some("2026-09-15T13:00:00Z".to_string());
-        let (settings, _invalid) = raw.into_settings();
+        let (settings, _invalid, _dropped) = raw.into_settings();
         assert_eq!(settings.disclosure, None);
     }
 
@@ -582,7 +653,7 @@ mod tests {
         let mut raw = RawSettings::default();
         raw.disclosure.acknowledged_version = 1;
         raw.disclosure.acknowledged_at = Some("not a timestamp".to_string());
-        let (settings, _invalid) = raw.into_settings();
+        let (settings, _invalid, _dropped) = raw.into_settings();
         assert_eq!(
             settings.disclosure,
             Some(DisclosureAcknowledgement {

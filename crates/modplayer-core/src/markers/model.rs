@@ -72,8 +72,18 @@ impl CueSlot {
         }
     }
 
-    pub fn get(self) -> u8 {
+    pub const fn get(self) -> u8 {
         self.0
+    }
+
+    /// Crate-internal: builds a slot from a compile-time-known-valid
+    /// value (`1..=8`), for `actions::catalog`'s `const CATALOG` (007,
+    /// data-model.md §1.1), which has no `Option`-friendly way to build a
+    /// `const` array. Never exposed outside the crate — every call site
+    /// passes a literal already checked against the same `1..=8` range
+    /// `new` validates at runtime.
+    pub(crate) const fn new_const(slot: u8) -> Self {
+        Self(slot)
     }
 }
 

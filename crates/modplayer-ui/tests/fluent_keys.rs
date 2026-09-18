@@ -206,10 +206,100 @@ const PLAYBACK_SETTINGS_KEYS: &[&str] = &[
     "setting-nudge-step-desc",
 ];
 
+/// 007-keyboard-actions-and-shortcuts, T068: the 44 action labels and 6
+/// category labels (`controls.ftl`, contracts/ui-actions.md §6), plus the
+/// Controls page's own strings that take no Fluent placeholder — resolved
+/// via plain `tr`.
+const CONTROLS_KEYS: &[&str] = &[
+    "action-transport-play",
+    "action-transport-pause",
+    "action-transport-toggle",
+    "action-transport-stop",
+    "action-transport-next",
+    "action-transport-previous",
+    "action-transport-seek-forward-step",
+    "action-transport-seek-backward-step",
+    "action-transport-volume-up",
+    "action-transport-volume-down",
+    "action-markers-add-point",
+    "action-markers-set-a",
+    "action-markers-set-b",
+    "action-markers-nudge-earlier",
+    "action-markers-nudge-later",
+    "action-markers-nudge-earlier-x10",
+    "action-markers-nudge-later-x10",
+    "action-markers-clear-all",
+    "action-loop-toggle",
+    "action-cues-set-1",
+    "action-cues-set-2",
+    "action-cues-set-3",
+    "action-cues-set-4",
+    "action-cues-set-5",
+    "action-cues-set-6",
+    "action-cues-set-7",
+    "action-cues-set-8",
+    "action-cues-jump-1",
+    "action-cues-jump-2",
+    "action-cues-jump-3",
+    "action-cues-jump-4",
+    "action-cues-jump-5",
+    "action-cues-jump-6",
+    "action-cues-jump-7",
+    "action-cues-jump-8",
+    "action-nav-library",
+    "action-nav-search",
+    "action-nav-now-playing",
+    "action-nav-plugins",
+    "action-nav-settings",
+    "action-nav-toggle-queue",
+    "action-nav-focus-search",
+    "action-effects-tempo-step-up",
+    "action-effects-tempo-step-down",
+    "action-cat-transport",
+    "action-cat-markers",
+    "action-cat-loop",
+    "action-cat-cues",
+    "action-cat-navigation",
+    "action-cat-effects",
+    "controls-heading",
+    "controls-filter",
+    "controls-no-match",
+    "controls-kind-trigger",
+    "controls-kind-continuous",
+    "controls-inactive",
+    "controls-add-binding",
+    "controls-capture-prompt",
+    "controls-reset-all",
+    "controls-reset-all-confirm",
+    "controls-confirm",
+    "controls-cancel",
+    "controls-reject-tab",
+    "controls-reject-mac-control",
+    "controls-reject-modifier-only",
+    "controls-reject-duplicate",
+];
+
+/// `controls.ftl` keys that take a Fluent placeholder — resolved via
+/// `tr_args` with a stand-in value.
+const CONTROLS_ARG_KEYS: &[&str] = &[
+    "controls-binding-chip",
+    "controls-remove-binding",
+    "controls-capture",
+    "controls-reset-action",
+    "controls-conflict-with",
+];
+
+/// `controls.ftl`'s one new settings-load warning (FR-013;
+/// contracts/keymap-settings.md), templated with `{ $ids }` — resolved via
+/// `tr_args` like `DEVICE_NAMED_KEYS`.
+const CONTROLS_WARNING_ARG_KEYS: &[&str] = &["keybindings-invalid-entries"];
+
 /// Every Settings-screen key (US5, T086): the eleven fixed-order category
 /// labels, the search box, the placeholder text for categories with no
 /// working settings yet, and every working setting's title/description
-/// (contracts/ui-surface.md "Settings").
+/// (contracts/ui-surface.md "Settings"). 007-keyboard-actions-and-shortcuts
+/// (T068) adds the Controls category's one descriptor,
+/// `setting-keybindings`/`setting-keybindings-desc`.
 const SETTINGS_SCREEN_KEYS: &[&str] = &[
     // Category list, in fixed order.
     "settings-cat-account",
@@ -249,6 +339,9 @@ const SETTINGS_SCREEN_KEYS: &[&str] = &[
     "setting-locale",
     "setting-locale-desc",
     "language-english",
+    // Controls category (007-keyboard-actions-and-shortcuts, T061/T068).
+    "setting-keybindings",
+    "setting-keybindings-desc",
 ];
 
 /// Every Welcome/Decline/Privacy-Notice key (US1, T037; contracts/
@@ -595,6 +688,37 @@ fn every_shell_nav_and_notification_key_resolves() {
             "Fluent key `{key}` is missing from locales/en-US/playback.ftl (tr_args() fell back to the raw key)"
         );
     }
+
+    for key in CONTROLS_KEYS {
+        let resolved = tr(key);
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/controls.ftl (tr() fell back to the raw key)"
+        );
+    }
+
+    for key in CONTROLS_ARG_KEYS {
+        let resolved = tr_args(
+            key,
+            &[
+                ("binding", "⌘⇧→".to_string()),
+                ("action", "Play/pause".to_string()),
+                ("other", "Stop".to_string()),
+            ],
+        );
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/controls.ftl (tr_args() fell back to the raw key)"
+        );
+    }
+
+    for key in CONTROLS_WARNING_ARG_KEYS {
+        let resolved = tr_args(key, &[("ids", "host.nope.x".to_string())]);
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/controls.ftl (tr_args() fell back to the raw key)"
+        );
+    }
 }
 
 /// Every message identifier a Fluent (`.ftl`) resource defines: lines of
@@ -622,6 +746,7 @@ fn defined_keys(ftl: &str) -> HashSet<&str> {
 fn no_unused_keys_in_playback_and_settings_ftl() {
     let playback_ftl = include_str!("../../../locales/en-US/playback.ftl");
     let settings_ftl = include_str!("../../../locales/en-US/settings.ftl");
+    let controls_ftl = include_str!("../../../locales/en-US/controls.ftl");
 
     let tested: HashSet<&str> = SHELL_AND_NOTIFICATION_KEYS
         .iter()
@@ -637,6 +762,9 @@ fn no_unused_keys_in_playback_and_settings_ftl() {
         .chain(PLAYBACK_INDEX_ARG_KEYS)
         .chain(PLAYBACK_SLOT_ARG_KEYS)
         .chain(PLAYBACK_SETTINGS_KEYS)
+        .chain(CONTROLS_KEYS)
+        .chain(CONTROLS_ARG_KEYS)
+        .chain(CONTROLS_WARNING_ARG_KEYS)
         .copied()
         .collect();
 
@@ -650,6 +778,12 @@ fn no_unused_keys_in_playback_and_settings_ftl() {
         assert!(
             tested.contains(key),
             "locales/en-US/settings.ftl defines `{key}`, which no UI code path (and so no test in this file) uses — remove it or wire it up"
+        );
+    }
+    for key in defined_keys(controls_ftl) {
+        assert!(
+            tested.contains(key),
+            "locales/en-US/controls.ftl defines `{key}`, which no UI code path (and so no test in this file) uses — remove it or wire it up"
         );
     }
 }

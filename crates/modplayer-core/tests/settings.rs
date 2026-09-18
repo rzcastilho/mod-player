@@ -2,20 +2,34 @@
 
 //! Settings-file contract tests (FR-020, FR-025e; contracts/settings-file.md):
 //! round-trip, out-of-range clamping, a garbage file, a simulated crash
-//! mid-write, an unknown key, and a newer schema version. Exercises only
+//! mid-write, an unknown key, and a newer schema version. Exercises mostly
 //! `SettingsStore`'s public API, each test against its own directory under
 //! `MODPLAYER_CONFIG_DIR`-style isolation via `SettingsStore::with_path` (no
-//! test touches the real platform config location).
+//! test touches the real platform config location). T077 (007, US4)
+//! additionally confirms one `[keybindings]` load path through the real
+//! `PlaybackController::new` — the warning must reach the app's
+//! `NotificationCenter`, not only `LoadOutcome`, which the tests above only
+//! check in isolation; `crates/modplayer-core/tests/controller_actions.rs`'s
+//! `custom_binding_survives_controller_restart` (T076) covers the matching
+//! round-trip-through-controller half.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use modplayer_audio_io::FakeBackend;
+use modplayer_audio_source_synthetic::SyntheticHost;
 use modplayer_core::settings::{
     AudioSettings, DeviceName, DisclosureAcknowledgement, InvalidField, SettingsStore,
     SettingsWarning, generate_connect_device_id,
 };
+use modplayer_core::{Chord, HostAction, PlaybackController};
 use modplayer_engine::{BufferPreset, VolumePercent};
+
+/// Parse a literal that must be valid grammar (test convenience).
+fn chord(s: &str) -> Chord {
+    Chord::parse(s).unwrap_or_else(|_| unreachable!("{s:?} must be valid grammar"))
+}
 
 /// A minimal self-cleaning temp directory (no `tempfile` dependency).
 struct TempDir(PathBuf);
@@ -57,7 +71,7 @@ fn round_trip_defaults() {
 
     let outcome = store.load();
     assert_eq!(outcome.settings, settings);
-    assert_eq!(outcome.warning, None);
+    assert!(outcome.warnings.is_empty());
 }
 
 #[test]
@@ -79,7 +93,7 @@ fn disclosure_acknowledgement_round_trips_through_the_file() {
 
     let outcome = store.load();
     assert_eq!(outcome.settings, settings);
-    assert_eq!(outcome.warning, None);
+    assert!(outcome.warnings.is_empty());
 
     let on_disk = fs::read_to_string(store.path()).unwrap_or_default();
     assert!(
@@ -96,8 +110,8 @@ fn out_of_range_file_values_clamp() {
     let _ = fs::write(store.path(), content);
 
     let outcome = store.load();
-    assert_eq!(
-        outcome.warning, None,
+    assert!(
+        outcome.warnings.is_empty(),
         "out-of-range numbers clamp silently, no notification"
     );
     assert_eq!(outcome.settings.limiter_ceiling_db.db(), -0.1);
@@ -113,7 +127,7 @@ fn garbage_file_loads_defaults_with_exactly_one_warning() {
 
     let outcome = store.load();
     assert_eq!(outcome.settings, AudioSettings::default());
-    assert_eq!(outcome.warning, Some(SettingsWarning::Unreadable));
+    assert_eq!(outcome.warnings, vec![SettingsWarning::Unreadable]);
 }
 
 #[test]
@@ -136,7 +150,7 @@ fn simulated_crash_mid_write_leaves_prior_file_intact() {
         outcome.settings, original,
         "prior file must survive an interrupted write"
     );
-    assert_eq!(outcome.warning, None);
+    assert!(outcome.warnings.is_empty());
 }
 
 #[test]
@@ -148,7 +162,7 @@ fn unknown_key_and_newer_schema_version_behave_as_contracted() {
     let content = "schema_version = 1\nfuture_top_level_key = 123\n\n[audio]\nbuffer_preset = \"performance\"\n";
     let _ = fs::write(store.path(), content);
     let outcome = store.load();
-    assert_eq!(outcome.warning, None);
+    assert!(outcome.warnings.is_empty());
     assert_eq!(outcome.settings.buffer_preset, BufferPreset::Performance);
 
     // Newer schema version: defaults + warning, and the file is not rewritten by load().
@@ -159,7 +173,7 @@ fn unknown_key_and_newer_schema_version_behave_as_contracted() {
 
     let newer_outcome = newer_store.load();
     assert_eq!(newer_outcome.settings, AudioSettings::default());
-    assert_eq!(newer_outcome.warning, Some(SettingsWarning::NewerVersion));
+    assert_eq!(newer_outcome.warnings, vec![SettingsWarning::NewerVersion]);
 
     let after = fs::read_to_string(newer_store.path()).unwrap_or_default();
     assert_eq!(before, after, "load() must not rewrite a newer-schema file");
@@ -181,7 +195,7 @@ fn playback_section_round_trips_through_the_file() {
 
     let outcome = store.load();
     assert_eq!(outcome.settings, settings);
-    assert_eq!(outcome.warning, None);
+    assert!(outcome.warnings.is_empty());
 
     let on_disk = fs::read_to_string(store.path()).unwrap_or_default();
     assert!(
@@ -196,7 +210,7 @@ fn absent_playback_section_means_default_device_name() {
     let store = store_in(&dir);
     let _ = fs::write(store.path(), "schema_version = 1\n");
     let outcome = store.load();
-    assert_eq!(outcome.warning, None);
+    assert!(outcome.warnings.is_empty());
     assert_eq!(outcome.settings.device_name, None);
     assert_eq!(outcome.settings.connect_device_id, None);
 }
@@ -212,10 +226,10 @@ fn device_name_over_64_chars_falls_back_to_default_with_a_warning() {
     let outcome = store.load();
     assert_eq!(outcome.settings.device_name, None);
     assert_eq!(
-        outcome.warning,
-        Some(SettingsWarning::InvalidValue(vec![
+        outcome.warnings,
+        vec![SettingsWarning::InvalidValue(vec![
             InvalidField::DeviceName
-        ]))
+        ])]
     );
 }
 
@@ -228,7 +242,7 @@ fn empty_device_name_means_default_with_no_warning() {
 
     let outcome = store.load();
     assert_eq!(outcome.settings.device_name, None);
-    assert_eq!(outcome.warning, None);
+    assert!(outcome.warnings.is_empty());
 }
 
 #[test]
@@ -240,7 +254,7 @@ fn malformed_connect_device_id_is_dropped_silently() {
 
     let outcome = store.load();
     assert_eq!(outcome.settings.connect_device_id, None);
-    assert_eq!(outcome.warning, None);
+    assert!(outcome.warnings.is_empty());
 }
 
 #[test]
@@ -269,26 +283,26 @@ fn nudge_step_setting_round_trips_and_clamps() {
     assert!(store.save(&settings).is_ok());
     let outcome = store.load();
     assert_eq!(outcome.settings.nudge_step_ms, 25);
-    assert_eq!(outcome.warning, None);
+    assert!(outcome.warnings.is_empty());
 
     // Out-of-range values on disk clamp silently, no warning.
     let too_low = "schema_version = 1\n\n[markers]\nnudge_step_ms = 0\n";
     let _ = fs::write(store.path(), too_low);
     let outcome = store.load();
     assert_eq!(outcome.settings.nudge_step_ms, 1);
-    assert_eq!(outcome.warning, None);
+    assert!(outcome.warnings.is_empty());
 
     let too_high = "schema_version = 1\n\n[markers]\nnudge_step_ms = 5000\n";
     let _ = fs::write(store.path(), too_high);
     let outcome = store.load();
     assert_eq!(outcome.settings.nudge_step_ms, 1_000);
-    assert_eq!(outcome.warning, None);
+    assert!(outcome.warnings.is_empty());
 
     // Missing `[markers]` section means the default (10 ms).
     let _ = fs::write(store.path(), "schema_version = 1\n");
     let outcome = store.load();
     assert_eq!(outcome.settings.nudge_step_ms, 10);
-    assert_eq!(outcome.warning, None);
+    assert!(outcome.warnings.is_empty());
 }
 
 #[test]
@@ -296,4 +310,185 @@ fn generate_connect_device_id_is_32_hex_chars() {
     let id = generate_connect_device_id();
     assert_eq!(id.len(), 32);
     assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+}
+
+// ---------------------------------------------------------------------
+// 007: `[keybindings]` (contracts/keymap-settings.md)
+// ---------------------------------------------------------------------
+
+#[test]
+fn keybindings_table_absent_loads_defaults_silently() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let _ = fs::write(store.path(), "schema_version = 1\n");
+
+    let outcome = store.load();
+
+    assert!(outcome.warnings.is_empty());
+    assert!(outcome.settings.keybinding_overrides.is_empty());
+}
+
+#[test]
+fn keybindings_round_trip_is_sparse() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let mut settings = AudioSettings::default();
+    settings
+        .keybinding_overrides
+        .set(HostAction::ToggleLoop, vec![chord("K")]);
+    assert!(store.save(&settings).is_ok());
+
+    let outcome = store.load();
+    assert!(outcome.warnings.is_empty());
+    assert_eq!(
+        outcome
+            .settings
+            .keybinding_overrides
+            .get(HostAction::ToggleLoop),
+        Some([chord("K")].as_slice())
+    );
+
+    let on_disk = fs::read_to_string(store.path()).unwrap_or_default();
+    assert!(
+        on_disk.contains("[keybindings]") && on_disk.contains("host.loop.toggle"),
+        "only the one customized action must appear, got:\n{on_disk}"
+    );
+
+    // Reset it: the table disappears entirely (sparse by construction).
+    let mut reset_settings = outcome.settings;
+    reset_settings
+        .keybinding_overrides
+        .remove(HostAction::ToggleLoop);
+    assert!(store.save(&reset_settings).is_ok());
+    let on_disk_after_reset = fs::read_to_string(store.path()).unwrap_or_default();
+    assert!(
+        !on_disk_after_reset.contains("[keybindings]"),
+        "a fully-reset map must write no [keybindings] table, got:\n{on_disk_after_reset}"
+    );
+}
+
+#[test]
+fn keybindings_invalid_entries_dropped_in_isolation() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let content = r#"schema_version = 1
+
+[keybindings]
+"host.loop.toggle" = ["K"]
+"host.nope.x" = ["A"]
+"host.markers.set_a" = ["Not+A+Valid+Chord"]
+"host.markers.set_b" = "not-an-array"
+"#;
+    let _ = fs::write(store.path(), content);
+
+    let outcome = store.load();
+
+    assert_eq!(
+        outcome
+            .settings
+            .keybinding_overrides
+            .get(HostAction::ToggleLoop),
+        Some([chord("K")].as_slice()),
+        "the one good entry must still apply"
+    );
+    match &outcome.warnings[..] {
+        [SettingsWarning::InvalidKeybindings(ids)] => {
+            let mut ids = ids.clone();
+            ids.sort();
+            assert_eq!(
+                ids,
+                vec!["host.markers.set_a", "host.markers.set_b", "host.nope.x"]
+            );
+        }
+        other => panic!("expected exactly one InvalidKeybindings warning, got {other:?}"),
+    }
+}
+
+#[test]
+fn keybindings_bad_entries_rewritten_clean_on_next_save() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let content = "schema_version = 1\n\n[keybindings]\n\"host.loop.toggle\" = [\"K\"]\n\"host.nope.x\" = [\"A\"]\n";
+    let _ = fs::write(store.path(), content);
+    let outcome = store.load();
+
+    assert!(store.save(&outcome.settings).is_ok());
+
+    let on_disk = fs::read_to_string(store.path()).unwrap_or_default();
+    assert!(on_disk.contains("host.loop.toggle"));
+    assert!(
+        !on_disk.contains("host.nope.x"),
+        "the dropped entry must not survive a re-save, got:\n{on_disk}"
+    );
+}
+
+#[test]
+fn whole_file_garbage_still_single_unreadable_warning() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let _ = fs::write(store.path(), "not valid toml at all {{{");
+
+    let outcome = store.load();
+
+    assert_eq!(
+        outcome.warnings,
+        vec![SettingsWarning::Unreadable],
+        "an unreadable file must never also raise an InvalidKeybindings warning"
+    );
+}
+
+#[test]
+fn crash_mid_write_keeps_previous_keybindings() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let mut original = AudioSettings::default();
+    original
+        .keybinding_overrides
+        .set(HostAction::ToggleLoop, vec![chord("K")]);
+    assert!(store.save(&original).is_ok());
+
+    let tmp_path = store.path().with_file_name("settings.toml.tmp");
+    let _ = fs::write(&tmp_path, "garbage that must never become the real file");
+
+    let outcome = store.load();
+
+    assert_eq!(outcome.settings, original);
+    assert!(outcome.warnings.is_empty());
+}
+
+// ---------------------------------------------------------------------
+// T077 (US4): the `[keybindings]` load path through the real
+// `PlaybackController`, not only `SettingsStore`/`KeymapOverrides` in
+// isolation (T024/T027 above and in `tests/actions.rs`).
+// ---------------------------------------------------------------------
+
+#[test]
+fn keybindings_invalid_entries_warning_reaches_controller_notifications() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let content = "schema_version = 1\n\n[keybindings]\n\"host.loop.toggle\" = [\"K\"]\n\"host.nope.x\" = [\"A\"]\n";
+    let _ = fs::write(store.path(), content);
+
+    let controller =
+        PlaybackController::new(FakeBackend::new(vec![]), SyntheticHost::new(44_100), store);
+
+    // The good entry reaches the running controller's registry, not just
+    // `LoadOutcome`.
+    assert_eq!(
+        controller.actions().bindings(HostAction::ToggleLoop),
+        &[chord("K")],
+        "the one good entry must still apply through the controller"
+    );
+
+    // The warning `PlaybackController::new` raises each `LoadOutcome`
+    // warning as (contracts/keymap-settings.md) actually reaches the
+    // controller's `NotificationCenter`, naming the dropped id.
+    let notification = controller
+        .notifications()
+        .all()
+        .find(|n| n.message_key == "keybindings-invalid-entries")
+        .unwrap_or_else(|| {
+            panic!("PlaybackController::new must raise keybindings-invalid-entries")
+        });
+    assert_eq!(notification.args, vec![("ids", "host.nope.x".to_string())]);
 }

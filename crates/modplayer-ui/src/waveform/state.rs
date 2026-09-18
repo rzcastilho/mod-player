@@ -281,10 +281,6 @@ pub struct WaveformState {
     /// "Clear N markers?" two-step confirmation state (contracts/
     /// ui-markers.md §4).
     pub clear_confirm: bool,
-    /// This view's own text-field widget ids, rebuilt every frame — the
-    /// view-level shortcut guard checks egui's focus against this list
-    /// rather than `wants_keyboard_input` (research R17).
-    pub text_field_ids: Vec<egui::Id>,
     /// The current inline refusal reason for a view-level marker/loop
     /// shortcut (contracts/ui-markers.md §2, §4: shown as `markers-status`
     /// under the panel header), a Fluent key or `None`. Cleared on the

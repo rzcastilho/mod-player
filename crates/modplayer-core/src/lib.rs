@@ -6,6 +6,7 @@
 //! for shadow state), settings store, notifications, i18n, device policy
 //! and the settings registry/search.
 
+pub mod actions;
 pub mod analysis;
 pub mod controller;
 pub mod device_policy;
@@ -20,6 +21,11 @@ pub mod settings;
 pub mod settings_registry;
 pub mod transport;
 
+pub use actions::{
+    ActionCategory, ActionDef, ActionKind, ActionOwner, ActionRegistry, ActionRow, BindingError,
+    CATALOG, Chord, ChordParseError, HostAction, KEY_NAMES, KeyName, KeymapOverrides, Mods,
+    Platform, Scope, ScopeState, def,
+};
 pub use analysis::{
     ANALYZER_VERSION, AnalysisPaths, AnalysisService, AnalysisSnapshot, AnalysisStatus, PeakLevel,
     WaveformPeaks,

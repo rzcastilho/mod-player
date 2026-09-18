@@ -11,6 +11,7 @@ pub mod about;
 pub mod account;
 pub mod appearance;
 pub mod audio;
+pub mod controls;
 pub mod developer;
 pub mod language;
 
@@ -23,8 +24,10 @@ use modplayer_audio_source::SourceHost;
 use modplayer_core::settings_registry::{self, SettingsCategory};
 use modplayer_core::{AudioSettings, PlaybackController, tr};
 
+use crate::actions::{self, Claim};
 use crate::device_check::DeviceCheckScreen;
 use crate::settings::about::AboutScreen;
+use crate::settings::controls::ControlsScreen;
 
 const SEARCH_BOX_ID: &str = "settings-search-box";
 
@@ -42,6 +45,7 @@ pub struct SettingsScreen {
     cached_settings: AudioSettings,
     about: AboutScreen,
     playback: playback::PlaybackScreen,
+    controls: ControlsScreen,
 }
 
 impl SettingsScreen {
@@ -56,6 +60,7 @@ impl SettingsScreen {
             cached_settings: controller.settings_store().load().settings,
             about: AboutScreen::default(),
             playback: playback::PlaybackScreen::new(controller),
+            controls: ControlsScreen::default(),
         }
     }
 }
@@ -74,14 +79,16 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     screen: &mut SettingsScreen,
 ) -> (Option<DeviceCheckScreen>, Vec<AccountEvent>) {
     let search_id = Id::new(SEARCH_BOX_ID);
-    let focus_search_box = ui.input(|input| input.modifiers.command && input.key_pressed(Key::F));
-    if focus_search_box {
-        ui.memory_mut(|memory| memory.request_focus(search_id));
-    }
 
     ui.horizontal(|ui| {
         ui.label(tr("settings-search"));
-        ui.add(TextEdit::singleline(&mut screen.search_query).id(search_id));
+        let response = ui.add(TextEdit::singleline(&mut screen.search_query).id(search_id));
+        // 007, contracts/ui-actions.md §2. This screen's own `Ctrl/Cmd+F`
+        // focus-request handler is removed (research R10): it has been
+        // unreachable since 004 made `Ctrl/Cmd+F` an app-wide jump to
+        // Search (the shell switched sections before Settings could see
+        // the key), so nothing observable changes.
+        actions::register_claim(ui.ctx(), response.id, Claim::TextLike);
     });
 
     if !screen.search_query.is_empty() {
@@ -141,8 +148,11 @@ pub fn show<B: OutputBackend, H: SourceHost>(
             playback::show(ui, controller, &mut screen.playback, focus);
             (None, Vec::new())
         }
-        SettingsCategory::Controls
-        | SettingsCategory::Plugins
+        SettingsCategory::Controls => {
+            controls::show(ui, controller, &mut screen.controls, focus);
+            (None, Vec::new())
+        }
+        SettingsCategory::Plugins
         | SettingsCategory::Offline
         | SettingsCategory::PrivacyDiagnostics => {
             ui.label(tr("placeholder-settings-category"));

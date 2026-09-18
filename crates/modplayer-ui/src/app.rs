@@ -23,11 +23,13 @@ use modplayer_account::{
 };
 use modplayer_audio_io::OutputBackend;
 use modplayer_audio_source::SourceHost;
+use modplayer_core::actions::ScopeState;
 use modplayer_core::{
     ActiveState, Intent, NotRegisteredReason, NotificationAction, PlaybackController,
     STATUS_PAGE_URL, Severity, tr,
 };
 
+use crate::actions;
 use crate::artwork::ArtworkCache;
 use crate::detail_view::{self, DetailOutcome, DetailTarget};
 use crate::device_check::DeviceCheckScreen;
@@ -176,6 +178,20 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
             self.controller.should_show_device_check(),
         )
     }
+
+    /// This frame's `ScopeState` (research R5, contracts/ui-actions.md
+    /// §1): `now_playing_shown` follows the shell's own selected section
+    /// (dispatch already only ever runs while `launch_step() == Main`
+    /// with no Device Check overlay open, so no need to repeat that gate
+    /// here); `marker_focused` narrows it further to a focused marker
+    /// glyph/row.
+    fn scope_state(&self) -> ScopeState {
+        let now_playing_shown = self.shell.section == Section::NowPlaying;
+        ScopeState {
+            now_playing_shown,
+            marker_focused: now_playing_shown && self.waveform.focused_marker.is_some(),
+        }
+    }
 }
 
 impl<B: OutputBackend, H: SourceHost> eframe::App for App<B, H> {
@@ -192,7 +208,27 @@ impl<B: OutputBackend, H: SourceHost> eframe::App for App<B, H> {
         // meter, device events and Info-notification expiry are all polled
         // from this method, so the UI must keep ticking without input.
         ctx.request_repaint_after(REPAINT_INTERVAL);
-        self.shell.handle_shortcuts(&ctx);
+
+        // The Action & Binding dispatcher (007, contracts/ui-actions.md
+        // §1): runs before any widget draws, consuming every key event it
+        // resolves so no later widget can also act on it (SC-010). Reads
+        // *last* frame's focus claims, then clears the accumulator for
+        // this frame's fresh registrations (design note 2).
+        let claims = actions::claims_snapshot(&ctx);
+        actions::clear_claims(&ctx);
+        if self.launch_step() == LaunchStep::Main && self.device_check.is_none() {
+            let scope = self.scope_state();
+            let invocations = actions::dispatch(&ctx, &claims, self.controller.actions(), &scope);
+            for inv in invocations {
+                actions::invoke(
+                    inv,
+                    &mut self.controller,
+                    &mut self.shell,
+                    &mut self.waveform,
+                    &ctx,
+                );
+            }
+        }
 
         // Drain account worker events and map them to notifications/
         // screens (US2 T071, design note 4: "notifications are the UI's

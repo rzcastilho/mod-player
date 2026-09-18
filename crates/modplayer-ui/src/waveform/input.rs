@@ -17,6 +17,7 @@
 use egui::{Key, Modifiers, Response, Ui};
 
 use super::coords::TimeSpace;
+use crate::actions::{self, Claim};
 
 /// `Left`/`Right` seek step without a modifier (contracts/ui-waveform.md
 /// §3).
@@ -83,6 +84,16 @@ pub fn handle(
     previewing: bool,
     is_detail: bool,
 ) -> Option<WaveformEvent> {
+    // Register this frame's claim (007, contracts/ui-actions.md §2) so
+    // next frame's dispatcher leaves this widget's own rows alone while
+    // it has focus — `Space` deliberately absent, so a focused waveform
+    // still lets it toggle play/pause (US1 AS9).
+    actions::register_claim(
+        ui.ctx(),
+        response.id,
+        Claim::Keys(actions::waveform_claims()),
+    );
+
     if previewing && ui.input(|input| input.key_pressed(Key::Escape)) {
         return Some(WaveformEvent::CancelDrag);
     }
@@ -237,9 +248,6 @@ fn keyboard_seek_zoom_pan(ui: &Ui, space: &TimeSpace, playhead: u64) -> Option<W
 /// both types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarkerKeyAction {
-    /// `←`/`→` (`multiplier = 1`) or `Shift+←`/`Shift+→` (`multiplier =
-    /// 10`): `nudge_marker(id, direction, multiplier)`.
-    Nudge { direction: i8, multiplier: u8 },
     /// `Delete`/`Backspace`: `delete_marker(id)`.
     Delete,
     /// `F2`/`Enter`: open the row's inline rename.
@@ -252,33 +260,14 @@ pub enum MarkerKeyAction {
 }
 
 /// Resolve this frame's focused-marker keyboard table (contracts/
-/// ui-markers.md §3), consuming whichever key matched so a plain `←`/`→`
-/// doesn't also fall through to the waveform's own seek row. The caller is
-/// responsible for only calling this while a glyph/row actually has focus
-/// and no text field of the view does (research R17).
+/// ui-markers.md §3, minus the four nudge arrows — those are now
+/// `HostAction::NudgeEarlier`/`NudgeLater`/`…X10`, owned by the 007
+/// dispatcher under `Scope::MarkerFocused`, contracts/ui-actions.md §3).
+/// The caller is responsible for only calling this while a glyph/row
+/// actually has focus and no text field of the view does.
 pub fn focused_marker_key(ui: &Ui) -> Option<MarkerKeyAction> {
     ui.input_mut(|input| {
-        if input.consume_key(Modifiers::SHIFT, Key::ArrowLeft) {
-            Some(MarkerKeyAction::Nudge {
-                direction: -1,
-                multiplier: 10,
-            })
-        } else if input.consume_key(Modifiers::SHIFT, Key::ArrowRight) {
-            Some(MarkerKeyAction::Nudge {
-                direction: 1,
-                multiplier: 10,
-            })
-        } else if input.consume_key(Modifiers::NONE, Key::ArrowLeft) {
-            Some(MarkerKeyAction::Nudge {
-                direction: -1,
-                multiplier: 1,
-            })
-        } else if input.consume_key(Modifiers::NONE, Key::ArrowRight) {
-            Some(MarkerKeyAction::Nudge {
-                direction: 1,
-                multiplier: 1,
-            })
-        } else if input.consume_key(Modifiers::NONE, Key::Delete)
+        if input.consume_key(Modifiers::NONE, Key::Delete)
             || input.consume_key(Modifiers::NONE, Key::Backspace)
         {
             Some(MarkerKeyAction::Delete)

@@ -14,6 +14,8 @@ use egui::{Key, Slider, Ui};
 use modplayer_core::tr;
 use modplayer_engine::VolumePercent;
 
+use crate::actions::{self, Claim};
+
 /// `PgUp`/`PgDn` step size (contracts/ui-surface.md).
 const PAGE_STEP: u8 = 10;
 
@@ -36,6 +38,16 @@ pub fn master_volume(ui: &mut Ui, current: VolumePercent) -> Option<VolumePercen
         new_value = response
             .changed()
             .then(|| VolumePercent::new(pct.round().clamp(0.0, 100.0) as u8));
+
+        // 007, contracts/ui-actions.md §2: claim the slider's own arrow/
+        // page-step keys so the dispatcher's `VolumeUp`/`VolumeDown`
+        // (`Primary+↑/↓`) don't collide with this widget's plain `←→`/
+        // `PgUp`/`PgDn` handling below.
+        actions::register_claim(
+            ui.ctx(),
+            response.id,
+            Claim::Keys(actions::volume_slider_claims()),
+        );
 
         if response.has_focus() {
             let (page_up, page_down) =
