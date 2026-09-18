@@ -18,7 +18,7 @@
 //! it and asks the search box (`search_view.rs`, US1, T038/T039) to take
 //! focus, via `focus_search_requested`.
 
-use egui::{Key, Ui};
+use egui::Ui;
 use modplayer_core::tr;
 
 /// The five navigable sections (contracts/ui-surface.md §1), in the fixed
@@ -49,10 +49,11 @@ const SECTIONS: [(Section, &str); 5] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Shell {
     pub section: Section,
-    /// Set by `handle_shortcuts` on `Ctrl/Cmd+F` or `/`
-    /// (contracts/ui-surface.md §1); `search_view::show` (US1) consumes
-    /// and clears it to request keyboard focus on the search box the same
-    /// frame. Until that view exists, it is only ever set, never read.
+    /// Set by `actions::invoke`'s `FocusSearch` arm (007, contracts/
+    /// ui-actions.md §3; formerly `Shell::handle_shortcuts`'s own
+    /// `Ctrl/Cmd+F`/`/` handling) — `search_view::show` consumes and
+    /// clears it to request keyboard focus on the search box the same
+    /// frame.
     pub focus_search_requested: bool,
 }
 
@@ -66,33 +67,6 @@ impl Default for Shell {
 }
 
 impl Shell {
-    /// `Ctrl/Cmd+1..5` jump directly to a section regardless of focus;
-    /// `Ctrl/Cmd+F`/`/` jump to Search and request search-box focus
-    /// (contracts/ui-surface.md §1). Call once per frame before drawing.
-    pub fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        ctx.input(|input| {
-            if input.modifiers.command {
-                if input.key_pressed(Key::Num1) {
-                    self.section = Section::Library;
-                } else if input.key_pressed(Key::Num2) {
-                    self.section = Section::Search;
-                } else if input.key_pressed(Key::Num3) {
-                    self.section = Section::NowPlaying;
-                } else if input.key_pressed(Key::Num4) {
-                    self.section = Section::Plugins;
-                } else if input.key_pressed(Key::Num5) {
-                    self.section = Section::Settings;
-                } else if input.key_pressed(Key::F) {
-                    self.section = Section::Search;
-                    self.focus_search_requested = true;
-                }
-            } else if input.key_pressed(Key::Slash) {
-                self.section = Section::Search;
-                self.focus_search_requested = true;
-            }
-        });
-    }
-
     /// Draw the left-rail nav buttons in fixed order, updating `section` on
     /// click. Each button's visible text is also its accessible name
     /// (egui sets both from the same string automatically).

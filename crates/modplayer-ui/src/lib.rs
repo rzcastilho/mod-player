@@ -10,6 +10,7 @@
 //! remaining category screens land in US5 (see
 //! `specs/001-walking-skeleton/tasks.md`, T087-T095).
 
+pub mod actions;
 pub mod app;
 pub mod artwork;
 pub mod detail_view;

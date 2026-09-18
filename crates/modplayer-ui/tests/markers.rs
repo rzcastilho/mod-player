@@ -12,12 +12,14 @@ use egui::{Context, Event, Key, Modifiers, PointerButton, Pos2, RawInput, Rect, 
 use modplayer_audio_io::{FakeBackend, FakeDevice};
 use modplayer_audio_source::{Availability, TrackId, TrackRef};
 use modplayer_audio_source_synthetic::{ScriptedHost, ScriptedHostHandle};
+use modplayer_core::actions::ScopeState;
 use modplayer_core::markers::{CueSlot, RepeatCount, TrackMarkers};
 use modplayer_core::settings::SettingsStore;
 use modplayer_core::{Intent, LoopState, PlaybackController, tr_args};
 use modplayer_engine::{BufferPreset, DeviceId, FrameCount, SampleRate};
 use modplayer_ui::artwork::ArtworkCache;
 use modplayer_ui::waveform::{TimeSpace, WaveformState};
+use modplayer_ui::{Shell, actions};
 
 /// How many frames a jump's landing position may sit past the cue it
 /// targeted (006 US4): landing a seek requires one render call (the
@@ -149,9 +151,64 @@ fn key_event(key: Key) -> Event {
     }
 }
 
+/// A key-up event for `key` — egui's own `InputState::begin_pass` derives
+/// `repeat` from whether the key is still in its `keys_down` set (it
+/// ignores the `repeat` field an integration sends), so every test press
+/// must be paired with a release or the *next* press of the same key
+/// arrives auto-marked `repeat: true` and FR-019 correctly drops it for a
+/// non-`repeats_while_held` action.
+fn key_release(key: Key) -> Event {
+    Event::Key {
+        key,
+        physical_key: None,
+        pressed: false,
+        repeat: false,
+        modifiers: Modifiers::NONE,
+    }
+}
+
+/// Run the 007 dispatcher/invoker (contracts/ui-actions.md §1) exactly as
+/// `App::ui` does, scoped as if the Now Playing view were showing (every
+/// test in this file draws only `now_playing::show`) — `Shell` is a
+/// throwaway since nothing here exercises navigation.
+fn dispatch_for_test(
+    ctx: &Context,
+    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+    waveform: &mut WaveformState,
+) {
+    let claims = actions::claims_snapshot(ctx);
+    actions::clear_claims(ctx);
+    let scope = ScopeState {
+        now_playing_shown: true,
+        marker_focused: waveform.focused_marker.is_some(),
+    };
+    let mut shell = Shell::default();
+    actions::dispatch_and_invoke(ctx, &claims, &scope, controller, &mut shell, waveform);
+}
+
+/// Run one Now Playing frame with no key event — just dispatch (a no-op
+/// with nothing pressed) then the screen's own draw pass. Used to let a
+/// widget that just opened (e.g. a rename `TextEdit`) actually draw and
+/// claim focus before the *next* frame's dispatch can see it as focused
+/// (design note 2: claims, and now `ctx.text_edit_focused()`, are always
+/// "last frame's").
+fn settle_frame(
+    ctx: &Context,
+    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+    artwork: &mut ArtworkCache,
+    waveform: &mut WaveformState,
+) {
+    let output = ctx.run_ui(default_input(), |ui| {
+        dispatch_for_test(&ui.ctx().clone(), controller, waveform);
+        modplayer_ui::now_playing::show(ui, controller, artwork, waveform)
+    });
+    output.drop_without_applying_deltas();
+}
+
 /// Run one Now Playing frame with `key` pressed (contracts/ui-markers.md
-/// §2), on the same `ctx` across calls so egui's own focus bookkeeping
-/// persists between them, as `now_playing.rs`'s own tests do.
+/// §2; re-pointed at the 007 dispatcher, contracts/ui-actions.md §7), on
+/// the same `ctx` across calls so egui's own focus bookkeeping persists
+/// between them, as `now_playing.rs`'s own tests do.
 fn press_key(
     ctx: &Context,
     controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
@@ -161,7 +218,9 @@ fn press_key(
 ) {
     let mut input = default_input();
     input.events.push(key_event(key));
+    input.events.push(key_release(key));
     let output = ctx.run_ui(input, |ui| {
+        dispatch_for_test(&ui.ctx().clone(), controller, waveform);
         modplayer_ui::now_playing::show(ui, controller, artwork, waveform)
     });
     output.drop_without_applying_deltas();
@@ -185,7 +244,9 @@ fn press_key_with(
         repeat: false,
         modifiers,
     });
+    input.events.push(key_release(key));
     let output = ctx.run_ui(input, |ui| {
+        dispatch_for_test(&ui.ctx().clone(), controller, waveform);
         modplayer_ui::now_playing::show(ui, controller, artwork, waveform)
     });
     output.drop_without_applying_deltas();
@@ -790,6 +851,13 @@ fn shortcuts_inactive_while_rename_open() {
     };
     let ctx = Context::default();
     ctx.enable_accesskit();
+
+    // The rename `TextEdit` (`markers::panel`'s `show_marker_row`) must
+    // actually draw and claim focus once before the dispatcher — which
+    // runs *before* any widget this frame — can see it as focused
+    // (design note 2). A real F2 press has exactly this same one-frame
+    // lag between opening the rename and the guard taking effect.
+    settle_frame(&ctx, &mut controller, &mut artwork, &mut waveform);
 
     let count_before = controller.markers().map(TrackMarkers::count).unwrap_or(0);
     press_key(&ctx, &mut controller, &mut artwork, &mut waveform, Key::M);

@@ -68,6 +68,12 @@ pub const KEY_TRACK_STATE_NEWER_VERSION: &str = "track-state-newer-version";
 /// there is no automatic retry.
 pub const KEY_TRACK_STATE_SAVE_FAILED: &str = "track-state-save-failed";
 
+/// FR-013/FR-015: one or more `[keybindings]` entries were dropped in
+/// isolation at load (007, contracts/keymap-settings.md): an unknown
+/// action id, a value that isn't an array of strings, or an unparseable
+/// chord string. `{ $ids }`.
+pub const KEY_KEYBINDINGS_INVALID_ENTRIES: &str = "keybindings-invalid-entries";
+
 /// Notification severity (data-model.md §6.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {

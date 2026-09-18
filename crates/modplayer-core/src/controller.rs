@@ -33,6 +33,7 @@ use modplayer_engine::{
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 
+use crate::actions::{ActionRegistry, BindingError, Chord, HostAction};
 use crate::analysis::{AnalysisPaths, AnalysisService, AnalysisSnapshot};
 use crate::device_policy::{self, DeviceLostOutcome, DeviceResolution, DeviceWarning};
 use crate::library::index::SyncOutcome;
@@ -371,7 +372,22 @@ pub struct PlaybackController<B: OutputBackend, H: SourceHost> {
     /// Last time the debounced marker-state flush actually wrote
     /// (research R11, `TRACK_STATE_DEBOUNCE`); `None` until the first one.
     last_marker_flush_at: Option<Instant>,
+
+    /// The Action & Binding registry (007, data-model.md §3.1): shadow
+    /// state seeded from `settings.keybinding_overrides` at construction
+    /// and persisted, through this controller's existing
+    /// `persist_settings`, on every binding mutation.
+    actions: ActionRegistry,
 }
+
+/// `transport.seek_forward_step`/`seek_backward_step`'s step size
+/// (FR-004a; research R9) — the same 5 s 003's seek slider and 005's
+/// waveform keys already use.
+pub const SEEK_STEP: Duration = Duration::from_secs(5);
+
+/// `transport.volume_up`/`volume_down`'s step size (FR-004a; research
+/// R9) — 5 % of the 0-100 % scale.
+pub const VOLUME_STEP: u8 = 5;
 
 /// [`PlaybackController::library_track_list`]'s reply state (contracts/
 /// library-and-search-core.md §1).
@@ -391,8 +407,8 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
     pub fn new(backend: B, source_host: H, settings_store: SettingsStore) -> Self {
         let mut notifications = NotificationCenter::new();
         let outcome = settings_store.load();
-        if let Some(warning) = outcome.warning {
-            notifications.raise(severity_for(&warning), warning.message_key());
+        for warning in &outcome.warnings {
+            raise_settings_warning(&mut notifications, warning);
         }
         let needs_device_id_persisted = outcome.settings.connect_device_id.is_none();
         let mut controller = Self::from_settings(
@@ -492,6 +508,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
             marker_state_track: None,
             marker_state_awaiting_start: false,
             last_marker_flush_at: None,
+            actions: ActionRegistry::new(settings.keybinding_overrides.clone()),
         };
         // 006, contracts/marker-service.md §4: resolved unconditionally at
         // construction, like `AnalysisPaths::resolve()` just above —
@@ -782,6 +799,102 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         let ms = ms.clamp(1, 1_000);
         self.nudge_step_ms = ms;
         self.persist_settings(|settings| settings.nudge_step_ms = ms);
+    }
+
+    /// The Action & Binding registry (007, contracts/action-registry.md
+    /// §5): which chord fires which action right now.
+    pub fn actions(&self) -> &ActionRegistry {
+        &self.actions
+    }
+
+    /// Add `chord` to `action`'s bindings and persist the result
+    /// (contracts/action-registry.md §5). A failed write raises
+    /// `settings-save-failed` and leaves the in-memory registry changed
+    /// (same semantics as `set_nudge_step_ms`).
+    pub fn add_binding(&mut self, action: HostAction, chord: Chord) -> Result<(), BindingError> {
+        self.actions.add_binding(action, chord)?;
+        self.persist_actions();
+        Ok(())
+    }
+
+    /// Remove `chord` from `action`'s bindings (a no-op if it wasn't
+    /// held) and persist the result.
+    pub fn remove_binding(&mut self, action: HostAction, chord: Chord) {
+        self.actions.remove_binding(action, chord);
+        self.persist_actions();
+    }
+
+    /// Restore `action`'s catalog default bindings and persist the
+    /// result (FR-011).
+    pub fn reset_binding(&mut self, action: HostAction) {
+        self.actions.reset(action);
+        self.persist_actions();
+    }
+
+    /// Restore every action's catalog default bindings and persist the
+    /// result (FR-011).
+    pub fn reset_all_bindings(&mut self) {
+        self.actions.reset_all();
+        self.persist_actions();
+    }
+
+    /// Enable/disable `action` (FR-012). Never persisted: `enabled`
+    /// reflects host-component support, not a user preference.
+    pub fn set_action_enabled(&mut self, action: HostAction, enabled: bool) {
+        self.actions.set_enabled(action, enabled);
+    }
+
+    /// Persist the registry's current overrides through the existing
+    /// settings gateway (contracts/action-registry.md §5).
+    fn persist_actions(&mut self) {
+        let overrides = self.actions.overrides().clone();
+        self.persist_settings(|settings| settings.keybinding_overrides = overrides.clone());
+    }
+
+    /// `transport.seek_forward_step`/`seek_backward_step` (FR-004a,
+    /// research R9): move the playhead by [`SEEK_STEP`] (`direction > 0`
+    /// forward, else backward), clamped to `[0, track end]` via the
+    /// existing `seek` (so 003's seek semantics — including "seeking
+    /// past the end advances", FR-014 — apply unchanged). A no-op while
+    /// transport is disabled or no track is current, mirroring the
+    /// disabled buttons.
+    pub fn seek_step(&mut self, direction: i8) {
+        if !self.transport_enabled() {
+            return;
+        }
+        let Some(track_len_ms) = self.current_track().map(|item| item.track.duration_ms) else {
+            return;
+        };
+        let track_len = Duration::from_millis(u64::from(track_len_ms));
+        let current = self.position();
+        let target = if direction >= 0 {
+            current.saturating_add(SEEK_STEP).min(track_len)
+        } else {
+            current.saturating_sub(SEEK_STEP)
+        };
+        self.seek(target);
+    }
+
+    /// `transport.volume_up`/`volume_down` (FR-004a, research R9):
+    /// change master volume by [`VOLUME_STEP`] (`direction > 0` up, else
+    /// down), saturating into `0..=100`, through the existing
+    /// `set_master_volume` (so the engine's smooth gain ramp, the
+    /// persisted value and the Connect volume mirror are all reused). A
+    /// no-op while transport is disabled, mirroring the disabled slider.
+    pub fn step_master_volume(&mut self, direction: i8) {
+        if !self.transport_enabled() {
+            return;
+        }
+        let current = i16::from(self.master_volume().value());
+        let step = i16::from(VOLUME_STEP);
+        let target = if direction >= 0 {
+            current + step
+        } else {
+            current - step
+        };
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let target = target.clamp(0, 100) as u8;
+        self.set_master_volume(VolumePercent::new(target));
     }
 
     /// Called by `App` from 002's session state (contracts/transport-and-
@@ -2864,7 +2977,27 @@ fn severity_for(warning: &SettingsWarning) -> Severity {
     match warning {
         SettingsWarning::Unreadable
         | SettingsWarning::NewerVersion
-        | SettingsWarning::InvalidValue(_) => Severity::Warning,
+        | SettingsWarning::InvalidValue(_)
+        | SettingsWarning::InvalidKeybindings(_) => Severity::Warning,
+    }
+}
+
+/// Raise one `LoadOutcome.warnings` entry as a notification (007,
+/// contracts/keymap-settings.md: `PlaybackController::new` "raises each").
+/// `InvalidKeybindings` carries the dropped action ids as its Fluent
+/// argument; every other variant raises with no arguments as before.
+fn raise_settings_warning(notifications: &mut NotificationCenter, warning: &SettingsWarning) {
+    match warning {
+        SettingsWarning::InvalidKeybindings(ids) => {
+            notifications.raise_with_args(
+                Severity::Warning,
+                warning.message_key(),
+                vec![("ids", ids.join(", "))],
+            );
+        }
+        _ => {
+            notifications.raise(severity_for(warning), warning.message_key());
+        }
     }
 }
 

@@ -76,8 +76,11 @@ pub struct SettingDescriptor {
 
 /// The working settings' descriptors (contracts/ui-surface.md "Working
 /// settings"), in the order they appear on their category screen. Every
-/// other category (Controls, Plugins, Offline, Privacy & diagnostics)
-/// renders placeholder content only and so has no entries here; About is
+/// other category (Plugins, Offline, Privacy & diagnostics) renders
+/// placeholder content only and so has no entries here — Controls gained
+/// its one descriptor in 007-keyboard-actions-and-shortcuts
+/// (contracts/ui-actions.md §4: the shortcut map itself is one
+/// `SettingDescriptor`, not one per action). About is
 /// descriptor-free by design even though it has real content
 /// (`about-product`/`about-version`/… are read-only, not searchable
 /// settings, plan.md "Project Structure"). Playback's screen itself lands
@@ -144,6 +147,12 @@ pub const DESCRIPTORS: &[SettingDescriptor] = &[
         id: "markers.nudge_step_ms",
         title_key: "setting-nudge-step",
         description_key: "setting-nudge-step-desc",
+    },
+    SettingDescriptor {
+        category: SettingsCategory::Controls,
+        id: "controls.keybindings",
+        title_key: "setting-keybindings",
+        description_key: "setting-keybindings-desc",
     },
     SettingDescriptor {
         category: SettingsCategory::Appearance,
@@ -226,8 +235,10 @@ mod tests {
 
     #[test]
     fn placeholder_only_categories_contribute_no_descriptors() {
+        // 007-keyboard-actions-and-shortcuts, T069: Controls dropped from
+        // this list — it gained the `controls.keybindings` descriptor
+        // above once Settings › Controls became a real screen.
         for category in [
-            SettingsCategory::Controls,
             SettingsCategory::Plugins,
             SettingsCategory::Offline,
             SettingsCategory::PrivacyDiagnostics,

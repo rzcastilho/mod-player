@@ -15,7 +15,10 @@
 use std::ops::Range;
 
 use egui::accesskit::Role;
-use egui::{Color32, Id, Key, Modifiers, Painter, Rect, RichText, Sense, Stroke, Ui, pos2, vec2};
+use egui::{
+    Color32, EventFilter, Id, Key, Modifiers, Painter, Rect, RichText, Sense, Stroke, Ui, pos2,
+    vec2,
+};
 use modplayer_audio_io::OutputBackend;
 use modplayer_audio_source::SourceHost;
 use modplayer_core::markers::{
@@ -23,6 +26,7 @@ use modplayer_core::markers::{
 };
 use modplayer_core::{LoopState, PlaybackController, tr, tr_args};
 
+use crate::actions::{self, Claim};
 use crate::theme;
 use crate::waveform::state::DETAIL_MIN_WINDOW_MS;
 use crate::waveform::{self, DetailWindow, MarkerDrag, TimeSpace, WaveformState};
@@ -86,6 +90,22 @@ pub fn lane<B: OutputBackend, H: SourceHost>(
         let glyph_name = glyph_accessible_name(marker, sample_rate);
         response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Button, true, glyph_name.clone())
+        });
+        // 007, contracts/ui-actions.md §2: claim the widget-local keys
+        // (Delete/Backspace/F2/Enter/C/Escape) — not arrows, so a focused
+        // glyph's nudge keeps reaching `HostAction::NudgeEarlier`/`Later`
+        // via `Scope::MarkerFocused`. The horizontal-arrow event filter
+        // (design note 12) stops egui's own focus traversal from also
+        // moving focus off the glyph on a nudge arrow.
+        actions::register_claim(ui.ctx(), glyph_id, Claim::Keys(actions::marker_claims()));
+        ui.memory_mut(|memory| {
+            memory.set_focus_lock_filter(
+                glyph_id,
+                EventFilter {
+                    horizontal_arrows: true,
+                    ..EventFilter::default()
+                },
+            );
         });
 
         if response.clicked() {
@@ -263,14 +283,15 @@ fn paint_cue_glyph(painter: &Painter, x: f32, rect: Rect, color: Color32, slot: 
     );
 }
 
-/// The focused-marker keyboard table (006, contracts/ui-markers.md §3):
-/// active only while a glyph/row has focus (`waveform.focused_marker`), no
-/// text field of this view has focus (research R17), and no rename is
-/// already open (the row's own inline `TextEdit` handles its own Enter/
-/// Esc — `show_marker_row`, below). Call once per frame, after the panel
-/// (so a fresh `F2`/`Enter` this same frame opens the rename that panel
-/// draws on the *next* frame, matching `handle_marker_shortcuts`'s own
-/// placement).
+/// The focused-marker keyboard table (006, contracts/ui-markers.md §3,
+/// minus the four nudge arrows — now `HostAction::NudgeEarlier`/`Later`/
+/// `…X10` via the 007 dispatcher, `Scope::MarkerFocused`): active only
+/// while a glyph/row has focus (`waveform.focused_marker`), no text field
+/// of this view has focus, and no rename is already open (the row's own
+/// inline `TextEdit` handles its own Enter/Esc — `show_marker_row`,
+/// below). Call once per frame, after the panel (so a fresh `F2`/`Enter`
+/// this same frame opens the rename that panel draws on the *next*
+/// frame).
 pub fn handle_focused_marker_keys<B: OutputBackend, H: SourceHost>(
     ui: &mut Ui,
     controller: &mut PlaybackController<B, H>,
@@ -282,8 +303,7 @@ pub fn handle_focused_marker_keys<B: OutputBackend, H: SourceHost>(
     if waveform.rename.is_some() {
         return;
     }
-    let focused_widget = ui.memory(|memory| memory.focused());
-    if focused_widget.is_some_and(|widget_id| waveform.text_field_ids.contains(&widget_id)) {
+    if ui.ctx().text_edit_focused() {
         return;
     }
 
@@ -291,12 +311,6 @@ pub fn handle_focused_marker_keys<B: OutputBackend, H: SourceHost>(
         return;
     };
     match action {
-        waveform::MarkerKeyAction::Nudge {
-            direction,
-            multiplier,
-        } => {
-            let _ = controller.nudge_marker(id, direction, multiplier);
-        }
         waveform::MarkerKeyAction::Delete => {
             let _ = controller.delete_marker(id);
             waveform.focused_marker = None;
@@ -469,9 +483,9 @@ struct RegionRow {
 /// role/kind label, inline-editable name, `m:ss.mmm` position, a clamped
 /// warning — with a `RegionStart` row additionally showing its region's
 /// loop cells (arm toggle, repeat, crossfade, wraps-remaining/infinite,
-/// armed-inactive badge). Every `DragValue`/`TextEdit`'s widget id is
-/// recorded into `waveform.text_field_ids` so the view-level shortcut
-/// guard (research R17) can tell it has focus.
+/// armed-inactive badge). Every `DragValue`/`TextEdit` registers a
+/// `Claim::TextLike` (007, contracts/ui-actions.md §2) so the dispatcher
+/// leaves it alone while it has focus.
 pub fn panel<B: OutputBackend, H: SourceHost>(
     ui: &mut Ui,
     controller: &mut PlaybackController<B, H>,
@@ -508,7 +522,7 @@ pub fn panel<B: OutputBackend, H: SourceHost>(
     for row in rows {
         show_marker_row(ui, controller, waveform, &row);
         if let Some(region) = row.region {
-            show_region_cells(ui, controller, waveform, region);
+            show_region_cells(ui, controller, region);
         }
     }
 }
@@ -560,7 +574,7 @@ fn show_marker_row<B: OutputBackend, H: SourceHost>(
                 builder.set_label(tr("markers-rename"));
             });
             response.request_focus();
-            waveform.text_field_ids.push(response.id);
+            actions::register_claim(ui.ctx(), response.id, Claim::TextLike);
             if let Some((_, name)) = waveform.rename.as_mut() {
                 *name = draft.clone();
             }
@@ -655,7 +669,6 @@ fn format_mmss_millis_frames(frame: u64, sample_rate: u32) -> String {
 fn show_region_cells<B: OutputBackend, H: SourceHost>(
     ui: &mut Ui,
     controller: &mut PlaybackController<B, H>,
-    waveform: &mut WaveformState,
     region: RegionId,
 ) {
     let rate = controller.source_sample_rate().max(1);
@@ -721,7 +734,7 @@ fn show_region_cells<B: OutputBackend, H: SourceHost>(
         let response = ui
             .add(egui::DragValue::new(&mut repeat_value).range(0..=1_000))
             .labelled_by(repeat_label.id);
-        waveform.text_field_ids.push(response.id);
+        actions::register_claim(ui.ctx(), response.id, Claim::TextLike);
         if response.changed() {
             let repeat = if repeat_value <= 0 {
                 RepeatCount::Infinite
@@ -741,7 +754,7 @@ fn show_region_cells<B: OutputBackend, H: SourceHost>(
                     .suffix(" ms"),
             )
             .labelled_by(crossfade_label.id);
-        waveform.text_field_ids.push(response.id);
+        actions::register_claim(ui.ctx(), response.id, Claim::TextLike);
         if response.changed() {
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let ms = crossfade_value.clamp(0, 50) as u8;

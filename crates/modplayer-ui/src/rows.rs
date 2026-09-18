@@ -30,6 +30,7 @@ use modplayer_audio_source::{
 };
 use modplayer_core::{tr, tr_args};
 
+use crate::actions::{self, Claim};
 use crate::artwork::{ArtworkCache, ArtworkState};
 use crate::widgets::initials::initials_placeholder;
 use crate::widgets::skeleton::{ROW_HEIGHT, WIDE_ROW_HEIGHT};
@@ -483,6 +484,14 @@ pub fn list_row(ui: &mut Ui, artwork: &mut ArtworkCache, entity: &RowEntity) -> 
 
     let (_auto_id, rect) = ui.allocate_space(Vec2::new(ui.available_width(), height));
     let row_response = ui.interact(rect, row_id, Sense::click());
+    // 007, contracts/ui-actions.md §2: claim this row's own keys
+    // (`Shift+F10` for the actions menu, plus the toolkit set it would
+    // get anyway) so the dispatcher never intercepts them.
+    actions::register_claim(
+        ui.ctx(),
+        row_response.id,
+        Claim::Keys(actions::row_claims()),
+    );
 
     ui.ctx().accesskit_node_builder(row_response.id, |b| {
         b.set_role(Role::ListItem);

@@ -18,6 +18,7 @@ use modplayer_audio_io::OutputBackend;
 use modplayer_audio_source::{SearchHit, SearchKind, SourceHost, TrackRef};
 use modplayer_core::{GroupState, PlaybackController, Severity, tr, tr_args};
 
+use crate::actions::{self, Claim};
 use crate::artwork::ArtworkCache;
 use crate::rows::{
     ActingListOutcome, RowAction, RowEntity, RowEvent, TrackListLookup, acting_list, list_row,
@@ -62,6 +63,12 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     let response = ui
         .add(TextEdit::singleline(&mut query).hint_text(tr("search-placeholder")))
         .labelled_by(search_label.id);
+    // 007, contracts/ui-actions.md §2: the dispatcher already skips a
+    // frame where `ctx.text_edit_focused()` is true, but registering the
+    // claim explicitly keeps this consistent with every other text field
+    // (settings search, Controls filter/capture) rather than relying
+    // solely on egui's own `TextEdit` detection.
+    actions::register_claim(ui.ctx(), response.id, Claim::TextLike);
     if *focus_requested {
         response.request_focus();
         *focus_requested = false;
