@@ -350,6 +350,13 @@ pub enum SourceCommand {
     CancelCatalog {
         request_id: u64,
     },
+    /// A loop region was armed: ask the current decode-ahead to prioritise
+    /// `frame` (006, contracts/engine-loop.md §1, FR-008) — forwarded to
+    /// `DecodeAhead::seek_hint(frame)`, never touching playback itself.
+    /// Hosts with no decode-ahead concept (synthetic/scripted) ignore it.
+    PrefetchHint {
+        frame: u64,
+    },
 }
 
 /// An event from a `SourceHost` implementor to the `PlaybackController`

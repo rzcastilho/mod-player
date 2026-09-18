@@ -6,8 +6,8 @@
 //! (005-now-playing-waveform, research R3/R9, contracts/
 //! connect-source-delta.md §1).
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use librespot_audio::{AudioDecrypt, AudioFetchParams, AudioFile};
@@ -94,6 +94,52 @@ impl DecodeAheadHandle {
 impl Drop for DecodeAheadHandle {
     fn drop(&mut self) {
         self.stop_and_join();
+    }
+}
+
+// Exercised only from `tests/worker.rs`, which `#[path]`-includes this
+// file as its own copy of the module (so it can drive `seek_hint`/
+// `forward_prefetch_hint` without a live `Spirc` session) — invisible to
+// dead-code analysis of *this* crate's own `#[cfg(test)]` unit tests, so
+// both methods are allowed dead here.
+#[cfg(test)]
+#[allow(dead_code)]
+impl DecodeAheadHandle {
+    /// A handle with no live thread behind it — 006's forwarding tests
+    /// exercise `seek_hint`/`forward_prefetch_hint` without spawning a
+    /// real decode (which needs a live `Session`/`AudioItem`).
+    pub(crate) fn for_test() -> Self {
+        Self {
+            stop: Arc::new(AtomicBool::new(false)),
+            seek_hint: Arc::new(AtomicU64::new(u64::MAX)),
+            thread: None,
+        }
+    }
+
+    /// The last frame stored by `seek_hint` (`u64::MAX` = none yet).
+    pub(crate) fn pending_seek_hint(&self) -> u64 {
+        self.seek_hint.load(Ordering::Acquire)
+    }
+}
+
+/// The worker's single-slot decode-ahead handle, shared with its command
+/// loop (006, contracts/engine-loop.md §1's `PrefetchHint` forwarding;
+/// mirrors `crates/modplayer-audio-source-connect/src/worker.rs`'s own
+/// alias of the same type).
+pub(crate) type SharedDecodeAhead = Arc<Mutex<Option<DecodeAheadHandle>>>;
+
+/// Forward `frame` to the current decode-ahead's `seek_hint`, if one is
+/// running — a no-op otherwise (006, contracts/engine-loop.md §1). Never
+/// touches `Spirc`/`Player`; a free function (rather than inline in
+/// `worker.rs`'s match arm) so it is testable without a live `Spirc`
+/// session (`tests/worker.rs`).
+pub(crate) fn forward_prefetch_hint(decode_ahead: &SharedDecodeAhead, frame: u64) {
+    if let Some(handle) = decode_ahead
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+    {
+        handle.seek_hint(frame);
     }
 }
 

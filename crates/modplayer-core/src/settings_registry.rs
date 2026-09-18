@@ -140,6 +140,12 @@ pub const DESCRIPTORS: &[SettingDescriptor] = &[
         description_key: "setting-device-name-desc",
     },
     SettingDescriptor {
+        category: SettingsCategory::Playback,
+        id: "markers.nudge_step_ms",
+        title_key: "setting-nudge-step",
+        description_key: "setting-nudge-step-desc",
+    },
+    SettingDescriptor {
         category: SettingsCategory::Appearance,
         id: "appearance.theme",
         title_key: "setting-theme",

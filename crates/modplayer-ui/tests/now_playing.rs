@@ -17,6 +17,7 @@ use egui::{Context, Event, Key, Modifiers, PointerButton, Pos2, RawInput, Rect};
 use modplayer_audio_io::{FakeBackend, FakeDevice};
 use modplayer_audio_source::{Availability, SourceCommand, SourceHealth, TrackId, TrackRef};
 use modplayer_audio_source_synthetic::{ScriptedHost, ScriptedHostHandle};
+use modplayer_core::markers::{CueSlot, TrackMarkers};
 use modplayer_core::settings::SettingsStore;
 use modplayer_core::transport::Intent;
 use modplayer_core::{NotRegisteredReason, PlaybackController, tr};
@@ -78,6 +79,20 @@ fn track(id: &str, duration_ms: u32) -> TrackRef {
     )
 }
 
+/// Serializes any test in this binary that briefly overrides the
+/// process-global `MODPLAYER_TRACK_STATE_DIR` for `PlaybackController::
+/// new`'s one synchronous read of it (Phase 7 polish, T091: 006 US2's
+/// `sync_marker_attachment` now runs on every `dispatch`, so any test here
+/// that queues a track — every test below does — would otherwise read/
+/// write the real per-user track-state directory; mirrors `markers.rs`'s
+/// own lock/pattern, which this file didn't need before 006).
+static TRACK_STATE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Both temp dirs `active_controller` allocates (settings, track-state);
+/// kept alive together so either can be dropped only once the test itself
+/// is done with the controller.
+struct TestDirs(#[allow(dead_code)] TempDir, #[allow(dead_code)] TempDir);
+
 /// A controller over a confirmed device with an `ActiveState::Active`
 /// Connect registration — the baseline "healthy, transport enabled" state
 /// every test below starts from and deviates from as needed. Also returns
@@ -88,13 +103,25 @@ fn active_controller(
 ) -> (
     PlaybackController<FakeBackend, ScriptedHost>,
     ScriptedHostHandle,
-    TempDir,
+    TestDirs,
 ) {
     let (store, dir) = fresh_store(label);
+    let track_state_dir = TempDir::new(&format!("{label}-track-state"));
     let host = ScriptedHost::new();
     let handle = host.handle();
     let devices = vec![fake_device()];
-    let mut controller = PlaybackController::new(FakeBackend::new(devices), host, store);
+    let mut controller = {
+        let _guard = TRACK_STATE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Safety: narrowly scopes the mutation to the one synchronous read
+        // `PlaybackController::new` does of this var, serialized against
+        // every other test in this binary via the lock above.
+        unsafe { std::env::set_var("MODPLAYER_TRACK_STATE_DIR", track_state_dir.path()) };
+        let controller = PlaybackController::new(FakeBackend::new(devices), host, store);
+        unsafe { std::env::remove_var("MODPLAYER_TRACK_STATE_DIR") };
+        controller
+    };
     controller.launch();
     controller.confirm_device(
         DeviceId::new("dev-1").unwrap_or_else(|| unreachable!()),
@@ -102,7 +129,7 @@ fn active_controller(
     );
     controller.set_playback_permitted(true, None);
     controller.tick();
-    (controller, handle, dir)
+    (controller, handle, TestDirs(dir, track_state_dir))
 }
 
 /// Render `now_playing::show` in a fresh headless, AccessKit-enabled
@@ -1157,6 +1184,257 @@ fn keyboard_table_matches_pointer_results() {
         "`+` must zoom the shared detail window the same way when the detail widget (not \
          the overview) has focus"
     );
+
+    // 006 (US1-US4, Phase 7 T091): marker/loop/cue rows, matched against
+    // the exact controller method contracts/ui-markers.md §2 documents
+    // for each key (there is no pointer gesture for these — `I`/`O`/`L`/
+    // `M`/`1`-`8`/`Shift+1`-`8` are pure keyboard shortcuts) — a twin
+    // controller driven directly through the API stands in for the
+    // "pointer result" this test otherwise compares against. Detailed
+    // per-scenario coverage (refusals, drag, nudge, ...) already lives in
+    // `markers.rs`; this is the one place every marker/loop/cue row is
+    // pinned against its documented equivalent from the same suite that
+    // pins the seek/zoom rows.
+    fn setup_marker_controller(
+        label: &str,
+    ) -> (
+        PlaybackController<FakeBackend, ScriptedHost>,
+        TestDirs,
+        ArtworkCache,
+        WaveformState,
+        Context,
+    ) {
+        let (mut controller, _handle, dirs) = active_controller(label);
+        controller.queue_replace(vec![track("a", 200_000)]);
+        controller.play();
+        controller.tick();
+        let artwork = ArtworkCache::new();
+        let waveform = WaveformState::default();
+        let ctx = Context::default();
+        ctx.enable_accesskit();
+        (controller, dirs, artwork, waveform, ctx)
+    }
+
+    // `I` / `O`: create and complete the current region.
+    {
+        let (mut via_key, _dirs1, mut artwork, mut waveform, ctx) =
+            setup_marker_controller("kbd-io-key");
+        tab_focus_named(
+            &ctx,
+            &mut via_key,
+            &mut artwork,
+            &mut waveform,
+            &tr("transport-seek"),
+        );
+        run_key_frame(
+            &ctx,
+            &mut via_key,
+            &mut artwork,
+            &mut waveform,
+            Key::I,
+            Modifiers::default(),
+        );
+        let _ = via_key.backend_mut().render_buffers(1);
+        run_key_frame(
+            &ctx,
+            &mut via_key,
+            &mut artwork,
+            &mut waveform,
+            Key::O,
+            Modifiers::default(),
+        );
+
+        let (mut via_api, _dirs2, _artwork2, _waveform2, _ctx2) =
+            setup_marker_controller("kbd-io-api");
+        via_api
+            .set_loop_a()
+            .unwrap_or_else(|e| unreachable!("set_loop_a: {e}"));
+        let _ = via_api.backend_mut().render_buffers(1);
+        via_api
+            .set_loop_b()
+            .unwrap_or_else(|e| unreachable!("set_loop_b: {e}"));
+
+        let span_of = |c: &PlaybackController<FakeBackend, ScriptedHost>| {
+            let markers = c.markers().expect("markers must exist");
+            let region = markers
+                .current_region()
+                .expect("a region must exist after I/set_loop_a");
+            markers
+                .region(region)
+                .and_then(|r| r.span(markers))
+                .expect("region must be complete after O/set_loop_b")
+        };
+        assert_eq!(
+            span_of(&via_key),
+            span_of(&via_api),
+            "`I`/`O` must land the region at exactly the same (a, b) as set_loop_a/set_loop_b"
+        );
+    }
+
+    // `L`: toggle the current (complete) region's armed state.
+    {
+        let (mut via_key, _dirs1, mut artwork, mut waveform, ctx) =
+            setup_marker_controller("kbd-l-key");
+        via_key
+            .set_loop_a()
+            .unwrap_or_else(|e| unreachable!("set_loop_a: {e}"));
+        let _ = via_key.backend_mut().render_buffers(1);
+        via_key
+            .set_loop_b()
+            .unwrap_or_else(|e| unreachable!("set_loop_b: {e}"));
+        tab_focus_named(
+            &ctx,
+            &mut via_key,
+            &mut artwork,
+            &mut waveform,
+            &tr("transport-seek"),
+        );
+        run_key_frame(
+            &ctx,
+            &mut via_key,
+            &mut artwork,
+            &mut waveform,
+            Key::L,
+            Modifiers::default(),
+        );
+        let key_region = via_key
+            .markers()
+            .and_then(TrackMarkers::current_region)
+            .expect("region must exist");
+        let armed_via_key = via_key
+            .markers()
+            .and_then(|m| m.region(key_region))
+            .is_some_and(|r| r.armed);
+
+        let (mut via_api, _dirs2, _artwork2, _waveform2, _ctx2) =
+            setup_marker_controller("kbd-l-api");
+        via_api
+            .set_loop_a()
+            .unwrap_or_else(|e| unreachable!("set_loop_a: {e}"));
+        let _ = via_api.backend_mut().render_buffers(1);
+        via_api
+            .set_loop_b()
+            .unwrap_or_else(|e| unreachable!("set_loop_b: {e}"));
+        via_api
+            .toggle_current_loop()
+            .unwrap_or_else(|e| unreachable!("toggle_current_loop: {e}"));
+        // A fresh `TrackMarkers`' internal id counter is deterministic, so
+        // the twin controller's own first region has the same `RegionId`
+        // as `via_key`'s — resolved independently rather than reusing
+        // `key_region` directly, so a future counter change breaks this
+        // assertion visibly instead of silently comparing the wrong region.
+        let api_region = via_api
+            .markers()
+            .and_then(TrackMarkers::current_region)
+            .expect("region must exist");
+        assert_eq!(
+            key_region, api_region,
+            "sanity: two freshly constructed controllers' first region must share an id"
+        );
+        let armed_via_api = via_api
+            .markers()
+            .and_then(|m| m.region(api_region))
+            .is_some_and(|r| r.armed);
+
+        assert!(armed_via_key, "`L` must arm the complete region");
+        assert_eq!(
+            armed_via_key, armed_via_api,
+            "`L` must arm/disarm exactly like toggle_current_loop"
+        );
+    }
+
+    // `M`: add a point marker at the playhead.
+    {
+        let (mut via_key, _dirs1, mut artwork, mut waveform, ctx) =
+            setup_marker_controller("kbd-m-key");
+        tab_focus_named(
+            &ctx,
+            &mut via_key,
+            &mut artwork,
+            &mut waveform,
+            &tr("transport-seek"),
+        );
+        run_key_frame(
+            &ctx,
+            &mut via_key,
+            &mut artwork,
+            &mut waveform,
+            Key::M,
+            Modifiers::default(),
+        );
+        let key_count = via_key.markers().map(TrackMarkers::count).unwrap_or(0);
+
+        let (mut via_api, _dirs2, _artwork2, _waveform2, _ctx2) =
+            setup_marker_controller("kbd-m-api");
+        via_api
+            .add_point_marker()
+            .unwrap_or_else(|e| unreachable!("add_point_marker: {e}"));
+        let api_count = via_api.markers().map(TrackMarkers::count).unwrap_or(0);
+
+        assert_eq!(key_count, 1, "`M` must add exactly one point marker");
+        assert_eq!(
+            key_count, api_count,
+            "`M` must add exactly as many markers as add_point_marker"
+        );
+    }
+
+    // `Shift+1`: set cue slot 1 at the playhead; `1`: jump to it (never a
+    // refusal/no-op once occupied, and never changes play/pause state).
+    {
+        let (mut via_key, _dirs1, mut artwork, mut waveform, ctx) =
+            setup_marker_controller("kbd-cue-key");
+        tab_focus_named(
+            &ctx,
+            &mut via_key,
+            &mut artwork,
+            &mut waveform,
+            &tr("transport-seek"),
+        );
+        run_key_frame(
+            &ctx,
+            &mut via_key,
+            &mut artwork,
+            &mut waveform,
+            Key::Num1,
+            Modifiers::SHIFT,
+        );
+        let slot = CueSlot::new(1).unwrap_or_else(|| unreachable!());
+        let key_cue_frame = via_key
+            .markers()
+            .and_then(|m| m.cue(slot))
+            .map(|marker| marker.position);
+
+        let (mut via_api, _dirs2, _artwork2, _waveform2, _ctx2) =
+            setup_marker_controller("kbd-cue-api");
+        via_api
+            .set_cue(slot)
+            .unwrap_or_else(|e| unreachable!("set_cue: {e}"));
+        let api_cue_frame = via_api
+            .markers()
+            .and_then(|m| m.cue(slot))
+            .map(|marker| marker.position);
+
+        assert!(key_cue_frame.is_some(), "`Shift+1` must occupy cue slot 1");
+        assert_eq!(
+            key_cue_frame, api_cue_frame,
+            "`Shift+1` must set the cue at exactly the same frame as set_cue"
+        );
+
+        let intent_before = via_key.transport_state().intent;
+        run_key_frame(
+            &ctx,
+            &mut via_key,
+            &mut artwork,
+            &mut waveform,
+            Key::Num1,
+            Modifiers::default(),
+        );
+        assert_eq!(
+            via_key.transport_state().intent,
+            intent_before,
+            "`1` must jump like jump_to_cue without changing play/pause state"
+        );
+    }
 }
 
 // -- Polish (Phase 7): analysis-failure rendering (EC-5.9) -----------------

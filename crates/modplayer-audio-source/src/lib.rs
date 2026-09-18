@@ -16,6 +16,13 @@
 //! identities and request/reply payloads (data-model.md §1) carried by the
 //! additive `SourceCommand`/`SourceEvent` variants in `types`
 //! (contracts/catalog-source.md).
+//!
+//! `decoded_store` (006-markers-loops-and-cues) is a provided,
+//! additive `AudioSource` method giving the engine's loop seam
+//! sample-exact random access into the current track's retained decoded
+//! store (contracts/engine-loop.md §1).
+
+use std::sync::Arc;
 
 pub mod catalog;
 pub mod decoded;
@@ -59,4 +66,14 @@ pub trait AudioSource: Send + 'static {
     /// `len_frames`). Must fill the whole slice; silence is written
     /// explicitly.
     fn fill(&mut self, out: &mut [f32]);
+
+    /// The current track's retained decoded store, if this source has one
+    /// (006, contracts/engine-loop.md §1). Real-time contract: returns a
+    /// reference to an `Arc` the source already holds — never clones,
+    /// never drops. Default `None`: a source with no retained store still
+    /// loops with an exact period, only the seam's crossfade degrades to a
+    /// hard cut.
+    fn decoded_store(&self) -> Option<&Arc<DecodedStore>> {
+        None
+    }
 }

@@ -15,6 +15,15 @@ pub enum Event {
     /// Defensive: the command drain found an unknown discriminant. Never
     /// expected in practice.
     CommandDropped { kind: u8 },
+    /// A loop wrap happened in the render that pushed this event (006,
+    /// contracts/engine-loop.md §3): `wraps` is the post-increment count;
+    /// `gapless` is whether the seam's incoming frames were all read from
+    /// the store *and* the store covered `A` (a hard cut otherwise).
+    LoopWrapped { wraps: u32, gapless: bool },
+    /// The armed region's repeat count was reached right after the wrap
+    /// that reached it; `loop_active` is already `None` by the time this
+    /// is pushed (006, contracts/engine-loop.md §3).
+    LoopReleased { wraps: u32 },
 }
 
 #[cfg(test)]

@@ -70,7 +70,10 @@ impl SourceHost for SyntheticHost {
     type Rt = SyntheticSource;
 
     fn attach(&mut self, position_frames: u64) -> Self::Rt {
-        let mut source = SyntheticSource::new(self.sample_rate);
+        // 006-markers-loops-and-cues, contracts/engine-loop.md §1: this
+        // host's one track is always already fully decoded (`self.store`,
+        // built at construction), so every attach carries it.
+        let mut source = SyntheticSource::with_store(self.sample_rate, Arc::clone(&self.store));
         source.seek(position_frames);
         source
     }

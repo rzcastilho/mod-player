@@ -191,6 +191,12 @@ struct Shared {
     /// The in-flight `Progressive` fill, if any, advanced one step per
     /// `poll()` call.
     progressive: Option<ProgressiveFill>,
+    /// The current track's decoded store, if `decode_script` has raised
+    /// one (006-markers-loops-and-cues, contracts/engine-loop.md §1):
+    /// captured by `ScriptedHost::attach` into the `ScriptedRt` it hands
+    /// out, so the engine's loop seam can read `[A − x, A)` from the same
+    /// `Arc` a `Progressive` fill keeps growing in place.
+    current_store: Option<Arc<DecodedStore>>,
 }
 
 impl Shared {
@@ -209,11 +215,13 @@ impl Shared {
 /// `DecodeScript::None` (no store raised at all).
 fn build_decoded_store_event(lock: &mut Shared, track: &TrackRef) -> Option<SourceEvent> {
     if lock.decode_script == DecodeScript::None {
+        lock.current_store = None;
         return None;
     }
     let rate = lock.sample_rate.max(1);
     let len_frames = (u64::from(track.duration_ms) * u64::from(rate) / 1000).max(1);
     let store = DecodedStore::new(rate, len_frames);
+    lock.current_store = Some(Arc::clone(&store));
 
     match lock.decode_script {
         DecodeScript::None => unreachable!("checked above"),
@@ -587,10 +595,16 @@ impl SourceHost for ScriptedHost {
     type Rt = ScriptedRt;
 
     fn attach(&mut self, position_frames: u64) -> Self::Rt {
+        // 006-markers-loops-and-cues, contracts/engine-loop.md §1: carry
+        // whichever store the last scripted `TrackStarted` raised, so a
+        // `DecodeScript::Progressive` fill in flight is visible to the
+        // engine's loop seam through this same `Arc`.
+        let store = self.lock().current_store.clone();
         ScriptedRt {
             shared: Arc::clone(&self.handle.shared),
             sample_rate: self.sample_rate,
             position: position_frames,
+            store,
         }
     }
 
@@ -707,6 +721,12 @@ impl SourceHost for ScriptedHost {
                 // late reply is still delivered and the host discards it
                 // by id".
             }
+            SourceCommand::PrefetchHint { .. } => {
+                // 006-markers-loops-and-cues, contracts/engine-loop.md
+                // §1: no decode-ahead concept on the synthetic/scripted
+                // hosts, so this is ignored (recorded above via
+                // `lock.commands.push`, for tests that assert on it).
+            }
         }
     }
 
@@ -752,6 +772,10 @@ pub struct ScriptedRt {
     shared: Arc<Mutex<Shared>>,
     sample_rate: u32,
     position: u64,
+    /// Snapshot of `Shared::current_store` taken at `attach()` (006,
+    /// contracts/engine-loop.md §1); a `Progressive` fill keeps growing
+    /// the *same* `Arc` in place, so this stays live without re-locking.
+    store: Option<Arc<DecodedStore>>,
 }
 
 impl ScriptedRt {
@@ -792,6 +816,10 @@ impl AudioSource for ScriptedRt {
             out[i * 2 + 1] = sample;
             self.position += 1;
         }
+    }
+
+    fn decoded_store(&self) -> Option<&Arc<DecodedStore>> {
+        self.store.as_ref()
     }
 }
 

@@ -105,6 +105,47 @@ const PLAYBACK_KEYS: &[&str] = &[
     "action-status-page",
     "action-retry",
     "action-open-upgrade-page",
+    // Markers and loop regions (006, US1; contracts/ui-markers.md §8):
+    // the panel/empty state, view-level shortcut refusals, the lane's
+    // region role labels, and the panel's loop-only cells. The contract
+    // also lists a separate `markers-heading` key for the panel header's
+    // own label; `markers.rs::panel` consolidates it into `markers-panel`
+    // (one key doing double duty as both the panel's own accessible name,
+    // contracts §1, and its heading text, contracts §4) rather than
+    // defining an unused second key — same pattern as T076's documented
+    // colour-swatch simplification. `markers-heading` is asserted absent
+    // below (`markers_heading_key_was_intentionally_consolidated`) so this
+    // deviation stays pinned, not silently forgotten.
+    "markers-panel",
+    "markers-empty",
+    "markers-status",
+    "marker-limit-reached",
+    "loop-region-incomplete",
+    "loop-region-too-short",
+    "marker-role-a",
+    "marker-role-b",
+    "loop-arm",
+    "loop-disarm",
+    "loop-repeat",
+    "loop-crossfade",
+    "loop-wraps-infinite",
+    "loop-armed-inactive",
+    // 006 US2: panel header (new-region/clear-all) and persistence
+    // warnings (contracts/marker-service.md §6, contracts/ui-markers.md
+    // §4/§8).
+    "markers-new-loop",
+    "markers-clear-all",
+    "markers-clear-yes",
+    "markers-clear-no",
+    "marker-clamped-desc",
+    "track-state-unreadable",
+    "track-state-newer-version",
+    "track-state-save-failed",
+    // 006 US3: precise marker editing (contracts/ui-markers.md §3/§4/§8) —
+    // the point-kind role label and the inline-rename field's accessible
+    // name.
+    "marker-role-point",
+    "markers-rename",
 ];
 
 /// Now Playing / queue / transfer-banner keys that take a Fluent
@@ -128,6 +169,27 @@ const PLAYBACK_WINDOW_ARG_KEYS: &[&str] = &["waveform-detail-window"];
 /// with `$time` (an already-formatted `m:ss` string).
 const PLAYBACK_TIME_ARG_KEYS: &[&str] = &["time-elapsed", "time-remaining"];
 
+/// 006 US1's `loop-wraps-remaining` and US2's `markers-clear-confirm`:
+/// both templated with `$count`.
+const PLAYBACK_COUNT_ARG_KEYS: &[&str] = &["loop-wraps-remaining", "markers-clear-confirm"];
+
+/// 006's `marker-glyph`: templated with `$role`/`$name`/`$time`
+/// (contracts/ui-markers.md §3).
+const PLAYBACK_MARKER_GLYPH_KEYS: &[&str] = &["marker-glyph"];
+
+/// 006 US3's `marker-default-name`: templated with `$n` (data-model.md
+/// §1.3, design note 14 — the core model resolves it via `tr_args` even
+/// though it stores the resolved string).
+const PLAYBACK_DEFAULT_NAME_ARG_KEYS: &[&str] = &["marker-default-name"];
+
+/// 006 US3's `markers-color`: templated with `$index` (contracts/
+/// ui-markers.md §4's colour-swatch cell).
+const PLAYBACK_INDEX_ARG_KEYS: &[&str] = &["markers-color"];
+
+/// 006 US4's `marker-role-cue`: templated with `$slot` (contracts/
+/// ui-markers.md §3/§4 — the cue glyph/row role label).
+const PLAYBACK_SLOT_ARG_KEYS: &[&str] = &["marker-role-cue"];
+
 /// Settings › Playback (device name) keys added by
 /// 003-streaming-playback-and-queue (T062/T063/T064; contracts/ui-
 /// surface.md §3/§5) — resolved via plain `tr`. Developer's "Play from
@@ -139,6 +201,9 @@ const PLAYBACK_SETTINGS_KEYS: &[&str] = &[
     "setting-device-name-hint",
     "setting-device-name-desc",
     "setting-device-name-too-long",
+    // 006 US3 (contracts/ui-markers.md §7): the marker nudge-step field.
+    "setting-nudge-step",
+    "setting-nudge-step-desc",
 ];
 
 /// Every Settings-screen key (US5, T086): the eleven fixed-order category
@@ -483,6 +548,53 @@ fn every_shell_nav_and_notification_key_resolves() {
             "Fluent key `{key}` is missing from locales/en-US/playback.ftl (tr_args() fell back to the raw key)"
         );
     }
+
+    for key in PLAYBACK_COUNT_ARG_KEYS {
+        let resolved = tr_args(key, &[("count", "3".to_string())]);
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/playback.ftl (tr_args() fell back to the raw key)"
+        );
+    }
+
+    for key in PLAYBACK_MARKER_GLYPH_KEYS {
+        let resolved = tr_args(
+            key,
+            &[
+                ("role", "A".to_string()),
+                ("name", "Marker 1".to_string()),
+                ("time", "1:23".to_string()),
+            ],
+        );
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/playback.ftl (tr_args() fell back to the raw key)"
+        );
+    }
+
+    for key in PLAYBACK_DEFAULT_NAME_ARG_KEYS {
+        let resolved = tr_args(key, &[("n", "1".to_string())]);
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/playback.ftl (tr_args() fell back to the raw key)"
+        );
+    }
+
+    for key in PLAYBACK_INDEX_ARG_KEYS {
+        let resolved = tr_args(key, &[("index", "0".to_string())]);
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/playback.ftl (tr_args() fell back to the raw key)"
+        );
+    }
+
+    for key in PLAYBACK_SLOT_ARG_KEYS {
+        let resolved = tr_args(key, &[("slot", "1".to_string())]);
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/playback.ftl (tr_args() fell back to the raw key)"
+        );
+    }
 }
 
 /// Every message identifier a Fluent (`.ftl`) resource defines: lines of
@@ -519,6 +631,11 @@ fn no_unused_keys_in_playback_and_settings_ftl() {
         .chain(PLAYBACK_ARG_KEYS)
         .chain(PLAYBACK_WINDOW_ARG_KEYS)
         .chain(PLAYBACK_TIME_ARG_KEYS)
+        .chain(PLAYBACK_COUNT_ARG_KEYS)
+        .chain(PLAYBACK_MARKER_GLYPH_KEYS)
+        .chain(PLAYBACK_DEFAULT_NAME_ARG_KEYS)
+        .chain(PLAYBACK_INDEX_ARG_KEYS)
+        .chain(PLAYBACK_SLOT_ARG_KEYS)
         .chain(PLAYBACK_SETTINGS_KEYS)
         .copied()
         .collect();
@@ -566,4 +683,30 @@ fn scaffold_keys_no_longer_resolve_or_exist() {
             "`{key}` is still defined in app.ftl/playback.ftl/settings.ftl — remove it with the scaffold"
         );
     }
+}
+
+/// T090 (Phase 7, FR-023): contracts/ui-markers.md §8 lists `markers-heading`
+/// alongside `markers-panel` as two separate keys, but `markers.rs::panel`
+/// consolidates both into the one `markers-panel` key (documented above,
+/// `PLAYBACK_KEYS`). Pins that consolidation deliberately: `markers-heading`
+/// must never resolve and must never be (re-)defined, so a future edit that
+/// adds it back either updates this test and the comment together or is
+/// caught here as an unreviewed drift from the documented deviation.
+#[test]
+fn markers_heading_key_was_intentionally_consolidated() {
+    let resolved = tr("markers-heading");
+    assert_eq!(
+        &resolved, "markers-heading",
+        "`markers-heading` resolves to a real string, but `markers.rs::panel` was expected \
+         to use `markers-panel` alone for the header (contracts/ui-markers.md §8's \
+         documented consolidation) — update the `PLAYBACK_KEYS` comment if this is now \
+         intentional, or remove the new definition if it is not"
+    );
+
+    let playback_ftl = include_str!("../../../locales/en-US/playback.ftl");
+    assert!(
+        !defined_keys(playback_ftl).contains("markers-heading"),
+        "`markers-heading` is now defined in playback.ftl — either wire it up and add it to \
+         `PLAYBACK_KEYS` above, or this test/comment is stale"
+    );
 }

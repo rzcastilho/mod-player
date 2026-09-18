@@ -916,6 +916,13 @@ fn command_loop(
                 // — librespot exposes no separate "report now" call to
                 // invoke a second time (contract §2).
             }
+            Ok(SourceCommand::PrefetchHint { frame }) => {
+                // 006-markers-loops-and-cues, contracts/engine-loop.md §1:
+                // a loop region was armed — ask the current decode-ahead
+                // to prioritise `frame` (the seam's incoming edge), never
+                // touching `spirc`/`player` itself.
+                decode_ahead::forward_prefetch_hint(decode_ahead, frame);
+            }
             Ok(SourceCommand::Initialize { .. }) => {
                 // Already connected; a repeated `Initialize` is a no-op.
             }

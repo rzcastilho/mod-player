@@ -12,6 +12,7 @@ pub mod device_policy;
 pub mod i18n;
 pub mod library;
 pub mod links;
+pub mod markers;
 pub mod notifications;
 pub mod queue;
 pub mod search;
@@ -23,7 +24,9 @@ pub use analysis::{
     ANALYZER_VERSION, AnalysisPaths, AnalysisService, AnalysisSnapshot, AnalysisStatus, PeakLevel,
     WaveformPeaks,
 };
-pub use controller::{ActiveDevice, PlaybackController, QueueRow, QueueView, TrackListState};
+pub use controller::{
+    ActiveDevice, LoopState, LoopStatus, PlaybackController, QueueRow, QueueView, TrackListState,
+};
 pub use device_policy::{DeviceResolution, DeviceWarning};
 pub use i18n::{tr, tr_args};
 pub use library::{Connectivity, LibraryIndex, LibraryStatus, PlayLog, SyncScheduler};

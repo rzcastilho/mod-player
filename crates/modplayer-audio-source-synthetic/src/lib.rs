@@ -22,7 +22,9 @@ pub mod scripted;
 pub mod tone;
 pub mod track;
 
-use modplayer_audio_source::AudioSource;
+use std::sync::Arc;
+
+use modplayer_audio_source::{AudioSource, DecodedStore};
 
 pub use host::SyntheticHost;
 pub use scripted::{DecodeScript, ScriptedHost, ScriptedHostHandle, ScriptedRt};
@@ -40,11 +42,18 @@ pub struct SyntheticSource {
     /// `position`, a pure function of `(sample_rate, position)`
     /// (data-model.md §2, `track::phase_at`).
     phase: f64,
+    /// The retained decoded store for this source's track, if any (006,
+    /// contracts/engine-loop.md §1) — set by [`Self::with_store`] or
+    /// `SyntheticHost::attach`/`ScriptedHost::attach`; `None` for a plain
+    /// [`Self::new`] (every pre-006 caller unaffected).
+    store: Option<Arc<DecodedStore>>,
 }
 
 impl SyntheticSource {
     /// Construct a synthetic source at `sample_rate` Hz, positioned at the
-    /// start of the track.
+    /// start of the track, with no retained decoded store (the engine's
+    /// loop seam then hard-cuts, still gapless in period — contracts/
+    /// engine-loop.md §1).
     pub fn new(sample_rate: u32) -> Self {
         let sample_rate = sample_rate.max(1);
         Self {
@@ -52,6 +61,17 @@ impl SyntheticSource {
             position: 0,
             track_len: track::track_len_frames(sample_rate),
             phase: 0.0,
+            store: None,
+        }
+    }
+
+    /// As [`Self::new`], carrying `store` for the engine's loop seam to
+    /// read `[A − x, A)` from (006, contracts/engine-loop.md §1) — the
+    /// test-only equivalent of `SyntheticHost::attach`'s built-in store.
+    pub fn with_store(sample_rate: u32, store: Arc<DecodedStore>) -> Self {
+        Self {
+            store: Some(store),
+            ..Self::new(sample_rate)
         }
     }
 
@@ -92,6 +112,10 @@ impl AudioSource for SyntheticSource {
     fn fill(&mut self, out: &mut [f32]) {
         track::fill(out, &mut self.position, self.sample_rate);
         self.phase = track::phase_at(self.position, self.sample_rate);
+    }
+
+    fn decoded_store(&self) -> Option<&Arc<DecodedStore>> {
+        self.store.as_ref()
     }
 }
 

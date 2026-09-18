@@ -14,7 +14,7 @@
 //! `DetailWindow` via `zoom_about`/`zoom_step`/`pan`/`reset`, which is
 //! where that clamping context already lives.
 
-use egui::{Key, Response, Ui};
+use egui::{Key, Modifiers, Response, Ui};
 
 use super::coords::TimeSpace;
 
@@ -226,5 +226,72 @@ fn keyboard_seek_zoom_pan(ui: &Ui, space: &TimeSpace, playhead: u64) -> Option<W
             return Some(WaveformEvent::Reset);
         }
         None
+    })
+}
+
+/// What one frame of keyboard input implies for whichever marker glyph/row
+/// currently has focus (006, contracts/ui-markers.md §3) — resolved the
+/// same pure input -> event way as [`WaveformEvent`]; the caller
+/// (`markers::handle_focused_marker_keys`) applies it against
+/// `PlaybackController`/`WaveformState`, since this module stays free of
+/// both types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkerKeyAction {
+    /// `←`/`→` (`multiplier = 1`) or `Shift+←`/`Shift+→` (`multiplier =
+    /// 10`): `nudge_marker(id, direction, multiplier)`.
+    Nudge { direction: i8, multiplier: u8 },
+    /// `Delete`/`Backspace`: `delete_marker(id)`.
+    Delete,
+    /// `F2`/`Enter`: open the row's inline rename.
+    OpenRename,
+    /// `C`: `cycle_marker_color(id)`.
+    CycleColor,
+    /// `Esc` (not dragging, not renaming): focus returns to the detail
+    /// waveform.
+    ReturnFocus,
+}
+
+/// Resolve this frame's focused-marker keyboard table (contracts/
+/// ui-markers.md §3), consuming whichever key matched so a plain `←`/`→`
+/// doesn't also fall through to the waveform's own seek row. The caller is
+/// responsible for only calling this while a glyph/row actually has focus
+/// and no text field of the view does (research R17).
+pub fn focused_marker_key(ui: &Ui) -> Option<MarkerKeyAction> {
+    ui.input_mut(|input| {
+        if input.consume_key(Modifiers::SHIFT, Key::ArrowLeft) {
+            Some(MarkerKeyAction::Nudge {
+                direction: -1,
+                multiplier: 10,
+            })
+        } else if input.consume_key(Modifiers::SHIFT, Key::ArrowRight) {
+            Some(MarkerKeyAction::Nudge {
+                direction: 1,
+                multiplier: 10,
+            })
+        } else if input.consume_key(Modifiers::NONE, Key::ArrowLeft) {
+            Some(MarkerKeyAction::Nudge {
+                direction: -1,
+                multiplier: 1,
+            })
+        } else if input.consume_key(Modifiers::NONE, Key::ArrowRight) {
+            Some(MarkerKeyAction::Nudge {
+                direction: 1,
+                multiplier: 1,
+            })
+        } else if input.consume_key(Modifiers::NONE, Key::Delete)
+            || input.consume_key(Modifiers::NONE, Key::Backspace)
+        {
+            Some(MarkerKeyAction::Delete)
+        } else if input.consume_key(Modifiers::NONE, Key::F2)
+            || input.consume_key(Modifiers::NONE, Key::Enter)
+        {
+            Some(MarkerKeyAction::OpenRename)
+        } else if input.consume_key(Modifiers::NONE, Key::C) {
+            Some(MarkerKeyAction::CycleColor)
+        } else if input.consume_key(Modifiers::NONE, Key::Escape) {
+            Some(MarkerKeyAction::ReturnFocus)
+        } else {
+            None
+        }
     })
 }

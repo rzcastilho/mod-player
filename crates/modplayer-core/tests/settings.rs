@@ -258,6 +258,40 @@ fn device_name_validation() {
 }
 
 #[test]
+fn nudge_step_setting_round_trips_and_clamps() {
+    // Round-trips through a real save/load (006, data-model.md §5).
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let settings = AudioSettings {
+        nudge_step_ms: 25,
+        ..AudioSettings::default()
+    };
+    assert!(store.save(&settings).is_ok());
+    let outcome = store.load();
+    assert_eq!(outcome.settings.nudge_step_ms, 25);
+    assert_eq!(outcome.warning, None);
+
+    // Out-of-range values on disk clamp silently, no warning.
+    let too_low = "schema_version = 1\n\n[markers]\nnudge_step_ms = 0\n";
+    let _ = fs::write(store.path(), too_low);
+    let outcome = store.load();
+    assert_eq!(outcome.settings.nudge_step_ms, 1);
+    assert_eq!(outcome.warning, None);
+
+    let too_high = "schema_version = 1\n\n[markers]\nnudge_step_ms = 5000\n";
+    let _ = fs::write(store.path(), too_high);
+    let outcome = store.load();
+    assert_eq!(outcome.settings.nudge_step_ms, 1_000);
+    assert_eq!(outcome.warning, None);
+
+    // Missing `[markers]` section means the default (10 ms).
+    let _ = fs::write(store.path(), "schema_version = 1\n");
+    let outcome = store.load();
+    assert_eq!(outcome.settings.nudge_step_ms, 10);
+    assert_eq!(outcome.warning, None);
+}
+
+#[test]
 fn generate_connect_device_id_is_32_hex_chars() {
     let id = generate_connect_device_id();
     assert_eq!(id.len(), 32);

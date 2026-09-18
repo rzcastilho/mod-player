@@ -270,6 +270,14 @@ impl AudioSource for ConnectRtSource {
         self.shared
             .set_ring_fill_frames(self.samples.slots() as u32);
     }
+
+    /// The current track's store — the same `Arc` this RT already holds
+    /// for its own `Feed::Store` reads (006, contracts/engine-loop.md §1):
+    /// never cloned or dropped here, just borrowed for the engine's loop
+    /// seam.
+    fn decoded_store(&self) -> Option<&Arc<DecodedStore>> {
+        self.store.as_ref()
+    }
 }
 
 #[cfg(test)]

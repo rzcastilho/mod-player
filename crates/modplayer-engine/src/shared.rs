@@ -11,7 +11,7 @@
 //! (`position_clock.rs`) retries its read whenever it observes an odd or
 //! changing generation, so it never sees a torn write.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Atomics shared across a `Processor`'s lifetime and every rebuild of it.
@@ -42,6 +42,17 @@ pub struct RtShared {
     /// covered; bounds `PositionClock`'s extrapolation ("capped at
     /// position + one_buffer_duration × 2", engine-delta.md §3).
     anchor_buffer_frames: AtomicU32,
+    /// Wraps of the armed loop region so far (006, contracts/engine-
+    /// loop.md §3); written after every wrap and on `LoopCommit`/
+    /// `LoopDisarm`. Session-only mirror the UI reads for "wraps
+    /// remaining"; the model-level `LoopRegion::wraps` is reset alongside
+    /// it on `arm`.
+    loop_wraps: AtomicU32,
+    /// The armed loop's state (006, contracts/engine-loop.md §3): `0`
+    /// disarmed, `1` armed-inactive (position outside `[a, b)`), `2`
+    /// armed-active. Written once per render from the segment
+    /// classification.
+    loop_state: AtomicU8,
 }
 
 impl Default for RtShared {
@@ -72,6 +83,8 @@ impl RtShared {
             anchor_generation: AtomicU64::new(0),
             anchor_playing: AtomicBool::new(false),
             anchor_buffer_frames: AtomicU32::new(0),
+            loop_wraps: AtomicU32::new(0),
+            loop_state: AtomicU8::new(0),
         }
     }
 
@@ -163,6 +176,30 @@ impl RtShared {
     pub fn set_negotiated_frames(&self, frames: u32) {
         self.negotiated_frames.store(frames, Ordering::Relaxed);
     }
+
+    /// Wraps of the armed loop region so far (006, contracts/engine-
+    /// loop.md §3).
+    pub fn loop_wraps(&self) -> u32 {
+        self.loop_wraps.load(Ordering::Acquire)
+    }
+
+    /// Publish the wrap count, written after every wrap and on
+    /// `LoopCommit`/`LoopDisarm`.
+    pub fn set_loop_wraps(&self, wraps: u32) {
+        self.loop_wraps.store(wraps, Ordering::Release);
+    }
+
+    /// The armed loop's state: `0` disarmed, `1` armed-inactive, `2`
+    /// armed-active (006, contracts/engine-loop.md §3).
+    pub fn loop_state(&self) -> u8 {
+        self.loop_state.load(Ordering::Acquire)
+    }
+
+    /// Publish the loop state, written once per render from the segment
+    /// classification.
+    pub fn set_loop_state(&self, state: u8) {
+        self.loop_state.store(state, Ordering::Release);
+    }
 }
 
 #[cfg(test)]
@@ -183,6 +220,17 @@ mod tests {
         let shared = RtShared::new();
         shared.set_peak(0.75);
         assert!((shared.peak() - 0.75).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn loop_wraps_and_state_round_trip() {
+        let shared = RtShared::new();
+        assert_eq!(shared.loop_wraps(), 0);
+        assert_eq!(shared.loop_state(), 0);
+        shared.set_loop_wraps(7);
+        shared.set_loop_state(2);
+        assert_eq!(shared.loop_wraps(), 7);
+        assert_eq!(shared.loop_state(), 2);
     }
 
     #[test]

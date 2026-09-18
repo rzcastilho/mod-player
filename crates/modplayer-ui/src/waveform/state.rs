@@ -12,6 +12,7 @@
 //! (data-model.md §5.1 names the shape, not literal Rust signatures).
 
 use modplayer_audio_source::TrackId;
+use modplayer_core::markers::MarkerId;
 
 /// The floor on `width_frames` (contracts/ui-waveform.md §3, FR-011): the
 /// most zoomed-in the detail view ever gets.
@@ -194,6 +195,32 @@ impl DetailWindow {
             *self
         }
     }
+
+    /// One convergence step of the marker-drag zoom-assist (006, research
+    /// R14, contracts/ui-markers.md §5): moves the current width 80% of
+    /// the way toward `target_width` (clamped to `[200 ms, len]`, like
+    /// every other zoom) and recentres on `live` — the marker's current
+    /// drag position — every frame, rather than snapping straight to it.
+    /// Called once per frame while a marker drag is in progress, this
+    /// converges within about ten frames (SC-003's <= 5 ms landing
+    /// margin), and never maps the pointer's absolute position through a
+    /// window that is itself recentring on it (design note 11). `follow`
+    /// is left suspended: a drag is not the playhead moving.
+    pub fn zoom_assist(&self, live: u64, target_width: u64, len: u64, rate: u32) -> Self {
+        let min_width = Self::min_width_frames(rate);
+        let max_width = len.max(min_width);
+        let target = target_width.clamp(min_width, max_width);
+        let current = self.width_frames.max(1) as f64;
+        let new_width = (current + (target as f64 - current) * 0.8)
+            .round()
+            .clamp(min_width as f64, max_width as f64) as u64;
+        let start = Self::clamped_start(live.saturating_sub(new_width / 2), new_width, len);
+        Self {
+            start_frame: start,
+            width_frames: new_width,
+            follow: false,
+        }
+    }
 }
 
 /// Which waveform widget a live drag preview originated on (data-model.md
@@ -215,8 +242,22 @@ pub struct DragPreview {
     pub origin: DragOrigin,
 }
 
+/// A live (uncommitted) marker drag (006, data-model.md §3, research
+/// R14): `live` accumulates the pointer's relative delta in detail-space
+/// frames every frame, never the pointer's absolute position mapped
+/// through a recentring window (design note 11). `origin_position` and
+/// `origin_detail` are restored verbatim on `Esc`; `live` is committed
+/// via `move_marker` on release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MarkerDrag {
+    pub marker: MarkerId,
+    pub origin_position: u64,
+    pub live: u64,
+    pub origin_detail: DetailWindow,
+}
+
 /// Session waveform state, owned by `App` for as long as it runs
-/// (data-model.md §5.2).
+/// (data-model.md §5.2, extended by 006 data-model.md §3).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WaveformState {
     /// `None` until the detail widget exists (US2); the overview alone
@@ -228,6 +269,27 @@ pub struct WaveformState {
     /// showing stale bounds. Also used this phase to know when a drag
     /// preview must be dropped because its track went away.
     pub last_track: Option<TrackId>,
+    /// A marker glyph/row drag in progress (006, contracts/ui-markers.md
+    /// §3), distinct from `drag` (005's waveform-rect seek preview).
+    pub marker_drag: Option<MarkerDrag>,
+    /// Mirror of egui's own focus, for the marker keyboard table (arrow
+    /// nudge, Delete, F2, C, Esc — contracts/ui-markers.md §3).
+    pub focused_marker: Option<MarkerId>,
+    /// An in-progress inline rename's draft text, keyed by the marker
+    /// being renamed (contracts/ui-markers.md §4).
+    pub rename: Option<(MarkerId, String)>,
+    /// "Clear N markers?" two-step confirmation state (contracts/
+    /// ui-markers.md §4).
+    pub clear_confirm: bool,
+    /// This view's own text-field widget ids, rebuilt every frame — the
+    /// view-level shortcut guard checks egui's focus against this list
+    /// rather than `wants_keyboard_input` (research R17).
+    pub text_field_ids: Vec<egui::Id>,
+    /// The current inline refusal reason for a view-level marker/loop
+    /// shortcut (contracts/ui-markers.md §2, §4: shown as `markers-status`
+    /// under the panel header), a Fluent key or `None`. Cleared on the
+    /// next successful `I`/`O`/`L`/`M`/`1-8`/`Shift+1-8` action.
+    pub marker_status: Option<&'static str>,
 }
 
 impl WaveformState {
@@ -389,5 +451,50 @@ mod tests {
         let reset = suspended.reset(len, RATE);
         assert!(reset.follow, "reset must re-enable follow");
         assert_eq!(reset.width_frames, seconds(30));
+    }
+
+    // T081 (006 US3, research R14, contracts/ui-markers.md §5): the
+    // marker-drag zoom-assist converges toward its target width within
+    // ~10 frames (SC-003's <= 5ms landing margin) and stays centred on
+    // `live`, with `follow` left suspended throughout.
+    #[test]
+    fn detail_window_zoom_assist_converges_to_target() {
+        let len = seconds(300);
+        let live = seconds(100);
+        let mut window = DetailWindow::initial(live, len, RATE);
+        let target_width = 200 * u64::from(RATE) / 1000; // 200ms, the floor
+        assert_ne!(
+            window.width_frames, target_width,
+            "sanity: starts far from the target"
+        );
+
+        for _ in 0..10 {
+            window = window.zoom_assist(live, target_width, len, RATE);
+            assert!(!window.follow, "zoom_assist always suspends follow");
+            assert!(
+                window.contains(live),
+                "must stay centred on the live drag position every step"
+            );
+        }
+        assert_eq!(
+            window.width_frames, target_width,
+            "must converge to the target width within 10 steps"
+        );
+    }
+
+    /// `zoom_assist` never overshoots past `[200ms, len]`, same floor/
+    /// ceiling as every other zoom.
+    #[test]
+    fn detail_window_zoom_assist_respects_floor_and_ceiling() {
+        let len = seconds(300);
+        let live = seconds(50);
+        let window = DetailWindow::initial(live, len, RATE);
+
+        let clamped_low = window.zoom_assist(live, 0, len, RATE);
+        let min_width = (200 * u64::from(RATE)) / 1000;
+        assert!(clamped_low.width_frames >= min_width);
+
+        let clamped_high = window.zoom_assist(live, len * 10, len, RATE);
+        assert!(clamped_high.width_frames <= len);
     }
 }
