@@ -13,9 +13,11 @@ use std::time::Duration;
 use egui::{Button, Id, Key, Modifiers, Ui, Vec2};
 use modplayer_audio_io::OutputBackend;
 use modplayer_audio_source::{SourceHealth, SourceHost};
+use modplayer_core::markers::CueSlot;
 use modplayer_core::{ActiveState, AnalysisStatus, Intent, PlaybackController, tr, tr_args};
 
 use crate::artwork::{ArtworkCache, ArtworkState};
+use crate::markers;
 use crate::queue_view;
 use crate::waveform::{
     self, DetailWindow, DragOrigin, DragPreview, WaveformEvent, WaveformPaint, WaveformState,
@@ -54,6 +56,11 @@ pub fn show<B: OutputBackend, H: SourceHost>(
         waveform.drag = None;
         waveform.last_track = current_id;
     }
+
+    // Rebuilt every frame by the Markers panel's own fields (repeat/
+    // crossfade `DragValue`s) below — the view-level marker/loop shortcut
+    // guard (research R17) reads it after this frame's panel has run.
+    waveform.text_field_ids.clear();
 
     show_heading(ui, controller, artwork);
     show_status_line(ui, controller);
@@ -119,6 +126,9 @@ pub fn show<B: OutputBackend, H: SourceHost>(
 
     if controller.current_track().is_some() {
         show_waveform(ui, controller, waveform, available, track_changed);
+        markers::panel(ui, controller, waveform);
+        markers::handle_focused_marker_keys(ui, controller, waveform);
+        handle_marker_shortcuts(ui, controller, waveform);
     }
 
     if let Some(new_volume) = volume::master_volume(ui, controller.master_volume()) {
@@ -261,6 +271,109 @@ fn show_transfer_banner<B: OutputBackend, H: SourceHost>(
     });
 }
 
+/// The physical digit keys `1`..`8` in order (006 US4, contracts/
+/// ui-markers.md §2) — `Key::Num9`/`Num0` are not cue slots.
+const CUE_DIGIT_KEYS: [Key; 8] = [
+    Key::Num1,
+    Key::Num2,
+    Key::Num3,
+    Key::Num4,
+    Key::Num5,
+    Key::Num6,
+    Key::Num7,
+    Key::Num8,
+];
+
+/// The view-level marker/loop/cue shortcuts (006, contracts/ui-markers.md
+/// §2, research R17): `I`/`O` set the current region's `A`/`B` at the
+/// playhead, `L` toggles the current region's armed state, `M` adds a
+/// point marker at the playhead (US3, FR-001), `1`-`8` jump to a cue
+/// (US4, FR-014; silent no-op on an empty slot) and `Shift+1`-`Shift+8`
+/// set one at the playhead (US4, FR-013). Consumed only when none of this
+/// view's own text fields (the Markers panel's repeat/crossfade
+/// `DragValue`s, tracked in `waveform.text_field_ids`) has egui focus, so
+/// typing `50` into the crossfade field doesn't also arm the loop. A
+/// refusal sets `waveform.marker_status` to the matching Fluent key
+/// (shown under the panel header); a success clears it — a cue jump
+/// (whether it moved playback or was a no-op on an empty slot) is never a
+/// refusal and always clears any stale status.
+fn handle_marker_shortcuts<B: OutputBackend, H: SourceHost>(
+    ui: &mut Ui,
+    controller: &mut PlaybackController<B, H>,
+    waveform: &mut WaveformState,
+) {
+    let focused = ui.memory(|memory| memory.focused());
+    if focused.is_some_and(|id| waveform.text_field_ids.contains(&id)) {
+        return;
+    }
+
+    enum Action {
+        SetA,
+        SetB,
+        ToggleLoop,
+        AddPoint,
+        SetCue(CueSlot),
+        JumpCue(CueSlot),
+    }
+
+    let action = ui.input_mut(|input| {
+        if input.consume_key(Modifiers::NONE, Key::I) {
+            return Some(Action::SetA);
+        }
+        if input.consume_key(Modifiers::NONE, Key::O) {
+            return Some(Action::SetB);
+        }
+        if input.consume_key(Modifiers::NONE, Key::L) {
+            return Some(Action::ToggleLoop);
+        }
+        if input.consume_key(Modifiers::NONE, Key::M) {
+            return Some(Action::AddPoint);
+        }
+        for (i, key) in CUE_DIGIT_KEYS.into_iter().enumerate() {
+            let slot = CueSlot::new((i + 1) as u8).unwrap_or_else(|| unreachable!());
+            if input.consume_key(Modifiers::SHIFT, key) {
+                return Some(Action::SetCue(slot));
+            }
+            if input.consume_key(Modifiers::NONE, key) {
+                return Some(Action::JumpCue(slot));
+            }
+        }
+        None
+    });
+
+    match action {
+        Some(Action::SetA) => {
+            waveform.marker_status = controller.set_loop_a().err().map(markers::refusal_key);
+        }
+        Some(Action::SetB) => {
+            waveform.marker_status = controller.set_loop_b().err().map(markers::refusal_key);
+        }
+        Some(Action::ToggleLoop) => {
+            waveform.marker_status = controller
+                .toggle_current_loop()
+                .err()
+                .map(markers::refusal_key);
+        }
+        Some(Action::AddPoint) => {
+            waveform.marker_status = controller
+                .add_point_marker()
+                .err()
+                .map(markers::refusal_key);
+        }
+        Some(Action::SetCue(slot)) => {
+            waveform.marker_status = controller.set_cue(slot).err().map(markers::refusal_key);
+        }
+        Some(Action::JumpCue(slot)) => {
+            // Silent no-op on an empty slot (FR-014) — never a refusal,
+            // and a jump (successful or not) always clears any stale
+            // status from an earlier refused action.
+            let _ = controller.jump_to_cue(slot);
+            waveform.marker_status = None;
+        }
+        None => {}
+    }
+}
+
 /// Elapsed label, the waveform overview (with the detail window
 /// highlighted), the remaining label, and the waveform detail
 /// (contracts/ui-waveform.md §1) — only called with a current track
@@ -331,6 +444,20 @@ fn show_waveform<B: OutputBackend, H: SourceHost>(
     ));
 
     let previewing = waveform.drag.is_some();
+    let markers_snapshot = controller.markers().cloned();
+    let loop_state = controller.shared().loop_state();
+    let focused_marker = waveform.focused_marker;
+    markers::lane(
+        ui,
+        "overview",
+        0..len_frames,
+        sample_rate,
+        len_frames,
+        markers_snapshot.as_ref(),
+        controller,
+        waveform,
+        &mut detail,
+    );
     let overview_paint = WaveformPaint {
         status,
         peaks,
@@ -346,6 +473,15 @@ fn show_waveform<B: OutputBackend, H: SourceHost>(
         previewing,
         available,
         &overview_paint,
+        &mut |painter, space| {
+            markers::paint_overlay(
+                painter,
+                space,
+                markers_snapshot.as_ref(),
+                loop_state,
+                focused_marker,
+            )
+        },
     );
     if let Some(event) = overview_event {
         apply_waveform_event(
@@ -366,6 +502,19 @@ fn show_waveform<B: OutputBackend, H: SourceHost>(
         &[("time", format_mmss_frames(remaining_frames, sample_rate))],
     ));
 
+    let detail_window = detail.start_frame..(detail.start_frame + detail.width_frames);
+    markers::lane(
+        ui,
+        "detail",
+        detail_window.clone(),
+        sample_rate,
+        len_frames,
+        markers_snapshot.as_ref(),
+        controller,
+        waveform,
+        &mut detail,
+    );
+    let detail_window = detail.start_frame..(detail.start_frame + detail.width_frames);
     let detail_paint = WaveformPaint {
         status,
         peaks,
@@ -375,12 +524,21 @@ fn show_waveform<B: OutputBackend, H: SourceHost>(
     };
     let (_detail_response, detail_event) = waveform::detail(
         ui,
-        detail.start_frame..(detail.start_frame + detail.width_frames),
+        detail_window,
         sample_rate,
         playhead_frame,
         previewing,
         available,
         &detail_paint,
+        &mut |painter, space| {
+            markers::paint_overlay(
+                painter,
+                space,
+                markers_snapshot.as_ref(),
+                loop_state,
+                focused_marker,
+            )
+        },
     );
     if let Some(event) = detail_event {
         apply_waveform_event(

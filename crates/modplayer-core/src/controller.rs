@@ -40,9 +40,14 @@ use crate::library::{
     Connectivity, LibraryIndex, LibraryPaths, LibraryStatus, LoadIndexOutcome, LoadPlayLogOutcome,
     PersistJob, PlayLog, SyncScheduler,
 };
+use crate::markers::{
+    self, CueSlot, MarkerError, MarkerId, MarkerKind, PaletteIndex, RegionId, RepeatCount,
+    TrackMarkers,
+};
 use crate::notifications::{
     KEY_DEVICE_APPEARED, KEY_DEVICE_AVAILABLE_AGAIN, KEY_DEVICE_LOST, KEY_DEVICE_MISSING_AT_LAUNCH,
-    KEY_NO_OUTPUT_DEVICES, KEY_QUEUE_ITEM_SKIPPED_UNAVAILABLE, NotificationCenter, Severity,
+    KEY_NO_OUTPUT_DEVICES, KEY_QUEUE_ITEM_SKIPPED_UNAVAILABLE, KEY_TRACK_STATE_NEWER_VERSION,
+    KEY_TRACK_STATE_SAVE_FAILED, KEY_TRACK_STATE_UNREADABLE, NotificationCenter, Severity,
 };
 use crate::queue::{
     AdvanceReason, Origin, PlaybackChange, Queue, QueueChange, QueueItem, QueueItemId, QueueMode,
@@ -85,6 +90,17 @@ const TRANSFER_TIMEOUT: Duration = Duration::from_secs(5);
 /// and-queue.md §2 rule T20, US4, design note 6).
 const RECONNECT_WARNING_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// 006, research R5: the coalesced `SourceCommand::Seek` that follows a
+/// loop wrap is throttled to at most one per this interval after the
+/// first (sent immediately).
+const LOOP_RESEEK_INTERVAL: Duration = Duration::from_millis(250);
+
+/// 006, research R11: a dirty marker/loop-region state is written at most
+/// once per this window (checked in `tick()`); `flush_track_state()`
+/// forces it outside the window (track change, sign-out, shutdown,
+/// `clear_all_markers`).
+const TRACK_STATE_DEBOUNCE: Duration = Duration::from_millis(250);
+
 /// The active output device, if any (data-model.md §5.2).
 pub struct ActiveDevice {
     pub id: DeviceId,
@@ -96,6 +112,23 @@ pub struct ActiveDevice {
     /// bookkeeping only — reset by rebuilding a fresh `ActiveDevice` on the
     /// next device change.
     reappearance_notified: bool,
+}
+
+/// `RtShared::loop_state`, projected for the UI (006, contracts/marker-
+/// service.md §1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopState {
+    Disarmed,
+    ArmedInactive,
+    ArmedActive,
+}
+
+/// `PlaybackController::loop_status()`'s snapshot of the armed region's
+/// real-time state (006, contracts/marker-service.md §1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoopStatus {
+    pub state: LoopState,
+    pub wraps: u32,
 }
 
 /// One row of `queue_view()`'s projection (contracts/transport-and-
@@ -195,6 +228,10 @@ pub struct PlaybackController<B: OutputBackend, H: SourceHost> {
     /// generated once and persisted on the very first launch that needs
     /// one.
     device_id: String,
+    /// `[markers] nudge_step_ms` shadow state (006, FR-027): how far a
+    /// focused marker's arrow-key nudge moves it, in milliseconds; clamped
+    /// `1..=1000`.
+    nudge_step_ms: u16,
     /// Whether `Initialize` has been sent and not yet followed by a
     /// `Deregister` (`set_playback_permitted`'s de-dup guard).
     registered_or_pending: bool,
@@ -294,6 +331,46 @@ pub struct PlaybackController<B: OutputBackend, H: SourceHost> {
     /// reattaches on an actual change of `queue.current()` (transport-
     /// delta.md §2 "current track changes (any path)").
     last_analysis_track: Option<TrackId>,
+
+    /// The current track's marker/loop-region shadow state (006,
+    /// contracts/marker-service.md §1), `None` until first touched.
+    /// Recreated (in-memory only) whenever it doesn't match the current
+    /// track's id — this phase (US1) has no persistence yet; US2's
+    /// `sync_marker_attachment` replaces this lazy-create with a real
+    /// load/save cycle.
+    markers: Option<TrackMarkers>,
+    /// Last time the controller sent a coalesced `SourceCommand::Seek`
+    /// to follow a loop wrap (research R5); `None` until the first one.
+    last_loop_reseek_at: Option<Instant>,
+
+    /// Resolved track-state directory (006, contracts/marker-service.md
+    /// §3, research R10), `None` when the platform data-local dir isn't
+    /// determinable (in-memory markers only, like `AnalysisPaths`).
+    track_state_paths: Option<markers::store::TrackStatePaths>,
+    /// The background writer's job channel, `None` when
+    /// `track_state_paths` is `None`.
+    marker_persist_tx: Option<Sender<markers::store::PersistJob>>,
+    /// Joined on `shutdown`, after the writer's queued saves complete.
+    marker_persist_writer: Option<std::thread::JoinHandle<()>>,
+    /// The background writer's failure replies, drained by `tick()`.
+    marker_store_rx: Option<Receiver<markers::store::StoreEvent>>,
+    /// The track id `markers` was last synced against (contracts/
+    /// marker-service.md §4) — unlike `last_analysis_track`, also
+    /// re-triggers on a same-id `TrackStarted` (FR-016 "same-session
+    /// reload").
+    marker_state_track: Option<TrackId>,
+    /// Whether the next `Input::TrackStarted` is the *initial* start of the
+    /// attachment `sync_marker_attachment` just made (set when it loaded
+    /// because the id changed, with no `TrackStarted` of its own). That one
+    /// start must not re-load the state a second time — without this the
+    /// single act of starting a track loads twice and raises any load
+    /// warning (`track-state-unreadable`) twice. A `TrackStarted` arriving
+    /// with this clear is a genuine same-id restart (FR-016) and does
+    /// reload.
+    marker_state_awaiting_start: bool,
+    /// Last time the debounced marker-state flush actually wrote
+    /// (research R11, `TRACK_STATE_DEBOUNCE`); `None` until the first one.
+    last_marker_flush_at: Option<Instant>,
 }
 
 /// [`PlaybackController::library_track_list`]'s reply state (contracts/
@@ -342,7 +419,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         settings: &AudioSettings,
         notifications: NotificationCenter,
     ) -> Self {
-        Self {
+        let mut controller = Self {
             backend,
             source_host,
             queue: Queue::new(),
@@ -361,6 +438,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
                 .connect_device_id
                 .clone()
                 .unwrap_or_else(generate_connect_device_id),
+            nudge_step_ms: settings.nudge_step_ms,
             registered_or_pending: false,
             // Safe-volume startup clamp (US2 T061, FR-011): the effective
             // volume at launch is `SafeVolume::apply(stored)`; the stored
@@ -405,7 +483,29 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
             was_online_for_sync: false,
             analysis: AnalysisService::new(AnalysisPaths::resolve()),
             last_analysis_track: None,
+            markers: None,
+            last_loop_reseek_at: None,
+            track_state_paths: None,
+            marker_persist_tx: None,
+            marker_persist_writer: None,
+            marker_store_rx: None,
+            marker_state_track: None,
+            marker_state_awaiting_start: false,
+            last_marker_flush_at: None,
+        };
+        // 006, contracts/marker-service.md §4: resolved unconditionally at
+        // construction, like `AnalysisPaths::resolve()` just above —
+        // `None` (no determinable data dir) degrades to in-memory-only
+        // markers, never a launch failure.
+        if let Some(paths) = markers::store::TrackStatePaths::resolve() {
+            let (store_tx, store_rx) = std::sync::mpsc::channel();
+            let (persist_tx, writer) = markers::store::spawn_writer(store_tx);
+            controller.track_state_paths = Some(paths);
+            controller.marker_persist_tx = Some(persist_tx);
+            controller.marker_persist_writer = Some(writer);
+            controller.marker_store_rx = Some(store_rx);
         }
+        controller
     }
 
     /// Current transport-reducer shadow state (data-model.md §3.1).
@@ -668,6 +768,22 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         Ok(())
     }
 
+    /// `[markers] nudge_step_ms` (006, FR-027, contracts/marker-service.md
+    /// §1): how far a focused marker's arrow-key nudge moves it, in
+    /// milliseconds (`Shift` multiplies by 10).
+    pub fn nudge_step_ms(&self) -> u16 {
+        self.nudge_step_ms
+    }
+
+    /// Clamp `ms` into `1..=1000` and persist it (data-model.md §5
+    /// "clamped silently" — unlike `set_device_name`, there is no rejected
+    /// shape here, so this never fails).
+    pub fn set_nudge_step_ms(&mut self, ms: u16) {
+        let ms = ms.clamp(1, 1_000);
+        self.nudge_step_ms = ms;
+        self.persist_settings(|settings| settings.nudge_step_ms = ms);
+    }
+
     /// Called by `App` from 002's session state (contracts/transport-and-
     /// queue.md §1): `true` sends `Initialize` once; `false` sends
     /// `Deregister` once and disables transport with `reason` inline.
@@ -709,6 +825,11 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         // delta.md §2).
         self.analysis.detach();
         self.last_analysis_track = None;
+        // 006, contracts/marker-service.md §4: flush + drop + disarm,
+        // same ordering as the analysis detach just above — markers are
+        // not account data, so unlike `library`/`play_log` the file
+        // itself is kept (data-model.md §4 rule 4).
+        self.clear_marker_state_for_sign_out();
         if self.registered_or_pending {
             self.registered_or_pending = false;
             self.source_host.command(SourceCommand::Deregister);
@@ -753,6 +874,15 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         self.source_host.command(SourceCommand::Shutdown);
         // Contracts/transport-delta.md §2: after the source `Shutdown`.
         self.analysis.shutdown();
+        // 006, contracts/marker-service.md §4: flush whatever is still
+        // inside the debounce window, then join the writer, after
+        // `analysis.shutdown()` — mirrors the persistence flush/join just
+        // below for `library`/`play_log`.
+        self.flush_track_state();
+        drop(self.marker_persist_tx.take());
+        if let Some(writer) = self.marker_persist_writer.take() {
+            let _ = writer.join();
+        }
         self.stream = None;
         // Anything still inside the persist debounce window (the track that
         // just started, the page that just merged) is written now, and the
@@ -1240,6 +1370,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         self.flush_pending_commands();
         self.drain_backend_events();
         self.drain_source_events();
+        self.drain_engine_events();
         // A `sync_program` send debounced on a previous call becomes
         // sendable once enough real time has passed, even with no further
         // mutation (contracts/transport-and-queue.md §3).
@@ -1250,6 +1381,8 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         self.tick_search();
         self.tick_library();
         self.flush_persistence();
+        self.flush_track_state_if_due();
+        self.drain_marker_store_events();
         self.analysis.drain();
     }
 
@@ -1257,6 +1390,372 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
     /// analysis-service.md §1, contracts/transport-delta.md §2).
     pub fn analysis(&self) -> Option<&Arc<AnalysisSnapshot>> {
         self.analysis.latest()
+    }
+
+    /// The current track's marker/loop-region model (read-only
+    /// projection for the UI), if any (006, contracts/marker-service.md
+    /// §1).
+    pub fn markers(&self) -> Option<&TrackMarkers> {
+        self.markers.as_ref()
+    }
+
+    /// The resolved track-state directory, if any (tests/diagnostics —
+    /// contracts/marker-service.md §1).
+    pub fn track_state_dir(&self) -> Option<&std::path::Path> {
+        self.track_state_paths.as_ref().map(|p| p.dir())
+    }
+
+    /// Snapshot of the armed region's real-time state, read from
+    /// `RtShared` (006, contracts/marker-service.md §1).
+    pub fn loop_status(&self) -> LoopStatus {
+        LoopStatus {
+            state: match self.shared.loop_state() {
+                2 => LoopState::ArmedActive,
+                1 => LoopState::ArmedInactive,
+                _ => LoopState::Disarmed,
+            },
+            wraps: self.shared.loop_wraps(),
+        }
+    }
+
+    /// The current track's marker model, creating a fresh (in-memory)
+    /// one on first use or whenever it doesn't already match the current
+    /// track (006, contracts/marker-service.md §1). `NoTrack` when
+    /// nothing is queued. Persistence (US2's `sync_marker_attachment`)
+    /// replaces this lazy-create with a real load/save cycle; this phase
+    /// (US1) only needs a model to mutate for the current track.
+    fn current_markers_mut(&mut self) -> Result<&mut TrackMarkers, MarkerError> {
+        let item = self.current_track().ok_or(MarkerError::NoTrack)?;
+        let id = item.track.id.clone();
+        let len_frames = self.ms_to_frames(item.track.duration_ms);
+        let rate = self.source_sample_rate.max(1);
+        let needs_new = !matches!(&self.markers, Some(m) if m.track() == &id);
+        if needs_new {
+            self.markers = Some(TrackMarkers::new(id, rate, len_frames));
+        }
+        self.markers.as_mut().ok_or(MarkerError::NoTrack)
+    }
+
+    /// `I`/FR-006: move (or create) the current region's `A` endpoint to
+    /// the playhead; re-commits the engine (without resetting wraps) if
+    /// the region is armed (I3 swap handled inside `TrackMarkers`).
+    pub fn set_loop_a(&mut self) -> Result<(), MarkerError> {
+        let pos = self.shared.position_frames();
+        let region = self.current_markers_mut()?.set_loop_a(pos)?.0;
+        self.recommit_if_armed(region);
+        Ok(())
+    }
+
+    /// As `set_loop_a`, for the `B` endpoint (`O`).
+    pub fn set_loop_b(&mut self) -> Result<(), MarkerError> {
+        let pos = self.shared.position_frames();
+        let region = self.current_markers_mut()?.set_loop_b(pos)?.0;
+        self.recommit_if_armed(region);
+        Ok(())
+    }
+
+    /// A new, empty, incomplete region becomes current (contracts/
+    /// marker-service.md §1: "list action").
+    pub fn new_loop_region(&mut self) -> Result<RegionId, MarkerError> {
+        Ok(self.current_markers_mut()?.new_loop_region())
+    }
+
+    /// Arm `region`: I6/I7, resets wraps, derives and pushes the
+    /// engine's four setters + `LoopCommit { reset_wraps: true }`
+    /// (contracts/marker-service.md §2), and requests the source cache
+    /// the seam's incoming edge ahead of the playhead (FR-008).
+    pub fn arm_loop(&mut self, region: RegionId) -> Result<(), MarkerError> {
+        let rate = self.source_sample_rate.max(1);
+        let (a, b, crossfade_ms, repeat, x) = {
+            let markers = self.current_markers_mut()?;
+            markers.arm(region)?;
+            let r = markers.region(region).ok_or(MarkerError::NotFound)?;
+            let (a, b) = r.span(markers).ok_or(MarkerError::RegionIncomplete)?;
+            let x = r.effective_crossfade_frames(markers, rate);
+            (a, b, r.crossfade_ms, r.repeat, x)
+        };
+        self.push_loop_engine_commands(a, b, crossfade_ms, repeat, true);
+        self.source_host.command(SourceCommand::PrefetchHint {
+            frame: a.saturating_sub(x),
+        });
+        Ok(())
+    }
+
+    /// `L` on an armed region (or the header's arm toggle): pushes
+    /// `LoopDisarm` (contracts/marker-service.md §2). A seam already in
+    /// flight on the engine still finishes for audio continuity.
+    pub fn disarm_loop(&mut self) -> Result<(), MarkerError> {
+        self.current_markers_mut()?.disarm();
+        self.push_command_retrying(Command::LoopDisarm);
+        Ok(())
+    }
+
+    /// `L`: arm `current_region` if it is disarmed, else disarm it
+    /// (FR-007/FR-008).
+    pub fn toggle_current_loop(&mut self) -> Result<(), MarkerError> {
+        let region = self
+            .current_markers_mut()?
+            .current_region()
+            .ok_or(MarkerError::RegionIncomplete)?;
+        let armed_now = self
+            .markers
+            .as_ref()
+            .and_then(|m| m.region(region))
+            .map(|r| r.armed)
+            .unwrap_or(false);
+        if armed_now {
+            self.disarm_loop()
+        } else {
+            self.arm_loop(region)
+        }
+    }
+
+    /// Set `region`'s repeat count; an armed region re-commits without
+    /// resetting wraps (contracts/marker-service.md §1).
+    pub fn set_loop_repeat(
+        &mut self,
+        region: RegionId,
+        repeat: RepeatCount,
+    ) -> Result<(), MarkerError> {
+        self.current_markers_mut()?.set_repeat(region, repeat)?;
+        self.recommit_if_armed(region);
+        Ok(())
+    }
+
+    /// Set `region`'s crossfade in milliseconds (`0..=50`); an armed
+    /// region re-commits without resetting wraps.
+    pub fn set_loop_crossfade_ms(&mut self, region: RegionId, ms: u8) -> Result<(), MarkerError> {
+        self.current_markers_mut()?.set_crossfade_ms(region, ms)?;
+        self.recommit_if_armed(region);
+        Ok(())
+    }
+
+    // -- Non-loop marker mutations (006 US3, contracts/marker-service.md §1) --
+
+    /// `M`: a point marker at the playhead (FR-001).
+    pub fn add_point_marker(&mut self) -> Result<MarkerId, MarkerError> {
+        let pos = self.shared.position_frames();
+        self.current_markers_mut()?.add_point(pos)
+    }
+
+    /// `F2`/`Enter` commit (contracts/ui-markers.md §3): trims/truncates to
+    /// 64 chars; empty on a `Point` keeps the old name.
+    pub fn rename_marker(&mut self, id: MarkerId, name: &str) -> Result<(), MarkerError> {
+        self.current_markers_mut()?.rename(id, name)
+    }
+
+    /// The colour-swatch popup's direct pick.
+    pub fn recolor_marker(&mut self, id: MarkerId, color: PaletteIndex) -> Result<(), MarkerError> {
+        self.current_markers_mut()?.recolor(id, color)
+    }
+
+    /// `C`: the next colour in the 8-entry palette, wrapping.
+    pub fn cycle_marker_color(&mut self, id: MarkerId) -> Result<(), MarkerError> {
+        self.current_markers_mut()?.cycle_color(id)
+    }
+
+    /// The region `id` belongs to, if it is a `RegionStart`/`RegionEnd`
+    /// marker (for re-committing an armed region after `move_marker`/
+    /// `delete_marker` — the region id itself is unaffected by I3's
+    /// endpoint-kind swap, so this is safe to read *before* the mutation).
+    fn marker_region(&self, id: MarkerId) -> Option<RegionId> {
+        match self.markers.as_ref()?.marker(id)?.kind {
+            MarkerKind::RegionStart { region } | MarkerKind::RegionEnd { region } => Some(region),
+            MarkerKind::Point | MarkerKind::Cue { .. } => None,
+        }
+    }
+
+    /// Drag/nudge commit (FR-019 clamp inside the model); re-commits an
+    /// armed region without resetting wraps if `id` is one of its
+    /// endpoints.
+    pub fn move_marker(&mut self, id: MarkerId, frame: u64) -> Result<(), MarkerError> {
+        let region = self.marker_region(id);
+        self.current_markers_mut()?.move_marker(id, frame)?;
+        if let Some(region) = region {
+            self.recommit_if_armed(region);
+        }
+        Ok(())
+    }
+
+    /// `nudge_step_ms()` converted to source-rate frames (0 before any
+    /// stream has ever opened, matching `ms_to_frames`).
+    fn nudge_step_frames(&self) -> u64 {
+        self.ms_to_frames(u32::from(self.nudge_step_ms))
+    }
+
+    /// `←`/`→` (`multiplier = 1`) / `Shift+←`/`Shift+→` (`multiplier =
+    /// 10`, contracts/ui-markers.md §3): `frame ± nudge_step_frames ×
+    /// multiplier`, saturating at `0`/`len_frames` (the model's own I4
+    /// clamp).
+    pub fn nudge_marker(
+        &mut self,
+        id: MarkerId,
+        direction: i8,
+        multiplier: u8,
+    ) -> Result<(), MarkerError> {
+        let step = self
+            .nudge_step_frames()
+            .saturating_mul(u64::from(multiplier));
+        let current = self
+            .markers
+            .as_ref()
+            .and_then(|markers| markers.position_of(id))
+            .ok_or(MarkerError::NotFound)?;
+        let target = if direction < 0 {
+            current.saturating_sub(step)
+        } else {
+            current.saturating_add(step)
+        };
+        self.move_marker(id, target)
+    }
+
+    /// `Delete`/`Backspace` (I9): disarms the engine (not just the model)
+    /// if `id` was an endpoint of the currently armed region.
+    pub fn delete_marker(&mut self, id: MarkerId) -> Result<(), MarkerError> {
+        let was_armed_endpoint = self.markers.as_ref().is_some_and(|markers| {
+            markers
+                .armed_region()
+                .is_some_and(|r| r.a == Some(id) || r.b == Some(id))
+        });
+        self.current_markers_mut()?.delete(id)?;
+        if was_armed_endpoint {
+            self.push_command_retrying(Command::LoopDisarm);
+        }
+        Ok(())
+    }
+
+    /// `I8` only (no engine effect): a click or `Tab` onto a glyph/row.
+    pub fn select_marker(&mut self, id: MarkerId) -> Result<(), MarkerError> {
+        self.current_markers_mut()?.select_marker(id)
+    }
+
+    // -- Cue points (006 US4, contracts/marker-service.md §1) --------------
+
+    /// `Shift+1..8`: set (or move) `slot`'s cue to the playhead (FR-013,
+    /// I5/I1).
+    pub fn set_cue(&mut self, slot: CueSlot) -> Result<MarkerId, MarkerError> {
+        let pos = self.shared.position_frames();
+        self.current_markers_mut()?.set_cue(slot, pos)
+    }
+
+    /// `1..8`: jump to `slot`'s cue through 005's existing sample-accurate
+    /// seek path (`seek_frames`), never altering play/pause state
+    /// (FR-014 — the reducer's existing `Input::Seek` behaviour already
+    /// leaves transport state untouched). `false` (a silent no-op) on an
+    /// empty slot.
+    pub fn jump_to_cue(&mut self, slot: CueSlot) -> bool {
+        let Some(pos) = self
+            .markers
+            .as_ref()
+            .and_then(|m| m.cue(slot))
+            .map(|c| c.position)
+        else {
+            return false;
+        };
+        self.seek_frames(pos);
+        true
+    }
+
+    /// If `region` is currently armed, re-derive and push the engine's
+    /// setters + `LoopCommit { reset_wraps: false }` — an edit-while-
+    /// armed (contracts/marker-service.md §1-§2). A no-op otherwise
+    /// (including when there is no current track/region at all).
+    fn recommit_if_armed(&mut self, region: RegionId) {
+        let data = self.markers.as_ref().and_then(|markers| {
+            let r = markers.region(region)?;
+            if !r.armed {
+                return None;
+            }
+            let (a, b) = r.span(markers)?;
+            Some((a, b, r.crossfade_ms, r.repeat))
+        });
+        if let Some((a, b, crossfade_ms, repeat)) = data {
+            self.push_loop_engine_commands(a, b, crossfade_ms, repeat, false);
+        }
+    }
+
+    /// Derive and push the engine's loop `Command`s for `[a, b)`
+    /// (contracts/marker-service.md §2): setters first, `LoopCommit`
+    /// last, always through `push_command_retrying` so a momentarily
+    /// full queue preserves order.
+    fn push_loop_engine_commands(
+        &mut self,
+        a: u64,
+        b: u64,
+        crossfade_ms: u8,
+        repeat: RepeatCount,
+        reset_wraps: bool,
+    ) {
+        let rate = self.source_sample_rate.max(1);
+        let crossfade_frames = configured_crossfade_frames(crossfade_ms, rate);
+        let repeat_u32 = match repeat {
+            RepeatCount::Infinite => 0,
+            RepeatCount::Times(n) => u32::from(n),
+        };
+        self.push_command_retrying(Command::LoopSetA(a));
+        self.push_command_retrying(Command::LoopSetB(b));
+        self.push_command_retrying(Command::LoopSetSeam {
+            crossfade_frames,
+            repeat: repeat_u32,
+        });
+        self.push_command_retrying(Command::LoopCommit { reset_wraps });
+    }
+
+    /// The armed region's `A` position in frames, if any.
+    fn armed_region_a_frame(&self) -> Option<u64> {
+        let markers = self.markers.as_ref()?;
+        let region = markers.armed_region()?;
+        region.span(markers).map(|(a, _b)| a)
+    }
+
+    /// Drain the running `Processor`'s events (006, contracts/marker-
+    /// service.md §4): >= 1 `LoopWrapped` this tick sends one coalesced,
+    /// throttled `SourceCommand::Seek` so the streaming `Player` follows
+    /// the loop (research R5); `LoopReleased` disarms the *model* (the RT
+    /// already stopped looping on its own). `ToneFinished`/`TrackLooped`/
+    /// `CommandDropped` are unchanged (ignored).
+    fn drain_engine_events(&mut self) {
+        let Some(rx) = self.event_rx.as_mut() else {
+            return;
+        };
+        let mut wrapped = false;
+        let mut released = false;
+        while let Ok(event) = rx.pop() {
+            match event {
+                Event::LoopWrapped { .. } => wrapped = true,
+                Event::LoopReleased { .. } => released = true,
+                Event::ToneFinished | Event::TrackLooped { .. } | Event::CommandDropped { .. } => {}
+            }
+        }
+        if wrapped {
+            self.reseek_for_loop_wrap();
+        }
+        if released && let Some(markers) = self.markers.as_mut() {
+            markers.disarm();
+        }
+    }
+
+    /// One coalesced `SourceCommand::Seek(A)` per tick with a wrap,
+    /// throttled to <= 1 per `LOOP_RESEEK_INTERVAL` after the first
+    /// (research R5).
+    fn reseek_for_loop_wrap(&mut self) {
+        let Some(a_frame) = self.armed_region_a_frame() else {
+            return;
+        };
+        let now = (self.now)();
+        let due = self
+            .last_loop_reseek_at
+            .is_none_or(|last| now.saturating_duration_since(last) >= LOOP_RESEEK_INTERVAL);
+        if !due {
+            return;
+        }
+        self.last_loop_reseek_at = Some(now);
+        let position_ms = if self.source_sample_rate == 0 {
+            0
+        } else {
+            u32::try_from((a_frame * 1000) / u64::from(self.source_sample_rate)).unwrap_or(u32::MAX)
+        };
+        self.source_host.command(SourceCommand::Seek(position_ms));
     }
 
     /// Detach/reattach the Analysis Service whenever `queue.current()`
@@ -1278,6 +1777,157 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
                 .attach(item.track.id.clone(), self.source_sample_rate, len_frames);
         }
         self.last_analysis_track = current_id;
+    }
+
+    /// Flush/disarm/(re)load the marker/loop-region model whenever
+    /// `queue.current()`'s id changed since the last sync, **or** the
+    /// same id was just re-started (`restarted`, from `Input::
+    /// TrackStarted` — FR-016's "same-session reload"; unlike
+    /// `sync_analysis_attachment`'s change-only check, contracts/
+    /// marker-service.md §4): the previous track's dirty state is
+    /// flushed, the engine is disarmed, the new track's state is loaded
+    /// (raising any warning at most once per load), and the model is
+    /// seeded with the *current* (pre-`TrackStarted`) track length —
+    /// `dispatch`'s `Input::TrackStarted` handling (T058) refines that
+    /// once the authoritative length is known.
+    fn sync_marker_attachment(&mut self, restarted: bool) {
+        let current = self.queue.current().cloned();
+        let current_id = current.as_ref().map(|item| item.track.id.clone());
+        let changed = current_id != self.marker_state_track;
+        if !(changed || (restarted && current_id.is_some())) {
+            return;
+        }
+        if !changed {
+            // A `TrackStarted` for the attachment we just made on the id
+            // change: the state is already loaded, so reloading here would
+            // only repeat the work and re-raise its warning. Consume the
+            // expectation — the *next* `TrackStarted` is a real restart.
+            if self.marker_state_awaiting_start {
+                self.marker_state_awaiting_start = false;
+                return;
+            }
+        } else {
+            // `restarted` here means this very `TrackStarted` is what made
+            // the id change, so it is already accounted for.
+            self.marker_state_awaiting_start = !restarted;
+        }
+        self.flush_track_state();
+        self.push_command_retrying(Command::LoopDisarm);
+        self.markers = None;
+        self.marker_state_track = current_id;
+        let Some(item) = current else {
+            return;
+        };
+        let rate = self.source_sample_rate.max(1);
+        let len_frames = self.ms_to_frames(item.track.duration_ms);
+        let outcome = match &self.track_state_paths {
+            Some(paths) => markers::store::load(paths, &item.track.id, rate, len_frames),
+            None => markers::store::LoadOutcome {
+                state: TrackMarkers::new(item.track.id.clone(), rate, len_frames),
+                warning: None,
+                rewrite_allowed: true,
+            },
+        };
+        if let Some(warning) = outcome.warning {
+            let key = match warning {
+                markers::store::LoadWarning::Unreadable => KEY_TRACK_STATE_UNREADABLE,
+                markers::store::LoadWarning::NewerSchema => KEY_TRACK_STATE_NEWER_VERSION,
+            };
+            self.notifications.raise(Severity::Warning, key);
+        }
+        self.markers = Some(outcome.state);
+    }
+
+    /// Force-flush the current track's marker/loop-region state if dirty
+    /// (track change, sign-out, shutdown, `clear_all_markers` — research
+    /// R11); a no-op with nothing dirty or no resolvable track-state
+    /// directory.
+    fn flush_track_state(&mut self) {
+        let Some(paths) = &self.track_state_paths else {
+            return;
+        };
+        let Some(markers) = self.markers.as_mut() else {
+            return;
+        };
+        if !markers.is_dirty() {
+            return;
+        }
+        let path = paths.file_for(markers.track());
+        let bytes = markers::store::encode(markers);
+        markers.mark_clean();
+        if let Some(tx) = &self.marker_persist_tx {
+            let _ = tx.send(markers::store::PersistJob::Save { path, bytes });
+        }
+    }
+
+    /// Debounced flush, checked every `tick()` (research R11,
+    /// `TRACK_STATE_DEBOUNCE`): the last mutation before the window
+    /// elapses wins.
+    fn flush_track_state_if_due(&mut self) {
+        let Some(markers) = self.markers.as_ref() else {
+            return;
+        };
+        if !markers.is_dirty() {
+            return;
+        }
+        let now = (self.now)();
+        let due = self
+            .last_marker_flush_at
+            .is_none_or(|last| now.saturating_duration_since(last) >= TRACK_STATE_DEBOUNCE);
+        if !due {
+            return;
+        }
+        self.last_marker_flush_at = Some(now);
+        self.flush_track_state();
+    }
+
+    /// Drain the background writer's failure replies (contracts/
+    /// marker-service.md §3 rule 1): each raises `track-state-save-failed`
+    /// once — the previous file, if any, was left intact and there is no
+    /// automatic retry.
+    fn drain_marker_store_events(&mut self) {
+        let Some(rx) = &self.marker_store_rx else {
+            return;
+        };
+        let mut failed = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                markers::store::StoreEvent::SaveFailed { .. } => failed = true,
+            }
+        }
+        if failed {
+            self.notifications
+                .raise(Severity::Warning, KEY_TRACK_STATE_SAVE_FAILED);
+        }
+    }
+
+    /// "Clear all markers" (contracts/marker-service.md §1): disarms the
+    /// engine if a region was armed, empties the model, and flushes
+    /// immediately — the empty state is written straight away rather than
+    /// waiting out the debounce.
+    pub fn clear_all_markers(&mut self) {
+        let was_armed = self
+            .markers
+            .as_ref()
+            .is_some_and(|m| m.armed_region().is_some());
+        if was_armed {
+            self.push_command_retrying(Command::LoopDisarm);
+        }
+        if let Some(markers) = self.markers.as_mut() {
+            markers.clear_all();
+        }
+        self.flush_track_state();
+    }
+
+    /// Sign-out ordering (contracts/marker-service.md §4): flush, drop the
+    /// in-memory state (markers are not account data — never deleted, per
+    /// FR-024/data-model.md §4 rule 4), disarm the engine.
+    fn clear_marker_state_for_sign_out(&mut self) {
+        self.flush_track_state();
+        self.markers = None;
+        self.marker_state_track = None;
+        self.marker_state_awaiting_start = false;
+        self.push_command_retrying(Command::LoopDisarm);
     }
 
     /// Drive `SearchSession`'s debounce timer every tick
@@ -1499,6 +2149,13 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
                     self.analysis.attach_store(track, store);
                     continue;
                 }
+                // 006, research R5 rule 3: a region ends at `b < len`, so
+                // the RT never legitimately reaches its own end of track
+                // while a loop is armed-active — ignore it here rather
+                // than let the queue advance mid-loop; the controller's
+                // throttled re-seek (`reseek_for_loop_wrap`) keeps the
+                // streaming `Player` inside the region instead.
+                SourceEvent::EndOfTrack if self.shared.loop_state() == 2 => continue,
                 _ => {}
             }
             if let Some(input) = map_source_event(event) {
@@ -1614,6 +2271,17 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         // recorded is a no-op.
         let confirms_playing = matches!(&input, Input::Playing)
             || matches!(&input, Input::BecameActive { context: Some(ctx) } if ctx.playing);
+        // 006, contracts/marker-service.md §4: a `TrackStarted` for the
+        // *same* current-track id is a same-session reload (FR-016) that
+        // `sync_marker_attachment` must still flush/reload for, unlike
+        // `sync_analysis_attachment`'s change-only check; `track_len_ms`
+        // is the authoritative length T058 re-clamps the model to, once
+        // that model exists.
+        let track_started_len_ms = if let Input::TrackStarted { track_len_ms, .. } = &input {
+            Some(*track_len_ms)
+        } else {
+            None
+        };
         let (new_state, effects) =
             transport::reduce(std::mem::take(&mut self.transport_state), input);
         self.transport_state = new_state;
@@ -1628,6 +2296,16 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
             self.record_play_log_if_new_track();
         }
         self.sync_analysis_attachment();
+        self.sync_marker_attachment(track_started_len_ms.is_some());
+        // T058: refine the model's `len_frames` to the engine-reported
+        // length once it is known — may differ from the catalog metadata
+        // `sync_marker_attachment` loaded against (FR-018 clamp + flag).
+        if let Some(len_ms) = track_started_len_ms {
+            let len_frames = self.ms_to_frames(len_ms);
+            if let Some(markers) = self.markers.as_mut() {
+                markers.set_len_frames(len_frames);
+            }
+        }
     }
 
     /// research R11: record a `PlayLog` entry on the `TrackStarted ->
@@ -2078,6 +2756,18 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
                 // prior stream's queue was full), now that a fresh queue
                 // exists (contracts/engine-commands.md rule 3).
                 self.flush_pending_commands();
+                // 006, research R6: a freshly built `Processor` starts
+                // disarmed — re-push the armed region's four setters +
+                // `LoopCommit { reset_wraps: false }` so the loop survives
+                // this rebuild with its wrap count intact.
+                let repush = self.markers.as_ref().and_then(|markers| {
+                    let region = markers.armed_region()?;
+                    let (a, b) = region.span(markers)?;
+                    Some((a, b, region.crossfade_ms, region.repeat))
+                });
+                if let Some((a, b, crossfade_ms, repeat)) = repush {
+                    self.push_loop_engine_commands(a, b, crossfade_ms, repeat, false);
+                }
             }
             Err(_) => self.disconnect(),
         }
@@ -2159,6 +2849,15 @@ fn unix_ms_now() -> u64 {
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// `round(crossfade_ms * rate / 1000)` (contracts/marker-service.md §2):
+/// the *configured* crossfade in source frames, rounded half up. The
+/// engine itself further reduces this via `loop_math::effective_
+/// crossfade` at the seam's start.
+fn configured_crossfade_frames(crossfade_ms: u8, rate: u32) -> u32 {
+    let scaled = u64::from(crossfade_ms) * u64::from(rate);
+    u32::try_from((scaled + 500) / 1000).unwrap_or(u32::MAX)
 }
 
 fn severity_for(warning: &SettingsWarning) -> Severity {

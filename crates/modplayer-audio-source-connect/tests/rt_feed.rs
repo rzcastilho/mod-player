@@ -250,6 +250,21 @@ fn rt_store_exhaustion_falls_back_to_ring() {
     assert_eq!(source.position(), 501);
 }
 
+/// 006-markers-loops-and-cues, contracts/engine-loop.md §1: `decoded_
+/// store()` returns the same `Arc` the RT already holds for its own
+/// `Feed::Store` reads — never a clone, never dropped by looking at it.
+#[test]
+fn decoded_store_returns_current_track_store() {
+    let (_sample_tx, _marker_tx, _retired_rx, mut source) = build(0);
+    assert!(AudioSource::decoded_store(&source).is_none());
+
+    let store = filled_store(10);
+    source.store = Some(Arc::clone(&store));
+    let returned =
+        AudioSource::decoded_store(&source).unwrap_or_else(|| unreachable!("store was just set"));
+    assert!(Arc::ptr_eq(returned, &store));
+}
+
 #[test]
 fn rt_position_tracks_store_cursor() {
     let (_sample_tx, _marker_tx, _retired_rx, mut source) = build(0);

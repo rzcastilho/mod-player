@@ -67,4 +67,46 @@ action-status-page = Status page
 action-retry = Retry
 action-open-upgrade-page = Upgrade
 
+## Markers and loop regions (waveform lane/overlay, Markers panel — Phase 8 (006), US1)
+
+markers-panel = Markers
+markers-empty = No markers — press I to set A
+markers-status = Marker action unavailable.
+marker-limit-reached = The track already has the maximum number of markers.
+loop-region-incomplete = Set both A and B before arming the loop.
+loop-region-too-short = The region is too short to loop.
+marker-glyph = { $role } { $name } { $time }
+marker-role-a = A
+marker-role-b = B
+loop-arm = Arm loop
+loop-disarm = Disarm loop
+loop-repeat = Repeat
+loop-crossfade = Crossfade
+loop-wraps-remaining = { $count } wraps remaining
+loop-wraps-infinite = Looping indefinitely
+loop-armed-inactive = Armed (waiting for the playhead)
+
+## Markers panel — empty/clear-all chrome and persistence warnings (Phase 8 (006), US2)
+
+markers-new-loop = New loop region
+markers-clear-all = Clear all markers
+markers-clear-confirm = Clear { $count } markers?
+markers-clear-yes = Yes
+markers-clear-no = No
+marker-clamped-desc = This marker was beyond the track's current length and was pulled back.
+track-state-unreadable = This track's saved markers could not be read and have been reset.
+track-state-newer-version = This track's saved markers were made by a newer version of the app and could not be loaded.
+track-state-save-failed = Saving this track's markers failed. Your changes may be lost.
+
+## Markers panel — precise editing (Phase 8 (006), US3)
+
+marker-role-point = Marker
+marker-default-name = Marker { $n }
+markers-rename = Rename
+markers-color = Colour { $index }
+
+## Markers panel — cue points (Phase 8 (006), US4)
+
+marker-role-cue = Cue { $slot }
+
 ## Settings > Playback (device name) — Phase 3, US1

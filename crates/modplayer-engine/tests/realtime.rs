@@ -15,9 +15,10 @@
 use std::sync::Arc;
 
 use assert_no_alloc::{AllocDisabler, assert_no_alloc};
+use modplayer_audio_source::DecodedStore;
 use modplayer_audio_source_synthetic::SyntheticSource;
 use modplayer_engine::{
-    CeilingDb, Command, Processor, ProcessorConfig, RtShared, Transport, VolumePercent,
+    CeilingDb, Command, Event, Processor, ProcessorConfig, RtShared, Transport, VolumePercent,
 };
 use rtrb::RingBuffer;
 
@@ -224,4 +225,58 @@ fn clock_monotonic_across_rebuild() {
         prev_clock > clock_before_rate_change,
         "the source-rate clock must keep advancing after a device-rate change"
     );
+}
+
+/// 006, contracts/engine-loop.md §6: `Processor::render` must never
+/// allocate with an armed loop region either — the seam's incoming
+/// frames come from a preallocated `seam_in`, read from `decoded_store()`
+/// via `DecodedStore::read_frames` (atomics only). 1 000 renders across a
+/// short region wraps well past 20 times.
+#[test]
+fn render_with_armed_loop_never_allocates() {
+    let rate = 44_100u32;
+    let len_frames = 5_000u64;
+    let store = DecodedStore::new(rate, len_frames);
+    let buf = vec![0.1f32; (len_frames * 2) as usize];
+    store.write_frames(0, &buf);
+    store.set_complete(len_frames);
+
+    let (mut command_tx, command_rx) = RingBuffer::<Command>::new(256);
+    let (event_tx, mut event_rx) = RingBuffer::<Event>::new(256);
+    let shared = Arc::new(RtShared::new());
+    let config = ProcessorConfig {
+        source_rate: rate,
+        device_rate: rate,
+        device_channels: 2,
+        max_frames: 256,
+        transport: Transport::Playing,
+        position_frames: 0,
+        master_volume: VolumePercent::new(80),
+        ceiling: CeilingDb::default(),
+        shared,
+    };
+    let source = SyntheticSource::with_store(rate, store);
+    let mut processor = Processor::new(config, source, command_rx, event_tx);
+
+    let _ = command_tx.push(Command::LoopSetA(1_000));
+    let _ = command_tx.push(Command::LoopSetB(1_100));
+    let _ = command_tx.push(Command::LoopSetSeam {
+        crossfade_frames: 50,
+        repeat: 0,
+    });
+    let _ = command_tx.push(Command::LoopCommit { reset_wraps: true });
+
+    let mut out = vec![0.0f32; 256 * 2];
+    let mut wraps = 0u32;
+    for _ in 0..1_000u32 {
+        assert_no_alloc(|| {
+            processor.render(&mut out);
+        });
+        while let Ok(event) = event_rx.pop() {
+            if let Event::LoopWrapped { .. } = event {
+                wraps += 1;
+            }
+        }
+    }
+    assert!(wraps >= 20, "wraps={wraps}");
 }

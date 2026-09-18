@@ -24,6 +24,7 @@ use modplayer_audio_source::{
 };
 use modplayer_audio_source_synthetic::ScriptedHost;
 use modplayer_audio_source_synthetic::scripted::HydratedReply;
+use modplayer_core::markers::CueSlot;
 use modplayer_core::settings::SettingsStore;
 use modplayer_core::{
     ActiveState, NotificationAction, NotificationCenter, PlaybackController, Severity, tr, tr_args,
@@ -65,6 +66,20 @@ fn fresh_store(label: &str) -> (SettingsStore, TempDir) {
     (store, dir)
 }
 
+/// Serializes any test in this binary that briefly overrides the
+/// process-global `MODPLAYER_TRACK_STATE_DIR` for `PlaybackController::
+/// new`'s one synchronous read of it (Phase 7 polish, T089: 006 US2's
+/// `sync_marker_attachment` now runs on every `dispatch`, so any test here
+/// that queues a track would otherwise read/write the real per-user
+/// track-state directory; mirrors `markers.rs`'s own lock/pattern, which
+/// this file didn't need before 006).
+static TRACK_STATE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Both temp dirs `active_controller` allocates (settings, track-state);
+/// kept alive together so either can be dropped only once the test itself
+/// is done with the controller.
+struct TestDirs(#[allow(dead_code)] TempDir, #[allow(dead_code)] TempDir);
+
 fn fake_device() -> FakeDevice {
     FakeDevice {
         id: DeviceId::new("dev-1").unwrap_or_else(|| unreachable!()),
@@ -96,13 +111,25 @@ fn active_controller(
 ) -> (
     PlaybackController<FakeBackend, ScriptedHost>,
     modplayer_audio_source_synthetic::ScriptedHostHandle,
-    TempDir,
+    TestDirs,
 ) {
     let (store, dir) = fresh_store(label);
+    let track_state_dir = TempDir::new(&format!("{label}-track-state"));
     let host = ScriptedHost::new();
     let handle = host.handle();
     let devices = vec![fake_device()];
-    let mut controller = PlaybackController::new(FakeBackend::new(devices), host, store);
+    let mut controller = {
+        let _guard = TRACK_STATE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Safety: narrowly scopes the mutation to the one synchronous read
+        // `PlaybackController::new` does of this var, serialized against
+        // every other test in this binary via the lock above.
+        unsafe { std::env::set_var("MODPLAYER_TRACK_STATE_DIR", track_state_dir.path()) };
+        let controller = PlaybackController::new(FakeBackend::new(devices), host, store);
+        unsafe { std::env::remove_var("MODPLAYER_TRACK_STATE_DIR") };
+        controller
+    };
     controller.launch();
     controller.confirm_device(
         DeviceId::new("dev-1").unwrap_or_else(|| unreachable!()),
@@ -110,7 +137,7 @@ fn active_controller(
     );
     controller.set_playback_permitted(true, None);
     controller.tick();
-    (controller, handle, dir)
+    (controller, handle, TestDirs(dir, track_state_dir))
 }
 
 fn default_input() -> RawInput {
@@ -974,5 +1001,489 @@ fn transport_position_key_no_longer_resolves_or_exists() {
             .lines()
             .any(|line| line.trim().starts_with("transport-position ")),
         "`transport-position` is still defined in playback.ftl — remove it with the seek slider"
+    );
+}
+
+// -- Markers, loop regions and cues (006, T089, contracts/ui-markers.md) ---
+//
+// Every marker glyph is `Role::Button` named per `marker-glyph`, panel rows
+// are `Role::ListItem`, the arm toggle is `Role::CheckBox` with state,
+// numeric fields (repeat/crossfade/nudge-step) are labelled, the panel and
+// empty state are exposed, and every key in contracts/ui-markers.md §2–§3
+// is reachable (FR-022). `active_controller`'s track-state isolation above
+// covers every test in this section, since each one queues a track.
+
+fn key_event(key: Key, modifiers: Modifiers) -> Event {
+    Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers,
+    }
+}
+
+/// Run one Now Playing frame with `key`(+`modifiers`) pressed, on the same
+/// `ctx` across calls so egui's own focus/input bookkeeping persists
+/// between them (mirrors `markers.rs`'s own `press_key`/`press_key_with`).
+fn press_marker_key(
+    ctx: &Context,
+    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+    artwork: &mut ArtworkCache,
+    waveform: &mut WaveformState,
+    key: Key,
+    modifiers: Modifiers,
+) {
+    let mut input = default_input();
+    // `Event::Key`'s own `modifiers` field alone doesn't reach
+    // `InputState::modifiers` — only a dedicated `ModifiersChanged` event
+    // does (egui 0.36's `begin_pass`; same note as `now_playing.rs`'s own
+    // `every_waveform_key_in_the_contract_table_is_reachable`).
+    input.events.push(Event::ModifiersChanged(modifiers));
+    input.events.push(key_event(key, modifiers));
+    let output = ctx.run_ui(input, |ui| {
+        modplayer_ui::now_playing::show(ui, controller, artwork, waveform)
+    });
+    output.drop_without_applying_deltas();
+}
+
+/// A playing controller with one queued track, the baseline every test in
+/// this section starts from (markers only exist for a current track).
+fn marker_controller(
+    label: &str,
+) -> (
+    PlaybackController<FakeBackend, ScriptedHost>,
+    TestDirs,
+    ArtworkCache,
+    WaveformState,
+) {
+    let (mut controller, _handle, dirs) = active_controller(label);
+    controller.queue_replace(vec![track("a")]);
+    controller.play();
+    controller.tick();
+    (
+        controller,
+        dirs,
+        ArtworkCache::new(),
+        WaveformState::default(),
+    )
+}
+
+#[test]
+fn every_marker_kind_glyph_exposes_role_button_named_marker_glyph() {
+    let (mut controller, _dirs, mut artwork, mut waveform) =
+        marker_controller("marker-glyph-roles");
+
+    controller
+        .set_loop_a()
+        .unwrap_or_else(|e| unreachable!("set_loop_a: {e}"));
+    let _ = controller.backend_mut().render_buffers(1);
+    controller
+        .set_loop_b()
+        .unwrap_or_else(|e| unreachable!("set_loop_b: {e}"));
+    controller
+        .add_point_marker()
+        .unwrap_or_else(|e| unreachable!("add_point_marker: {e}"));
+    controller
+        .set_cue(CueSlot::new(1).unwrap_or_else(|| unreachable!()))
+        .unwrap_or_else(|e| unreachable!("set_cue: {e}"));
+
+    let nodes = render_nodes(|ui| {
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+    });
+
+    // At least one `Role::Button` glyph per marker (one per lane: the
+    // overview and detail marker lanes both render every visible marker,
+    // contracts/ui-markers.md §1), its name containing the `marker-glyph`
+    // template's role segment (contracts/ui-markers.md §3 — Fluent wraps
+    // each interpolated segment in bidi-isolate marks, so `contains` is
+    // used rather than an exact prefix match; the trailing `{ $name } {
+    // $time }` isn't pinned here since exact position/name aren't this
+    // test's concern — markers.rs already pins those).
+    for role_text in [
+        tr("marker-role-a"),
+        tr("marker-role-b"),
+        tr("marker-role-point"),
+        tr_args("marker-role-cue", &[("slot", "1".to_string())]),
+    ] {
+        let matches: Vec<_> = nodes
+            .iter()
+            .filter(|n| {
+                n.role == Role::Button
+                    && n.accessible_name()
+                        .is_some_and(|name| name.contains(&role_text))
+            })
+            .collect();
+        assert!(
+            !matches.is_empty(),
+            "expected at least one Role::Button glyph named `marker-glyph` containing `{role_text}`, found none: {nodes:?}"
+        );
+    }
+}
+
+#[test]
+fn panel_row_exposes_role_list_item() {
+    let (mut controller, _dirs, mut artwork, mut waveform) = marker_controller("panel-row-role");
+    controller
+        .add_point_marker()
+        .unwrap_or_else(|e| unreachable!("add_point_marker: {e}"));
+
+    let nodes = render_nodes(|ui| {
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+    });
+
+    let rows: Vec<_> = nodes.iter().filter(|n| n.role == Role::ListItem).collect();
+    assert!(
+        !rows.is_empty(),
+        "expected at least one Role::ListItem panel row, found none: {nodes:?}"
+    );
+    assert!(
+        rows.iter().any(|n| n
+            .accessible_name()
+            .is_some_and(|name| name.contains(&tr("marker-role-point")))),
+        "expected the point marker's row to be a named Role::ListItem, got {rows:?}"
+    );
+}
+
+#[test]
+fn arm_toggle_exposes_role_checkbox_and_reports_toggled_state() {
+    let (mut controller, _dirs, mut artwork, mut waveform) = marker_controller("arm-checkbox");
+    controller
+        .set_loop_a()
+        .unwrap_or_else(|e| unreachable!("set_loop_a: {e}"));
+    let _ = controller.backend_mut().render_buffers(1);
+    controller
+        .set_loop_b()
+        .unwrap_or_else(|e| unreachable!("set_loop_b: {e}"));
+    let region = controller
+        .markers()
+        .and_then(modplayer_core::markers::TrackMarkers::current_region)
+        .unwrap_or_else(|| unreachable!("region must exist"));
+
+    let off = render_nodes(|ui| {
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+    });
+    let checkbox = find_one(&off, Role::CheckBox, &tr("loop-arm"));
+    assert_eq!(
+        checkbox.toggled,
+        Some(Toggled::False),
+        "disarmed must report Toggled::False: {checkbox:?}"
+    );
+
+    controller
+        .arm_loop(region)
+        .unwrap_or_else(|e| unreachable!("arm_loop: {e}"));
+    let on = render_nodes(|ui| {
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+    });
+    let checkbox = find_one(&on, Role::CheckBox, &tr("loop-disarm"));
+    assert_eq!(
+        checkbox.toggled,
+        Some(Toggled::True),
+        "armed must report Toggled::True (and relabel to `loop-disarm`): {checkbox:?}"
+    );
+}
+
+#[test]
+fn loop_numeric_fields_and_nudge_step_are_labelled() {
+    let (mut controller, _dirs, mut artwork, mut waveform) = marker_controller("numeric-labels");
+    controller
+        .set_loop_a()
+        .unwrap_or_else(|e| unreachable!("set_loop_a: {e}"));
+    let _ = controller.backend_mut().render_buffers(1);
+    controller
+        .set_loop_b()
+        .unwrap_or_else(|e| unreachable!("set_loop_b: {e}"));
+
+    let nodes = render_nodes(|ui| {
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+    });
+    let spin_fields: Vec<_> = nodes
+        .iter()
+        .filter(|n| n.role == Role::SpinButton)
+        .collect();
+    assert!(
+        spin_fields.len() >= 2,
+        "expected the repeat and crossfade DragValues (Role::SpinButton), got {nodes:?}"
+    );
+    assert!(
+        spin_fields.iter().all(|n| n.labelled_by_something),
+        "every loop numeric field must be associated with its label via labelled_by: {spin_fields:?}"
+    );
+
+    // `setting-nudge-step` (Settings › Playback, contracts/ui-markers.md
+    // §7) is labelled the same way — pinned here too since it shares this
+    // section's "numeric fields ... are labelled" requirement.
+    let (store, _dir) = fresh_store("nudge-step-labelled");
+    let playback_controller =
+        PlaybackController::new(FakeBackend::new(vec![]), ScriptedHost::new(), store);
+    let mut screen = modplayer_ui::settings::playback::PlaybackScreen::new(&playback_controller);
+    let mut playback_controller = playback_controller;
+    let settings_nodes = render_nodes(|ui| {
+        modplayer_ui::settings::playback::show(ui, &mut playback_controller, &mut screen, None)
+    });
+    let nudge_field = settings_nodes
+        .iter()
+        .find(|n| n.role == Role::SpinButton)
+        .expect("the nudge-step DragValue must render");
+    assert!(
+        nudge_field.labelled_by_something,
+        "`setting-nudge-step`'s field must be associated with its label: {nudge_field:?}"
+    );
+}
+
+#[test]
+fn markers_panel_and_empty_state_are_exposed() {
+    let (mut controller, _dirs, mut artwork, mut waveform) = marker_controller("panel-exposed");
+
+    let empty = render_nodes(|ui| {
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+    });
+    assert!(
+        empty
+            .iter()
+            .any(|n| n.accessible_name() == Some(tr("markers-panel").as_str())),
+        "the Markers panel heading (`markers-panel`) must always be exposed, got {empty:?}"
+    );
+    assert!(
+        empty
+            .iter()
+            .any(|n| n.accessible_name() == Some(tr("markers-empty").as_str())),
+        "the empty state (`markers-empty`) must be exposed with no markers, got {empty:?}"
+    );
+
+    controller
+        .add_point_marker()
+        .unwrap_or_else(|e| unreachable!("add_point_marker: {e}"));
+    let with_marker = render_nodes(|ui| {
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+    });
+    assert!(
+        with_marker
+            .iter()
+            .any(|n| n.accessible_name() == Some(tr("markers-panel").as_str())),
+        "the panel heading must still be exposed once markers exist, got {with_marker:?}"
+    );
+    assert!(
+        !with_marker
+            .iter()
+            .any(|n| n.accessible_name() == Some(tr("markers-empty").as_str())),
+        "the empty state must not render once a marker exists, got {with_marker:?}"
+    );
+}
+
+#[test]
+fn every_view_level_marker_shortcut_key_is_reachable() {
+    let (mut controller, _dirs, mut artwork, mut waveform) =
+        marker_controller("view-shortcuts-reachable");
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+
+    // `I`/`O`: create and complete the current region.
+    press_marker_key(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        Key::I,
+        Modifiers::NONE,
+    );
+    assert!(
+        controller
+            .markers()
+            .and_then(modplayer_core::markers::TrackMarkers::current_region)
+            .is_some(),
+        "`I` must reach set_loop_a and create a region"
+    );
+    let _ = controller.backend_mut().render_buffers(1);
+    press_marker_key(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        Key::O,
+        Modifiers::NONE,
+    );
+    let region = controller
+        .markers()
+        .and_then(modplayer_core::markers::TrackMarkers::current_region)
+        .unwrap_or_else(|| unreachable!("region must exist"));
+    let complete_before_l = controller
+        .markers()
+        .and_then(|m| m.region(region))
+        .is_some_and(modplayer_core::markers::LoopRegion::is_complete);
+    assert!(
+        complete_before_l,
+        "`O` must reach set_loop_b and complete the region"
+    );
+
+    // `L`: toggle the current region's armed state.
+    press_marker_key(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        Key::L,
+        Modifiers::NONE,
+    );
+    let armed = controller
+        .markers()
+        .and_then(|m| m.region(region))
+        .is_some_and(|r| r.armed);
+    assert!(
+        armed,
+        "`L` must reach toggle_current_loop and arm the complete region"
+    );
+
+    // `M`: add a point marker.
+    let count_before_m = controller
+        .markers()
+        .map(modplayer_core::markers::TrackMarkers::count)
+        .unwrap_or(0);
+    press_marker_key(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        Key::M,
+        Modifiers::NONE,
+    );
+    let count_after_m = controller
+        .markers()
+        .map(modplayer_core::markers::TrackMarkers::count)
+        .unwrap_or(0);
+    assert_eq!(
+        count_after_m,
+        count_before_m + 1,
+        "`M` must reach add_point_marker"
+    );
+
+    // `Shift+1`: set cue 1. `1`: jump to cue 1 (never a refusal/no-op here
+    // since the slot is now occupied).
+    press_marker_key(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        Key::Num1,
+        Modifiers::SHIFT,
+    );
+    let cue_slot = CueSlot::new(1).unwrap_or_else(|| unreachable!());
+    assert!(
+        controller
+            .markers()
+            .is_some_and(|m| m.cue(cue_slot).is_some()),
+        "`Shift+1` must reach set_cue and occupy slot 1"
+    );
+    let intent_before_jump = controller.transport_state().intent;
+    press_marker_key(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        Key::Num1,
+        Modifiers::NONE,
+    );
+    assert_eq!(
+        controller.transport_state().intent,
+        intent_before_jump,
+        "`1` must reach jump_to_cue without changing play/pause state"
+    );
+}
+
+#[test]
+fn every_focused_marker_key_is_reachable() {
+    let (mut controller, _dirs, mut artwork, mut waveform) =
+        marker_controller("focused-keys-reachable");
+    let id = controller
+        .add_point_marker()
+        .unwrap_or_else(|e| unreachable!("add_point_marker: {e}"));
+    waveform.focused_marker = Some(id);
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+
+    let start = controller
+        .markers()
+        .and_then(|m| m.position_of(id))
+        .unwrap_or_else(|| unreachable!());
+    press_marker_key(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        Key::ArrowRight,
+        Modifiers::NONE,
+    );
+    let after_nudge = controller
+        .markers()
+        .and_then(|m| m.position_of(id))
+        .unwrap_or_else(|| unreachable!());
+    assert!(
+        after_nudge > start,
+        "`→` must reach nudge_marker and move it forward"
+    );
+
+    press_marker_key(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        Key::C,
+        Modifiers::NONE,
+    );
+    // `cycle_marker_color` always succeeds on an existing marker — reaching
+    // it is what matters here (the exact palette cycle is markers.rs's).
+    assert!(
+        controller.markers().and_then(|m| m.marker(id)).is_some(),
+        "`C` must reach cycle_marker_color without erroring"
+    );
+
+    press_marker_key(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        Key::F2,
+        Modifiers::NONE,
+    );
+    assert_eq!(
+        waveform.rename,
+        Some((
+            id,
+            controller
+                .markers()
+                .and_then(|m| m.marker(id))
+                .unwrap_or_else(|| unreachable!())
+                .name
+                .clone()
+        )),
+        "`F2` must reach the inline-rename open action"
+    );
+
+    press_marker_key(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        Key::Escape,
+        Modifiers::NONE,
+    );
+    assert_eq!(waveform.rename, None, "`Esc` must cancel the open rename");
+
+    press_marker_key(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        Key::Delete,
+        Modifiers::NONE,
+    );
+    assert!(
+        controller.markers().and_then(|m| m.marker(id)).is_none(),
+        "`Delete` must reach delete_marker"
+    );
+    assert_eq!(
+        waveform.focused_marker, None,
+        "`Delete` must also return focus to the detail waveform"
     );
 }

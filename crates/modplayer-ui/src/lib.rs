@@ -15,6 +15,7 @@ pub mod artwork;
 pub mod detail_view;
 pub mod device_check;
 pub mod library_view;
+pub mod markers;
 pub mod notifications;
 pub mod now_playing;
 pub mod privacy_notice;

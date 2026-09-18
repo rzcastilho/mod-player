@@ -11,6 +11,7 @@
 pub mod command;
 pub mod event;
 pub mod limiter;
+pub mod loop_math;
 pub mod output_stage;
 pub mod position_clock;
 pub mod processor;

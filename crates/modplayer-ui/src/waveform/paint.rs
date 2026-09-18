@@ -90,9 +90,11 @@ pub struct WaveformPaint<'a> {
 }
 
 /// Paint one waveform widget's whole rect (contracts/ui-waveform.md §4):
-/// background, columns (or the "analysis unavailable" label), and the
-/// playhead line, using only `visuals`' own tokens (research R10 — no new
-/// colour literals).
+/// background, columns (or the "analysis unavailable" label) and the
+/// detail-window highlight, using only `visuals`' own tokens (research
+/// R10 — no new colour literals). The playhead line is [`playhead`],
+/// called separately (006, research R16) so a marker overlay can paint
+/// between the two.
 pub fn paint(painter: &Painter, space: &TimeSpace, visuals: &Visuals, input: &WaveformPaint<'_>) {
     let rect = space.rect;
     if rect.width() <= 0.0 || rect.height() <= 0.0 {
@@ -136,8 +138,18 @@ pub fn paint(painter: &Painter, space: &TimeSpace, visuals: &Visuals, input: &Wa
             visuals.selection.bg_fill.gamma_multiply(0.25),
         );
     }
+}
 
-    if let Some(frame) = input.playhead {
+/// Draw the playhead line, if any (006, research R16, contracts/
+/// ui-markers.md §5): split out of [`paint`] so the caller can run the
+/// `overlays` hook (marker lines, the loop-region span) *between* the
+/// peaks/highlight and the playhead — the playhead always paints on top.
+pub fn playhead(painter: &Painter, space: &TimeSpace, playhead: Option<u64>, visuals: &Visuals) {
+    let rect = space.rect;
+    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return;
+    }
+    if let Some(frame) = playhead {
         let x = space.x_of(frame);
         painter.line_segment(
             [pos2(x, rect.top()), pos2(x, rect.bottom())],

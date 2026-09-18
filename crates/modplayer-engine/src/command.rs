@@ -33,6 +33,26 @@ pub enum Command {
     /// (engine-delta.md §1); position atomics reflect it after that
     /// render.
     Seek(u64),
+    /// Stage the loop region's `A` endpoint, in source frames (006,
+    /// contracts/engine-loop.md §2). Applied to `loop_staged` at the next
+    /// buffer boundary; takes effect only once a `LoopCommit` follows.
+    LoopSetA(u64),
+    /// Stage the loop region's `B` endpoint, in source frames (006,
+    /// contracts/engine-loop.md §2).
+    LoopSetB(u64),
+    /// Stage the loop region's configured crossfade (in source frames, not
+    /// yet reduced by `loop_math::effective_crossfade`) and repeat count
+    /// (`0` = infinite) (006, contracts/engine-loop.md §2).
+    LoopSetSeam { crossfade_frames: u32, repeat: u32 },
+    /// Atomically swap `loop_staged` into `loop_active` (006, contracts/
+    /// engine-loop.md §2, FR-011a): `reset_wraps` zeroes the wrap count
+    /// (arming) or keeps it (editing a region already armed). A seam
+    /// already in progress finishes with its captured bounds regardless.
+    LoopCommit { reset_wraps: bool },
+    /// Disarm the loop: `loop_active = None`; a seam already in progress
+    /// still finishes, but without jumping at `B` (006, contracts/
+    /// engine-loop.md §2).
+    LoopDisarm,
 }
 
 const _: () = assert!(
@@ -48,6 +68,26 @@ mod tests {
     fn command_is_copy_and_small() {
         fn assert_copy<T: Copy>() {}
         assert_copy::<Command>();
+        assert!(std::mem::size_of::<Command>() <= 16);
+    }
+
+    /// contracts/engine-loop.md §2: the five loop variants stay within the
+    /// same `Copy`, <= 16-byte contract as every other `Command` (T032).
+    #[test]
+    fn loop_commands_are_copy_and_small() {
+        let commands = [
+            Command::LoopSetA(1_234),
+            Command::LoopSetB(5_678),
+            Command::LoopSetSeam {
+                crossfade_frames: 2_205,
+                repeat: 3,
+            },
+            Command::LoopCommit { reset_wraps: true },
+            Command::LoopDisarm,
+        ];
+        for command in commands {
+            let _copy = command;
+        }
         assert!(std::mem::size_of::<Command>() <= 16);
     }
 }

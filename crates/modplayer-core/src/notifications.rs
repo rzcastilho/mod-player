@@ -50,6 +50,24 @@ pub const KEY_STREAM_SOURCE_UPDATE_REQUIRED: &str = "stream-source-update-requir
 /// upgrade page** action.
 pub const KEY_SUBSCRIPTION_DOWNGRADED: &str = "subscription-downgraded";
 
+/// FR-016/FR-017: the per-track marker/loop state file was corrupt,
+/// oversized, or otherwise unreadable and was loaded as empty
+/// (006-markers-loops-and-cues, data-model.md §6, contracts/
+/// marker-service.md §6). Rewrite is allowed on the next mutation.
+pub const KEY_TRACK_STATE_UNREADABLE: &str = "track-state-unreadable";
+
+/// FR-016/FR-017: the per-track marker/loop state file's
+/// `schema_version` is newer than this build understands
+/// (006-markers-loops-and-cues, data-model.md §6). Loaded as empty; the
+/// file is not rewritten until the user next mutates the state.
+pub const KEY_TRACK_STATE_NEWER_VERSION: &str = "track-state-newer-version";
+
+/// FR-017: the writer thread failed to save the per-track marker/loop
+/// state (006-markers-loops-and-cues, data-model.md §6, contracts/
+/// marker-service.md §6); the previous file, if any, is left intact and
+/// there is no automatic retry.
+pub const KEY_TRACK_STATE_SAVE_FAILED: &str = "track-state-save-failed";
+
 /// Notification severity (data-model.md §6.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {

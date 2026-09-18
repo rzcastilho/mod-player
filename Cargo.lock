@@ -3118,6 +3118,7 @@ dependencies = [
  "assert_no_alloc",
  "modplayer-audio-source",
  "modplayer-audio-source-synthetic",
+ "proptest",
  "rtrb",
 ]
 

@@ -50,3 +50,6 @@ setting-device-name = Device name
 setting-device-name-hint = as seen by other apps on your account
 setting-device-name-desc = The name other Spotify Connect apps see for this device.
 setting-device-name-too-long = Device name must be 64 characters or fewer.
+
+setting-nudge-step = Marker nudge step
+setting-nudge-step-desc = How far the left and right arrow keys move a focused marker, in milliseconds (Shift moves 10×).

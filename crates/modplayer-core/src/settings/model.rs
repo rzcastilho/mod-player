@@ -63,6 +63,11 @@ pub struct AudioSettings {
     /// `[playback] connect_device_id` (research R8); `None` until first
     /// generated.
     pub connect_device_id: Option<String>,
+    /// `[markers] nudge_step_ms` (006, FR-027, data-model.md §5): how far a
+    /// focused marker's arrow-key nudge moves it, in milliseconds (`Shift`
+    /// multiplies by 10). Clamped `1..=1000` silently — no `InvalidField`
+    /// variant, matching `master_volume`/`safe_volume.cap`'s precedent.
+    pub nudge_step_ms: u16,
     pub schema_version: u32,
 }
 
@@ -79,9 +84,20 @@ impl Default for AudioSettings {
             disclosure: None,
             device_name: None,
             connect_device_id: None,
+            nudge_step_ms: DEFAULT_NUDGE_STEP_MS,
             schema_version: SCHEMA_VERSION,
         }
     }
+}
+
+/// `[markers] nudge_step_ms`'s default (data-model.md §5).
+const DEFAULT_NUDGE_STEP_MS: u16 = 10;
+
+/// Clamp a raw (possibly out-of-range, possibly negative) TOML integer
+/// into `1..=1000` (data-model.md §5 "clamped silently").
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn clamp_nudge_step_ms(raw: i64) -> u16 {
+    raw.clamp(1, 1_000) as u16
 }
 
 /// A field that fell back to its default because the file held an
@@ -176,6 +192,8 @@ pub struct RawSettings {
     pub disclosure: RawDisclosure,
     #[serde(default)]
     pub playback: RawPlayback,
+    #[serde(default)]
+    pub markers: RawMarkers,
 }
 
 fn default_schema_version() -> u32 {
@@ -190,6 +208,7 @@ impl Default for RawSettings {
             appearance: RawAppearance::default(),
             disclosure: RawDisclosure::default(),
             playback: RawPlayback::default(),
+            markers: RawMarkers::default(),
         }
     }
 }
@@ -202,6 +221,26 @@ pub struct RawPlayback {
     pub device_name: Option<String>,
     #[serde(default)]
     pub connect_device_id: Option<String>,
+}
+
+/// The `[markers]` section (006, data-model.md §5): an optional table so
+/// older files (with no such section) load the default step.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawMarkers {
+    #[serde(default = "default_nudge_step_ms")]
+    pub nudge_step_ms: i64,
+}
+
+impl Default for RawMarkers {
+    fn default() -> Self {
+        Self {
+            nudge_step_ms: default_nudge_step_ms(),
+        }
+    }
+}
+
+fn default_nudge_step_ms() -> i64 {
+    i64::from(DEFAULT_NUDGE_STEP_MS)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -351,6 +390,9 @@ impl RawSettings {
                     .map(|name| name.as_str().to_string()),
                 connect_device_id: settings.connect_device_id.clone(),
             },
+            markers: RawMarkers {
+                nudge_step_ms: i64::from(settings.nudge_step_ms),
+            },
         }
     }
 
@@ -437,6 +479,7 @@ impl RawSettings {
             disclosure,
             device_name,
             connect_device_id,
+            nudge_step_ms: clamp_nudge_step_ms(self.markers.nudge_step_ms),
             schema_version: self.schema_version,
         };
 
