@@ -24,7 +24,7 @@ fn action_index(action: HostAction) -> usize {
 /// §3.1).
 pub struct ActionRegistry {
     overrides: KeymapOverrides,
-    enabled: [bool; 44],
+    enabled: [bool; 45],
     /// Cached effective bindings per action (override, or the parsed
     /// catalog default), indexed like `HostAction::ALL` — recomputed by
     /// `rebuild` so [`ActionRegistry::bindings`] can return a borrowed

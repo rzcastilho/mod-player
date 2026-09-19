@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 modplayer-audio-source = { path = "../modplayer-audio-source", version = "0.1.0" }
 modplayer-audio-source-synthetic = { path = "../modplayer-audio-source-synthetic", version = "0.1.0" }
+modplayer-effects = { path = "../modplayer-effects", version = "0.1.0" }
 rtrb.workspace = true
 
 [dev-dependencies]

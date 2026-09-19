@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 modplayer-engine = { path = "../modplayer-engine", version = "0.1.0" }
+modplayer-effects = { path = "../modplayer-effects", version = "0.1.0" }
 modplayer-audio-io = { path = "../modplayer-audio-io", version = "0.1.0" }
 modplayer-audio-source = { path = "../modplayer-audio-source", version = "0.1.0" }
 modplayer-audio-source-synthetic = { path = "../modplayer-audio-source-synthetic", version = "0.1.0" }

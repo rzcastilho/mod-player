@@ -27,6 +27,7 @@ use modplayer_audio_source::{
     AudioSource, CatalogError, LibraryPage, Program, Repeat, SourceCommand, SourceEvent,
     SourceHealth, SourceHost, TrackId, TrackList, TrackListSource, TrackRef,
 };
+use modplayer_effects::catalog::{NodeKind, NodeOwner, ParamId, QualityMode};
 use modplayer_engine::{
     BufferPreset, CeilingDb, Command, DeviceId, Event, NegotiatedBuffer, PositionClock, Processor,
     ProcessorConfig, RtShared, SampleRate, Theme, Transport, VolumePercent,
@@ -36,6 +37,10 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use crate::actions::{ActionRegistry, BindingError, Chord, HostAction};
 use crate::analysis::{AnalysisPaths, AnalysisService, AnalysisSnapshot};
 use crate::device_policy::{self, DeviceLostOutcome, DeviceResolution, DeviceWarning};
+use crate::effects::{
+    ChainError, ChainModel, ChainView, LevelPair, MeterSnapshot, NodeId, view as effects_view,
+};
+use crate::i18n::tr;
 use crate::library::index::SyncOutcome;
 use crate::library::{
     Connectivity, LibraryIndex, LibraryPaths, LibraryStatus, LoadIndexOutcome, LoadPlayLogOutcome,
@@ -47,6 +52,7 @@ use crate::markers::{
 };
 use crate::notifications::{
     KEY_DEVICE_APPEARED, KEY_DEVICE_AVAILABLE_AGAIN, KEY_DEVICE_LOST, KEY_DEVICE_MISSING_AT_LAUNCH,
+    KEY_EFFECT_CHAIN_AUTO_BYPASSED, KEY_EFFECT_CHAIN_OVER_BUDGET, KEY_EFFECTS_NO_TIME_STRETCH,
     KEY_NO_OUTPUT_DEVICES, KEY_QUEUE_ITEM_SKIPPED_UNAVAILABLE, KEY_TRACK_STATE_NEWER_VERSION,
     KEY_TRACK_STATE_SAVE_FAILED, KEY_TRACK_STATE_UNREADABLE, NotificationCenter, Severity,
 };
@@ -63,6 +69,18 @@ use crate::transport::{
     self, ActiveState, Effect, Input, Intent, NotRegisteredReason, PendingTransferCommand,
     QueueChangeOrigin, QueueOp, TimerCommand, TimerKind, TransportState,
 };
+
+/// `effects-owner-host` / `effects-owner-plugin` (008, data-model.md
+/// §1.3; contracts/effects-service.md §2 rule C5's `$owner` arg) — only
+/// `Host` is reachable from this controller in this slice; `Plugin(_)`
+/// is exercised by engine tests ahead of 009's plugin runtime.
+const fn effect_owner_label_key(owner: NodeOwner) -> &'static str {
+    if owner.is_host() {
+        "effects-owner-host"
+    } else {
+        "effects-owner-plugin"
+    }
+}
 
 /// contracts/library-and-search-core.md §4: at most this many ids per
 /// `HydrateRefs` sweep request.
@@ -378,6 +396,30 @@ pub struct PlaybackController<B: OutputBackend, H: SourceHost> {
     /// and persisted, through this controller's existing
     /// `persist_settings`, on every binding mutation.
     actions: ActionRegistry,
+
+    /// The effect chain's shadow state (008, data-model.md §2.3):
+    /// session-scoped (FR-002), never touched by sign-out or shutdown
+    /// (C10), replayed onto every freshly built `Processor` (C4,
+    /// research R11).
+    chain: ChainModel,
+
+    /// A `SourceEvent::EndOfTrack` arrived while `advance_rate < 1.0` and
+    /// the engine had not yet reached the track's end (008, research
+    /// R8.2, rule C8): held here until `tick` observes the engine
+    /// position has caught up, then mirrored.
+    end_of_track_pending: bool,
+    /// Set once the engine itself has declared this track ended early
+    /// (008, research R8.2, rule C8: `advance_rate > 1.0`, position
+    /// within one buffer of the end) — the streaming Player's own
+    /// (now-late) `EndOfTrack` for the same track must be swallowed
+    /// rather than double-advancing the queue; cleared on the next
+    /// `Input::TrackStarted`.
+    engine_ended_track: bool,
+    /// `true` while the keyed `effect-chain-over-budget` warning is
+    /// visible (008, research R10, contracts/effects-service.md §2 rules
+    /// C5/C6) — raised on the first `Event::Overload` not already
+    /// shown, dismissed by `tick` once `RtShared::over_budget()` clears.
+    over_budget_notified: bool,
 }
 
 /// `transport.seek_forward_step`/`seek_backward_step`'s step size
@@ -509,6 +551,13 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
             marker_state_awaiting_start: false,
             last_marker_flush_at: None,
             actions: ActionRegistry::new(settings.keybinding_overrides.clone()),
+            // 44.1 kHz until the first stream opens and calls
+            // `chain.set_source_rate` with the real source rate (C4) —
+            // harmless, since the chain starts empty (FR-002).
+            chain: ChainModel::new(44_100),
+            end_of_track_pending: false,
+            engine_ended_track: false,
+            over_budget_notified: false,
         };
         // 006, contracts/marker-service.md §4: resolved unconditionally at
         // construction, like `AnalysisPaths::resolve()` just above —
@@ -673,6 +722,153 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
     /// The shared real-time atomics — created once, never replaced.
     pub fn shared(&self) -> &Arc<RtShared> {
         &self.shared
+    }
+
+    /// The effect chain's shadow state (008, contracts/effects-service.md
+    /// §2). Session-scoped: untouched by sign-out or shutdown (C10).
+    pub fn chain(&self) -> &ChainModel {
+        &self.chain
+    }
+
+    /// The Effect Chain panel's projection (data-model.md §2.4): each
+    /// row's `cost_pct` reads `RtShared::node_cost` while playing, `0.0`
+    /// otherwise; `over_budget`/`overload_count` mirror `RtShared`
+    /// directly, playing or not — they describe the RT's own state, not
+    /// a per-node display convenience (C9).
+    pub fn chain_view(&self) -> ChainView {
+        let playing = self.engine_transport() == Transport::Playing;
+        let shared = &self.shared;
+        let mut view = effects_view::project(&self.chain, |slot| {
+            if playing {
+                shared.node_cost(slot as usize)
+            } else {
+                0.0
+            }
+        });
+        view.over_budget = shared.over_budget();
+        view.overload_count = shared.overload_count();
+        view
+    }
+
+    /// The Effect Chain panel's pre-/post-chain meters and spectrum
+    /// (data-model.md §2.5), read fresh from `RtShared` every call —
+    /// never stored.
+    #[must_use]
+    pub fn chain_meters(&self) -> MeterSnapshot {
+        let shared = &self.shared;
+        let (pre_peak_l, pre_peak_r, pre_rms_l, pre_rms_r) = shared.pre_level();
+        let (post_peak_l, post_peak_r, post_rms_l, post_rms_r) = shared.post_level();
+        MeterSnapshot {
+            pre: LevelPair {
+                peak_l: pre_peak_l,
+                peak_r: pre_peak_r,
+                rms_l: pre_rms_l,
+                rms_r: pre_rms_r,
+            },
+            post: LevelPair {
+                peak_l: post_peak_l,
+                peak_r: post_peak_r,
+                rms_l: post_rms_l,
+                rms_r: post_rms_r,
+            },
+            spectrum: shared.spectrum(),
+            spectrum_generation: shared.spectrum_generation(),
+            advance_rate: shared.read_anchor().advance_rate,
+        }
+    }
+
+    /// Add a host-owned node of `kind`, appended at the end of the chain
+    /// (contracts/effects-service.md §2).
+    pub fn chain_add_node(&mut self, kind: NodeKind) -> Result<NodeId, ChainError> {
+        let (id, commands) = self
+            .chain
+            .add(kind, modplayer_effects::catalog::NodeOwner::Host)?;
+        for command in commands {
+            self.push_command_retrying(command);
+        }
+        Ok(id)
+    }
+
+    pub fn chain_remove_node(&mut self, id: NodeId) -> Result<(), ChainError> {
+        for command in self.chain.remove(id)? {
+            self.push_command_retrying(command);
+        }
+        Ok(())
+    }
+
+    pub fn chain_move_node(&mut self, id: NodeId, to_index: usize) -> Result<(), ChainError> {
+        for command in self.chain.move_to(id, to_index)? {
+            self.push_command_retrying(command);
+        }
+        Ok(())
+    }
+
+    pub fn chain_move_node_by(&mut self, id: NodeId, delta: i8) -> Result<(), ChainError> {
+        for command in self.chain.move_by(id, delta)? {
+            self.push_command_retrying(command);
+        }
+        Ok(())
+    }
+
+    pub fn chain_set_bypass(&mut self, id: NodeId, bypassed: bool) -> Result<(), ChainError> {
+        for command in self.chain.set_bypass(id, bypassed)? {
+            self.push_command_retrying(command);
+        }
+        Ok(())
+    }
+
+    /// Returns the model's clamped value (C2) — the UI displays *that*,
+    /// not the raw requested one.
+    pub fn chain_set_param(
+        &mut self,
+        id: NodeId,
+        param: ParamId,
+        value: f32,
+    ) -> Result<f32, ChainError> {
+        let (clamped, commands) = self.chain.set_param(id, param, value)?;
+        for command in commands {
+            self.push_command_retrying(command);
+        }
+        Ok(clamped)
+    }
+
+    pub fn chain_set_mode(&mut self, id: NodeId, mode: QualityMode) -> Result<(), ChainError> {
+        for command in self.chain.set_mode(id, mode)? {
+            self.push_command_retrying(command);
+        }
+        Ok(())
+    }
+
+    /// FR-017/SC-012, contracts/effects-service.md §2 rule C3: nudge the
+    /// first `TimeStretch` node's ratio by `TEMPO_STEP × direction`
+    /// (clamped `[0.25, 2.0]`, FR-008's auto-switch runs as usual). With
+    /// no time-stretch node in the chain, raises the keyed
+    /// `effects-no-time-stretch` Info once (coalesced: only while not
+    /// already visible) and changes nothing.
+    pub fn tempo_step(&mut self, direction: i8) {
+        let Some(id) = self.chain.first_time_stretch() else {
+            if !self
+                .notifications
+                .visible()
+                .any(|n| n.message_key == KEY_EFFECTS_NO_TIME_STRETCH)
+            {
+                self.notifications
+                    .raise(Severity::Info, KEY_EFFECTS_NO_TIME_STRETCH);
+            }
+            return;
+        };
+        let current = self
+            .chain
+            .nodes()
+            .iter()
+            .find(|n| n.id == id)
+            .map_or(1.0, |n| n.params[0]);
+        let requested = current + modplayer_effects::consts::TEMPO_STEP * f32::from(direction);
+        // The node and the `ratio` param id are both known-good here
+        // (`first_time_stretch` just returned this `id`), so a `ChainError`
+        // can only be a logic bug, never a runtime condition to recover
+        // from.
+        let _ = self.chain_set_param(id, ParamId(0), requested);
     }
 
     /// Current transport shadow state, derived from the reducer's
@@ -1484,6 +1680,21 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         self.drain_backend_events();
         self.drain_source_events();
         self.drain_engine_events();
+        // 008, contracts/effects-service.md §2 rule C6: dismiss the
+        // over-budget warning once the RT reports a clean window.
+        if self.over_budget_notified && !self.shared.over_budget() {
+            self.notifications
+                .dismiss_by_key(KEY_EFFECT_CHAIN_OVER_BUDGET);
+            self.over_budget_notified = false;
+        }
+        // 008, research R8.2: gate end-of-track on the engine position
+        // under a non-unity tempo (rule C8). R8.1's periodic "drift"
+        // re-seek was removed after the 2026-09-19 manual walk: the
+        // receiver is paced by the engine's own consumption in both of
+        // its feeds, so its position never drifts, and every re-seek
+        // rewound the real-time cursor by the buffered lead instead.
+        self.resolve_pending_end_of_track();
+        self.check_engine_ended_track_early();
         // A `sync_program` send debounced on a previous call becomes
         // sendable once enough real time has passed, even with no further
         // mutation (contracts/transport-and-queue.md §3).
@@ -1821,6 +2032,20 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         region.span(markers).map(|(a, _b)| a)
     }
 
+    /// Test-support hook (contracts/effects-service.md §2 rules C5/C6,
+    /// `tests/controller_effects.rs`): inject `event` as if the running
+    /// `Processor` had just pushed it, for the next `tick()`'s
+    /// `drain_engine_events` to consume. Replaces the engine event
+    /// consumer with a fresh one holding only this event — call after a
+    /// stream is open (`confirm_device`), and note any other
+    /// already-queued real event is discarded. Never reached by any
+    /// production code path (there is no other caller in this crate).
+    pub fn debug_inject_engine_event(&mut self, event: Event) {
+        let (mut tx, rx) = RingBuffer::<Event>::new(4);
+        let _ = tx.push(event);
+        self.event_rx = Some(rx);
+    }
+
     /// Drain the running `Processor`'s events (006, contracts/marker-
     /// service.md §4): >= 1 `LoopWrapped` this tick sends one coalesced,
     /// throttled `SourceCommand::Seek` so the streaming `Player` follows
@@ -1838,6 +2063,42 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
                 Event::LoopWrapped { .. } => wrapped = true,
                 Event::LoopReleased { .. } => released = true,
                 Event::ToneFinished | Event::TrackLooped { .. } | Event::CommandDropped { .. } => {}
+                // 008, contracts/effects-service.md §2 rule C5: raise the
+                // keyed over-budget warning once, naming the costliest
+                // slot's node (host or not — only the *bypass* the RT may
+                // have already applied is restricted to non-host).
+                Event::Overload { costliest_slot, .. } => {
+                    if !self.over_budget_notified {
+                        let node = self.chain.node_by_slot(costliest_slot);
+                        let node_label = node.map_or_else(String::new, |n| tr(n.kind.label_key()));
+                        let owner_label = tr(effect_owner_label_key(
+                            node.map_or(NodeOwner::Host, |n| n.owner),
+                        ));
+                        self.notifications.raise_with_args(
+                            Severity::Warning,
+                            KEY_EFFECT_CHAIN_OVER_BUDGET,
+                            vec![("node", node_label), ("owner", owner_label)],
+                        );
+                        self.over_budget_notified = true;
+                    }
+                }
+                // Rule C5: mark the model (so the panel's "auto-bypassed"
+                // label follows) and raise the keyed warning — never
+                // reachable from this slice's own UI paths (no plugin
+                // runtime creates a non-host node yet), exercised by
+                // engine tests ahead of 009.
+                Event::AutoBypassed { slot } => {
+                    let node_label = self
+                        .chain
+                        .node_by_slot(slot)
+                        .map_or_else(String::new, |n| tr(n.kind.label_key()));
+                    self.chain.mark_auto_bypassed(slot);
+                    self.notifications.raise_with_args(
+                        Severity::Warning,
+                        KEY_EFFECT_CHAIN_AUTO_BYPASSED,
+                        vec![("node", node_label)],
+                    );
+                }
             }
         }
         if wrapped {
@@ -1869,6 +2130,88 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
             u32::try_from((a_frame * 1000) / u64::from(self.source_sample_rate)).unwrap_or(u32::MAX)
         };
         self.source_host.command(SourceCommand::Seek(position_ms));
+    }
+
+    /// A drift-bounded margin, in milliseconds, approximating "one
+    /// buffer" on top of research R8.2's 500 ms drift bound — the
+    /// implementing agent's headless assumption for a quantity the
+    /// contract names but does not pin to an exact device buffer size
+    /// (which varies by preset); generous enough at every supported
+    /// buffer preset (<= ~93 ms at the Safe preset) to never fire early.
+    const END_OF_TRACK_DRIFT_BOUND_MS: u64 = 500 + 100;
+
+    /// 008, research R8.2 (rule C8, `advance_rate < 1.0`): resolve a
+    /// `SourceEvent::EndOfTrack` held by `drain_source_events` because the
+    /// engine had not yet reached the track's end — mirrors it once the
+    /// engine position has since caught up to within the drift bound.
+    fn resolve_pending_end_of_track(&mut self) {
+        if !self.end_of_track_pending {
+            return;
+        }
+        let Some(len_ms) = self.current_track().map(|item| item.track.duration_ms) else {
+            self.end_of_track_pending = false;
+            return;
+        };
+        let engine_ms = u64::try_from(self.position().as_millis()).unwrap_or(u64::MAX);
+        if engine_ms + Self::END_OF_TRACK_DRIFT_BOUND_MS >= u64::from(len_ms) {
+            self.end_of_track_pending = false;
+            self.dispatch(Input::EndOfTrack);
+        }
+    }
+
+    /// 008, research R8.2 (rule C8, `advance_rate > 1.0`): the engine can
+    /// cross the track's end *before* the (real-time) streaming Player
+    /// does. Once the engine position is within one buffer of the end
+    /// and no loop is active, mirror `Input::EndOfTrack` itself and flag
+    /// that the Player's own (now-late) one for this same track must be
+    /// swallowed (`gate_end_of_track_for_tempo`) rather than double-
+    /// advancing the queue.
+    fn check_engine_ended_track_early(&mut self) {
+        let advance_rate = self.shared.read_anchor().advance_rate;
+        if advance_rate <= 1.0 + f32::EPSILON || self.engine_ended_track {
+            return;
+        }
+        if self.shared.loop_state() == 2 {
+            // A region is armed-active: the engine never reaches the
+            // track's own end on its own (006, research R5 rule 3).
+            return;
+        }
+        let Some(len_ms) = self.current_track().map(|item| item.track.duration_ms) else {
+            return;
+        };
+        let engine_ms = u64::try_from(self.position().as_millis()).unwrap_or(u64::MAX);
+        const ONE_BUFFER_MS: u64 = 30;
+        if engine_ms + ONE_BUFFER_MS >= u64::from(len_ms) {
+            self.engine_ended_track = true;
+            self.dispatch(Input::EndOfTrack);
+        }
+    }
+
+    /// 008, research R8.2 (rule C8): called from `drain_source_events`
+    /// for a `SourceEvent::EndOfTrack` not already carved out by an
+    /// active loop. Returns `true` when the event must be swallowed
+    /// (deferred while `advance_rate < 1.0` and the engine has not
+    /// caught up yet, or discarded because the engine already declared
+    /// this track ended under `advance_rate > 1.0`) rather than mirrored
+    /// now.
+    fn gate_end_of_track_for_tempo(&mut self, advance_rate: f32) -> bool {
+        if advance_rate < 1.0 - f32::EPSILON
+            && let Some(len_ms) = self.current_track().map(|item| item.track.duration_ms)
+        {
+            let engine_ms = u64::try_from(self.position().as_millis()).unwrap_or(u64::MAX);
+            if engine_ms + Self::END_OF_TRACK_DRIFT_BOUND_MS < u64::from(len_ms) {
+                self.end_of_track_pending = true;
+                return true;
+            }
+        }
+        if self.engine_ended_track {
+            // Left set until the next `Input::TrackStarted` (research
+            // R8.2's "until TrackStarted") rather than cleared by the
+            // very swallow it exists for, in case more than one stray
+            // Player event for the same track arrives first.
+            return true;
+        }
+        false
     }
 
     /// Detach/reattach the Analysis Service whenever `queue.current()`
@@ -2269,9 +2612,27 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
                 // throttled re-seek (`reseek_for_loop_wrap`) keeps the
                 // streaming `Player` inside the region instead.
                 SourceEvent::EndOfTrack if self.shared.loop_state() == 2 => continue,
+                // 008, research R8.2 (rule C8): under a non-unity tempo,
+                // the streaming Player's own `EndOfTrack` needs gating
+                // (deferred below unity until the engine catches up,
+                // swallowed above unity once the engine already declared
+                // it itself — `check_engine_ended_track_early`).
+                SourceEvent::EndOfTrack => {
+                    let advance_rate = self.shared.read_anchor().advance_rate;
+                    if self.gate_end_of_track_for_tempo(advance_rate) {
+                        continue;
+                    }
+                }
                 _ => {}
             }
             if let Some(input) = map_source_event(event) {
+                // 008, research R8.2: a fresh `TrackStarted` clears any
+                // tempo-gated end-of-track bookkeeping left over from the
+                // previous track.
+                if matches!(input, Input::TrackStarted { .. }) {
+                    self.engine_ended_track = false;
+                    self.end_of_track_pending = false;
+                }
                 self.dispatch(input);
             }
         }
@@ -2880,6 +3241,15 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
                 });
                 if let Some((a, b, crossfade_ms, repeat)) = repush {
                     self.push_loop_engine_commands(a, b, crossfade_ms, repeat, false);
+                }
+                // 008, contracts/effects-service.md §2 rule C4 (research
+                // R11): re-clamp at the new source rate first (its own
+                // commands are dropped — `replay()` below sends the
+                // already-reclamped current values), then rebuild the RT
+                // chain from scratch.
+                let _ = self.chain.set_source_rate(self.source_sample_rate);
+                for command in self.chain.replay() {
+                    self.push_command_retrying(command);
                 }
             }
             Err(_) => self.disconnect(),

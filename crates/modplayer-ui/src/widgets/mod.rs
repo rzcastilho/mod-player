@@ -8,6 +8,7 @@
 //! through: the artwork-failure placeholder and the loading-row shimmer
 //! (contracts/ui-surface.md §6-7).
 
+pub mod chain_meters;
 pub mod initials;
 pub mod peak_meter;
 pub mod skeleton;

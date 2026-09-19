@@ -14,6 +14,8 @@
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use modplayer_effects::consts::{MAX_NODES, SPECTRUM_BANDS};
+
 /// Atomics shared across a `Processor`'s lifetime and every rebuild of it.
 #[derive(Debug)]
 pub struct RtShared {
@@ -42,6 +44,11 @@ pub struct RtShared {
     /// covered; bounds `PositionClock`'s extrapolation ("capped at
     /// position + one_buffer_duration × 2", engine-delta.md §3).
     anchor_buffer_frames: AtomicU32,
+    /// `f32` bits of `ChainRt::advance_rate()` at the render that produced
+    /// the current anchor (008, research R7): `1.0` outside any engaged
+    /// time-stretch stage. Part of the same seqlock-protected snapshot as
+    /// the rest of the anchor.
+    anchor_advance_rate_bits: AtomicU32,
     /// Wraps of the armed loop region so far (006, contracts/engine-
     /// loop.md §3); written after every wrap and on `LoopCommit`/
     /// `LoopDisarm`. Session-only mirror the UI reads for "wraps
@@ -53,6 +60,41 @@ pub struct RtShared {
     /// armed-active. Written once per render from the segment
     /// classification.
     loop_state: AtomicU8,
+    /// Each RT slot's rolling-mean cost, as a percentage of the callback
+    /// period (008, FR-012a, data-model.md §4); `f32` bits, indexed by RT
+    /// slot. `0.0` for an inactive slot or before its `CostRing` holds
+    /// any sample. Published once per render (Phase 6 wires the writer;
+    /// the field lands now so the RT/UI contract is fixed).
+    node_cost_bits: [AtomicU32; MAX_NODES],
+    /// Σ of every active slot's `node_cost` (008, FR-012a).
+    chain_cost_bits: AtomicU32,
+    /// This render's whole-callback percentage-of-period (chain + host,
+    /// FR-012); the overload state machine's raw input.
+    render_pct_bits: AtomicU32,
+    /// FR-012, NFR-8.2: overload events counted so far this session, and
+    /// whether the chain is currently in an overload excursion (research
+    /// R10) — mirrors `ChainRt::overload_count()`/`over_budget()`,
+    /// published once per render.
+    overload_count: AtomicU32,
+    over_budget: AtomicBool,
+    /// Pre-/post-chain peak + RMS, linear amplitude (008, FR-011,
+    /// contracts/engine-effect-chain.md §7); `f32` bits, published once
+    /// per render.
+    pre_peak_l_bits: AtomicU32,
+    pre_peak_r_bits: AtomicU32,
+    pre_rms_l_bits: AtomicU32,
+    pre_rms_r_bits: AtomicU32,
+    post_peak_l_bits: AtomicU32,
+    post_peak_r_bits: AtomicU32,
+    post_rms_l_bits: AtomicU32,
+    post_rms_r_bits: AtomicU32,
+    /// The 64-band post-chain spectrum (008, FR-011, research R9):
+    /// linear magnitude 0..1, `f32` bits, published together with a
+    /// bumped `spectrum_generation` whenever `SpectrumRing::
+    /// maybe_recompute` actually recomputes (every >= 256 new post-chain
+    /// frames).
+    spectrum_bits: [AtomicU32; SPECTRUM_BANDS],
+    spectrum_generation: AtomicU32,
 }
 
 impl Default for RtShared {
@@ -68,6 +110,9 @@ pub struct AnchorSnapshot {
     pub instant: Instant,
     pub playing: bool,
     pub buffer_frames: u32,
+    /// `ChainRt::advance_rate()` at this anchor (008, research R7): the
+    /// playhead advances at `source_rate * advance_rate` frames/second.
+    pub advance_rate: f32,
 }
 
 impl RtShared {
@@ -83,8 +128,24 @@ impl RtShared {
             anchor_generation: AtomicU64::new(0),
             anchor_playing: AtomicBool::new(false),
             anchor_buffer_frames: AtomicU32::new(0),
+            anchor_advance_rate_bits: AtomicU32::new(1.0f32.to_bits()),
             loop_wraps: AtomicU32::new(0),
             loop_state: AtomicU8::new(0),
+            node_cost_bits: std::array::from_fn(|_| AtomicU32::new(0)),
+            chain_cost_bits: AtomicU32::new(0),
+            render_pct_bits: AtomicU32::new(0),
+            overload_count: AtomicU32::new(0),
+            over_budget: AtomicBool::new(false),
+            pre_peak_l_bits: AtomicU32::new(0),
+            pre_peak_r_bits: AtomicU32::new(0),
+            pre_rms_l_bits: AtomicU32::new(0),
+            pre_rms_r_bits: AtomicU32::new(0),
+            post_peak_l_bits: AtomicU32::new(0),
+            post_peak_r_bits: AtomicU32::new(0),
+            post_rms_l_bits: AtomicU32::new(0),
+            post_rms_r_bits: AtomicU32::new(0),
+            spectrum_bits: std::array::from_fn(|_| AtomicU32::new(0)),
+            spectrum_generation: AtomicU32::new(0),
         }
     }
 
@@ -96,6 +157,7 @@ impl RtShared {
         now: Instant,
         playing: bool,
         buffer_frames: u32,
+        advance_rate: f32,
     ) {
         self.anchor_generation.fetch_add(1, Ordering::AcqRel);
         self.anchor_position_frames
@@ -107,6 +169,8 @@ impl RtShared {
         self.anchor_playing.store(playing, Ordering::Relaxed);
         self.anchor_buffer_frames
             .store(buffer_frames, Ordering::Relaxed);
+        self.anchor_advance_rate_bits
+            .store(advance_rate.to_bits(), Ordering::Relaxed);
         self.anchor_generation.fetch_add(1, Ordering::AcqRel);
     }
 
@@ -123,6 +187,8 @@ impl RtShared {
             let instant_nanos = self.anchor_instant_nanos.load(Ordering::Relaxed);
             let playing = self.anchor_playing.load(Ordering::Relaxed);
             let buffer_frames = self.anchor_buffer_frames.load(Ordering::Relaxed);
+            let advance_rate =
+                f32::from_bits(self.anchor_advance_rate_bits.load(Ordering::Relaxed));
             let g2 = self.anchor_generation.load(Ordering::Acquire);
             if g1 == g2 {
                 return AnchorSnapshot {
@@ -130,6 +196,7 @@ impl RtShared {
                     instant: self.epoch + Duration::from_nanos(instant_nanos),
                     playing,
                     buffer_frames,
+                    advance_rate,
                 };
             }
         }
@@ -200,6 +267,142 @@ impl RtShared {
     pub fn set_loop_state(&self, state: u8) {
         self.loop_state.store(state, Ordering::Release);
     }
+
+    /// RT slot `slot`'s rolling-mean cost, as a percentage of the
+    /// callback period (008, FR-012a). `0.0` for `slot >= MAX_NODES`.
+    #[must_use]
+    pub fn node_cost(&self, slot: usize) -> f32 {
+        self.node_cost_bits
+            .get(slot)
+            .map_or(0.0, |bits| f32::from_bits(bits.load(Ordering::Relaxed)))
+    }
+
+    /// Publish RT slot `slot`'s cost, written once per render. A no-op
+    /// for `slot >= MAX_NODES`.
+    pub fn set_node_cost(&self, slot: usize, pct: f32) {
+        if let Some(bits) = self.node_cost_bits.get(slot) {
+            bits.store(pct.to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    /// The whole chain's cost (Σ of every active slot's `node_cost`).
+    #[must_use]
+    pub fn chain_cost(&self) -> f32 {
+        f32::from_bits(self.chain_cost_bits.load(Ordering::Relaxed))
+    }
+
+    /// Publish the whole-chain cost, written once per render.
+    pub fn set_chain_cost(&self, pct: f32) {
+        self.chain_cost_bits.store(pct.to_bits(), Ordering::Relaxed);
+    }
+
+    /// This render's whole-callback percentage-of-period (FR-012).
+    #[must_use]
+    pub fn render_pct(&self) -> f32 {
+        f32::from_bits(self.render_pct_bits.load(Ordering::Relaxed))
+    }
+
+    /// Publish this render's whole-callback percentage, written once per
+    /// render.
+    pub fn set_render_pct(&self, pct: f32) {
+        self.render_pct_bits.store(pct.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Overload events counted so far this session (FR-012, NFR-8.2).
+    #[must_use]
+    pub fn overload_count(&self) -> u32 {
+        self.overload_count.load(Ordering::Relaxed)
+    }
+
+    /// Publish the overload counter, mirrored from `ChainRt::
+    /// overload_count()` once per render.
+    pub fn set_overload_count(&self, count: u32) {
+        self.overload_count.store(count, Ordering::Relaxed);
+    }
+
+    /// Whether the chain is currently in an overload excursion (FR-012).
+    #[must_use]
+    pub fn over_budget(&self) -> bool {
+        self.over_budget.load(Ordering::Relaxed)
+    }
+
+    /// Publish the over-budget flag, mirrored from `ChainRt::
+    /// over_budget()` once per render.
+    pub fn set_over_budget(&self, over_budget: bool) {
+        self.over_budget.store(over_budget, Ordering::Relaxed);
+    }
+
+    /// Pre-chain peak/RMS, L/R, linear amplitude (008, FR-011).
+    #[must_use]
+    pub fn pre_level(&self) -> (f32, f32, f32, f32) {
+        (
+            f32::from_bits(self.pre_peak_l_bits.load(Ordering::Relaxed)),
+            f32::from_bits(self.pre_peak_r_bits.load(Ordering::Relaxed)),
+            f32::from_bits(self.pre_rms_l_bits.load(Ordering::Relaxed)),
+            f32::from_bits(self.pre_rms_r_bits.load(Ordering::Relaxed)),
+        )
+    }
+
+    /// Publish the pre-chain peak/RMS, L/R, written once per render.
+    pub fn set_pre_level(&self, peak_l: f32, peak_r: f32, rms_l: f32, rms_r: f32) {
+        self.pre_peak_l_bits
+            .store(peak_l.to_bits(), Ordering::Relaxed);
+        self.pre_peak_r_bits
+            .store(peak_r.to_bits(), Ordering::Relaxed);
+        self.pre_rms_l_bits
+            .store(rms_l.to_bits(), Ordering::Relaxed);
+        self.pre_rms_r_bits
+            .store(rms_r.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Post-chain (after master gain + tone, before the limiter)
+    /// peak/RMS, L/R, linear amplitude (008, FR-011).
+    #[must_use]
+    pub fn post_level(&self) -> (f32, f32, f32, f32) {
+        (
+            f32::from_bits(self.post_peak_l_bits.load(Ordering::Relaxed)),
+            f32::from_bits(self.post_peak_r_bits.load(Ordering::Relaxed)),
+            f32::from_bits(self.post_rms_l_bits.load(Ordering::Relaxed)),
+            f32::from_bits(self.post_rms_r_bits.load(Ordering::Relaxed)),
+        )
+    }
+
+    /// Publish the post-chain peak/RMS, L/R, written once per render.
+    pub fn set_post_level(&self, peak_l: f32, peak_r: f32, rms_l: f32, rms_r: f32) {
+        self.post_peak_l_bits
+            .store(peak_l.to_bits(), Ordering::Relaxed);
+        self.post_peak_r_bits
+            .store(peak_r.to_bits(), Ordering::Relaxed);
+        self.post_rms_l_bits
+            .store(rms_l.to_bits(), Ordering::Relaxed);
+        self.post_rms_r_bits
+            .store(rms_r.to_bits(), Ordering::Relaxed);
+    }
+
+    /// The 64-band post-chain spectrum, linear magnitude 0..1 (008,
+    /// FR-011).
+    #[must_use]
+    pub fn spectrum(&self) -> [f32; SPECTRUM_BANDS] {
+        std::array::from_fn(|i| f32::from_bits(self.spectrum_bits[i].load(Ordering::Relaxed)))
+    }
+
+    /// Publish a freshly recomputed spectrum plus its generation
+    /// (`SpectrumRing::generation()`) — called only when `SpectrumRing::
+    /// maybe_recompute` actually recomputed this render.
+    pub fn set_spectrum(&self, bands: &[f32], generation: u32) {
+        for (slot, &value) in self.spectrum_bits.iter().zip(bands) {
+            slot.store(value.to_bits(), Ordering::Relaxed);
+        }
+        self.spectrum_generation
+            .store(generation, Ordering::Relaxed);
+    }
+
+    /// The spectrum's current generation counter (data-model.md §2.5):
+    /// bumped every time `set_spectrum` publishes a fresh recompute.
+    #[must_use]
+    pub fn spectrum_generation(&self) -> u32 {
+        self.spectrum_generation.load(Ordering::Relaxed)
+    }
 }
 
 #[cfg(test)]
@@ -241,7 +444,7 @@ mod tests {
         assert!(!before.playing);
 
         let now = Instant::now();
-        shared.write_anchor(1_000, now, true, 256);
+        shared.write_anchor(1_000, now, true, 256, 1.0);
         let snapshot = shared.read_anchor();
         assert_eq!(snapshot.position_frames, 1_000);
         assert!(snapshot.playing);

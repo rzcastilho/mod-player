@@ -14,9 +14,18 @@
 
 use std::sync::Arc;
 
-use assert_no_alloc::{AllocDisabler, assert_no_alloc};
+// `AllocDisabler` itself (the global-allocator guard) is compiled out in
+// release builds under the crate's default `disable_release` feature
+// (its `assert_no_alloc`/`permit_alloc` become no-ops there instead) —
+// gated so this test file still compiles under `cargo test --release`
+// (008 T096/T097 need release-mode compilation of the whole crate's test
+// suite; `assert_no_alloc` itself stays unconditional, a no-op there).
+#[cfg(debug_assertions)]
+use assert_no_alloc::AllocDisabler;
+use assert_no_alloc::assert_no_alloc;
 use modplayer_audio_source::DecodedStore;
 use modplayer_audio_source_synthetic::SyntheticSource;
+use modplayer_effects::catalog::{NodeKind, NodeOwner, ParamId};
 use modplayer_engine::{
     CeilingDb, Command, Event, Processor, ProcessorConfig, RtShared, Transport, VolumePercent,
 };
@@ -279,4 +288,108 @@ fn render_with_armed_loop_never_allocates() {
         }
     }
     assert!(wraps >= 20, "wraps={wraps}");
+}
+
+/// contracts/engine-effect-chain.md §10, Constitution I: driving every
+/// `Chain*` command variant (add/param/move/bypass/remove) through a
+/// 16-node chain covering every built-in `NodeKind` (cycled by slot),
+/// interleaved with `Seek`, must never allocate.
+#[test]
+fn render_with_full_chain_never_allocates() {
+    let (mut command_tx, command_rx) = RingBuffer::<Command>::new(256);
+    let (event_tx, _event_rx) = RingBuffer::<Event>::new(256);
+    let shared = Arc::new(RtShared::new());
+    let config = ProcessorConfig {
+        source_rate: 44_100,
+        device_rate: 44_100,
+        device_channels: 2,
+        max_frames: 256,
+        transport: Transport::Playing,
+        position_frames: 0,
+        master_volume: VolumePercent::new(80),
+        ceiling: CeilingDb::default(),
+        shared,
+    };
+    let mut processor = Processor::new(config, SyntheticSource::new(44_100), command_rx, event_tx);
+    let _ = command_tx.push(Command::Play);
+
+    let mut out = vec![0.0f32; 256 * 2];
+
+    for i in 0u32..2_000 {
+        let slot = (i % 16) as u8;
+        match i % 16 {
+            0 => {
+                let kind = NodeKind::ALL[slot as usize % NodeKind::ALL.len()];
+                let _ = command_tx.push(Command::ChainInsert {
+                    slot,
+                    position: 0,
+                    kind,
+                    owner: NodeOwner::Host,
+                });
+            }
+            3 => {
+                let _ = command_tx.push(Command::ChainSetParam {
+                    slot,
+                    param: ParamId(0),
+                    value: -6.0,
+                });
+            }
+            6 => {
+                let _ = command_tx.push(Command::ChainSetParam {
+                    slot,
+                    param: ParamId(1),
+                    value: 1.0,
+                });
+            }
+            8 => {
+                let _ = command_tx.push(Command::ChainMove { slot, position: 0 });
+            }
+            9 => {
+                // EQ band 0's discrete `type` (id 19) for an `Equalizer`
+                // slot — exercises `Eq8Dsp::switch_band_type`'s shadow
+                // biquad; a harmless no-op (unknown id) for every other
+                // kind.
+                let value = if (i / 16) % 3 == 0 { 1.0 } else { 0.0 };
+                let _ = command_tx.push(Command::ChainSetParam {
+                    slot,
+                    param: ParamId(19),
+                    value,
+                });
+            }
+            10 => {
+                let _ = command_tx.push(Command::ChainSetBypass {
+                    slot,
+                    bypassed: true,
+                });
+            }
+            12 => {
+                let _ = command_tx.push(Command::ChainSetBypass {
+                    slot,
+                    bypassed: false,
+                });
+            }
+            13 => {
+                // `mono_sum` (id 2) for a `StereoTools` slot — exercises
+                // `StereoDsp::set_flags_target`'s dual-config crossfade; a
+                // harmless resonance/q/no-op ramp for every other kind.
+                let value = if (i / 16) % 2 == 0 { 1.0 } else { 0.0 };
+                let _ = command_tx.push(Command::ChainSetParam {
+                    slot,
+                    param: ParamId(2),
+                    value,
+                });
+            }
+            15 => {
+                let _ = command_tx.push(Command::ChainRemove { slot });
+            }
+            _ => {}
+        }
+        if i % 23 == 0 {
+            let _ = command_tx.push(Command::Seek(u64::from(i) * 37));
+        }
+
+        assert_no_alloc(|| {
+            processor.render(&mut out);
+        });
+    }
 }

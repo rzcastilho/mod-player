@@ -255,6 +255,8 @@ const CONTROLS_KEYS: &[&str] = &[
     "action-nav-focus-search",
     "action-effects-tempo-step-up",
     "action-effects-tempo-step-down",
+    // 008, contracts/effects-service.md §4.
+    "action-nav-toggle-effect-chain",
     "action-cat-transport",
     "action-cat-markers",
     "action-cat-loop",
@@ -293,6 +295,81 @@ const CONTROLS_ARG_KEYS: &[&str] = &[
 /// contracts/keymap-settings.md), templated with `{ $ids }` — resolved via
 /// `tr_args` like `DEVICE_NAMED_KEYS`.
 const CONTROLS_WARNING_ARG_KEYS: &[&str] = &["keybindings-invalid-entries"];
+
+/// `effects.ftl` keys added by 008 Phase 4 (US2), Phase 5 (US3) and
+/// Phase 6 (US4; contracts/ui-effect-chain.md §6) with no Fluent
+/// placeholder — resolved via plain `tr`.
+const EFFECTS_KEYS: &[&str] = &[
+    "effects-toggle",
+    "effects-panel-title",
+    "effects-add-node",
+    "effects-add",
+    "effects-remove",
+    "effects-bypass",
+    "effects-reorder-handle",
+    "effects-mode-note",
+    "effects-chain-full",
+    "effects-owner-host",
+    "effects-owner-plugin",
+    "effects-kind-pitch-shift",
+    "effects-kind-time-stretch",
+    "effects-kind-gain",
+    "effects-param-semitones",
+    "effects-param-formant",
+    "effects-param-mode",
+    "effects-param-ratio",
+    "effects-param-level",
+    "effects-param-mute",
+    "effects-mode-performance",
+    "effects-mode-quality",
+    // Phase 5 (US3): equalizer, filter, stereo tools.
+    "effects-kind-equalizer",
+    "effects-kind-filter",
+    "effects-kind-stereo-tools",
+    "effects-param-band-freq",
+    "effects-param-band-gain",
+    "effects-param-band-q",
+    "effects-param-band-type",
+    "effects-param-filter-mode",
+    "effects-param-cutoff",
+    "effects-param-resonance",
+    "effects-param-width",
+    "effects-param-balance",
+    "effects-param-mono-sum",
+    "effects-param-phase-invert",
+    "effects-param-channel-swap",
+    "effects-band-type-peak",
+    "effects-band-type-low-shelf",
+    "effects-band-type-high-shelf",
+    "effects-filter-high-pass",
+    "effects-filter-low-pass",
+    // Phase 6 (US4): meters, spectrum, overload/auto-bypass.
+    "effects-over-budget-badge",
+    "effects-pre",
+    "effects-post",
+    "effects-peak",
+    "effects-rms",
+    "effects-spectrum",
+    "effects-auto-bypassed",
+];
+
+/// `effects.ftl` keys templated with `{ $pct }` — resolved via `tr_args`.
+const EFFECTS_PCT_ARG_KEYS: &[&str] = &["effects-chain-cpu", "effects-cpu"];
+
+/// `effects.ftl` keys templated with `{ $count }` — resolved via
+/// `tr_args` (008 Phase 6, contracts/ui-effect-chain.md §2's overload
+/// counter).
+const EFFECTS_COUNT_ARG_KEYS: &[&str] = &["effects-overloads"];
+
+/// `effects.ftl` notification keys (008, data-model.md §6): `{ $node }`,
+/// `effect-chain-over-budget` also `{ $owner }` — resolved via
+/// `tr_args` from `PlaybackController::drain_engine_events`/`tempo_step`,
+/// never directly by a widget in this file, but still owned by this
+/// crate's `effects.ftl` (contracts/ui-effect-chain.md §6).
+const EFFECTS_NODE_ARG_KEYS: &[&str] = &["effect-chain-auto-bypassed"];
+const EFFECTS_NODE_OWNER_ARG_KEYS: &[&str] = &["effect-chain-over-budget"];
+/// `effects-no-time-stretch` (008, Phase 3) takes no Fluent placeholder.
+const EFFECTS_NO_ARG_NOTIFICATION_KEYS: &[&str] = &["effects-no-time-stretch"];
 
 /// Every Settings-screen key (US5, T086): the eleven fixed-order category
 /// labels, the search box, the placeholder text for categories with no
@@ -719,6 +796,60 @@ fn every_shell_nav_and_notification_key_resolves() {
             "Fluent key `{key}` is missing from locales/en-US/controls.ftl (tr_args() fell back to the raw key)"
         );
     }
+
+    for key in EFFECTS_KEYS {
+        let resolved = tr(key);
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/effects.ftl (tr() fell back to the raw key)"
+        );
+    }
+
+    for key in EFFECTS_PCT_ARG_KEYS {
+        let resolved = tr_args(key, &[("pct", "12".to_string())]);
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/effects.ftl (tr_args() fell back to the raw key)"
+        );
+    }
+
+    for key in EFFECTS_COUNT_ARG_KEYS {
+        let resolved = tr_args(key, &[("count", "3".to_string())]);
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/effects.ftl (tr_args() fell back to the raw key)"
+        );
+    }
+
+    for key in EFFECTS_NODE_ARG_KEYS {
+        let resolved = tr_args(key, &[("node", "Gain".to_string())]);
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/effects.ftl (tr_args() fell back to the raw key)"
+        );
+    }
+
+    for key in EFFECTS_NODE_OWNER_ARG_KEYS {
+        let resolved = tr_args(
+            key,
+            &[
+                ("node", "Gain".to_string()),
+                ("owner", "plugin".to_string()),
+            ],
+        );
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/effects.ftl (tr_args() fell back to the raw key)"
+        );
+    }
+
+    for key in EFFECTS_NO_ARG_NOTIFICATION_KEYS {
+        let resolved = tr(key);
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/effects.ftl (tr() fell back to the raw key)"
+        );
+    }
 }
 
 /// Every message identifier a Fluent (`.ftl`) resource defines: lines of
@@ -747,6 +878,7 @@ fn no_unused_keys_in_playback_and_settings_ftl() {
     let playback_ftl = include_str!("../../../locales/en-US/playback.ftl");
     let settings_ftl = include_str!("../../../locales/en-US/settings.ftl");
     let controls_ftl = include_str!("../../../locales/en-US/controls.ftl");
+    let effects_ftl = include_str!("../../../locales/en-US/effects.ftl");
 
     let tested: HashSet<&str> = SHELL_AND_NOTIFICATION_KEYS
         .iter()
@@ -765,6 +897,12 @@ fn no_unused_keys_in_playback_and_settings_ftl() {
         .chain(CONTROLS_KEYS)
         .chain(CONTROLS_ARG_KEYS)
         .chain(CONTROLS_WARNING_ARG_KEYS)
+        .chain(EFFECTS_KEYS)
+        .chain(EFFECTS_PCT_ARG_KEYS)
+        .chain(EFFECTS_COUNT_ARG_KEYS)
+        .chain(EFFECTS_NODE_ARG_KEYS)
+        .chain(EFFECTS_NODE_OWNER_ARG_KEYS)
+        .chain(EFFECTS_NO_ARG_NOTIFICATION_KEYS)
         .copied()
         .collect();
 
@@ -784,6 +922,12 @@ fn no_unused_keys_in_playback_and_settings_ftl() {
         assert!(
             tested.contains(key),
             "locales/en-US/controls.ftl defines `{key}`, which no UI code path (and so no test in this file) uses — remove it or wire it up"
+        );
+    }
+    for key in defined_keys(effects_ftl) {
+        assert!(
+            tested.contains(key),
+            "locales/en-US/effects.ftl defines `{key}`, which no UI code path (and so no test in this file) uses — remove it or wire it up"
         );
     }
 }

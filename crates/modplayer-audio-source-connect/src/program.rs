@@ -31,6 +31,13 @@ pub enum MarkerKind {
     /// local track-position baseline too, when on the `Ring` feed —
     /// contracts/connect-source-delta.md §3 rule 4: ignored on `Store`).
     Reposition,
+    /// The first marker a re-attached RT half sees (`swap.rs`): the
+    /// track already playing keeps its `DecodedStore`, so the new RT can
+    /// serve sample-exact loop seams again without waiting for the next
+    /// `TrackStart`. Unlike `TrackStart` it moves neither `cursor` nor
+    /// `track_seq` (the track did not change) and never feeds the
+    /// retirement ring (the new RT holds no store yet).
+    Reattach { store: Arc<DecodedStore> },
 }
 
 impl PartialEq for MarkerKind {
@@ -40,7 +47,8 @@ impl PartialEq for MarkerKind {
     /// `PartialEq`.
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::TrackStart { store: a }, Self::TrackStart { store: b }) => Arc::ptr_eq(a, b),
+            (Self::TrackStart { store: a }, Self::TrackStart { store: b })
+            | (Self::Reattach { store: a }, Self::Reattach { store: b }) => Arc::ptr_eq(a, b),
             (Self::TrackEnd, Self::TrackEnd) | (Self::Reposition, Self::Reposition) => true,
             _ => false,
         }
@@ -88,6 +96,16 @@ impl Marker {
             kind: MarkerKind::Reposition,
             at_written_frame,
             position_frames,
+        }
+    }
+
+    /// Due immediately (`at_written_frame: 0`): pushed by `attach()` into
+    /// a re-attached RT's fresh marker ring before the worker gets it.
+    pub fn reattach(store: Arc<DecodedStore>) -> Self {
+        Self {
+            kind: MarkerKind::Reattach { store },
+            at_written_frame: 0,
+            position_frames: 0,
         }
     }
 }

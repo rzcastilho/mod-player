@@ -24,9 +24,11 @@ fn chord(s: &str) -> Chord {
 // T014: catalog shape (FR-001/FR-002/FR-004)
 // ---------------------------------------------------------------------
 
+/// 008, contracts/effects-service.md §4: `ToggleEffectChain` appended
+/// (45 entries), enabled by default, category Navigation.
 #[test]
-fn catalog_has_44_unique_ids_in_spec_order() {
-    assert_eq!(CATALOG.len(), 44);
+fn catalog_has_45_entries_and_effects_enabled() {
+    assert_eq!(CATALOG.len(), 45);
     for (i, def) in CATALOG.iter().enumerate() {
         assert_eq!(
             def.action,
@@ -35,7 +37,25 @@ fn catalog_has_44_unique_ids_in_spec_order() {
         );
     }
     let ids: HashSet<&str> = HostAction::ALL.iter().map(|a| a.id()).collect();
-    assert_eq!(ids.len(), 44, "every action id must be unique");
+    assert_eq!(ids.len(), 45, "every action id must be unique");
+
+    assert!(def(HostAction::ToggleEffectChain).enabled_by_default);
+    assert_eq!(
+        def(HostAction::ToggleEffectChain).category,
+        modplayer_core::actions::ActionCategory::Navigation
+    );
+    assert!(def(HostAction::TempoStepUp).enabled_by_default);
+    assert!(def(HostAction::TempoStepDown).enabled_by_default);
+}
+
+/// 008, contracts/effects-service.md §4: `E` is `ToggleEffectChain`'s
+/// sole shipped default, scoped to `NowPlaying`, non-repeating.
+#[test]
+fn toggle_effect_chain_defaults_to_e_in_now_playing() {
+    let row = def(HostAction::ToggleEffectChain);
+    assert_eq!(row.default_bindings, &["E"]);
+    assert_eq!(row.scope, Scope::NowPlaying);
+    assert!(!row.repeats_while_held);
 }
 
 #[test]
@@ -329,19 +349,26 @@ fn defaults_match_spec_table() {
             HostAction::TempoStepUp,
             Scope::NowPlaying,
             true,
-            false,
+            true,
             &["Equals", "Plus"],
         ),
         (
             HostAction::TempoStepDown,
             Scope::NowPlaying,
             true,
-            false,
+            true,
             &["Minus"],
+        ),
+        (
+            HostAction::ToggleEffectChain,
+            Scope::NowPlaying,
+            false,
+            true,
+            &["E"],
         ),
     ];
 
-    assert_eq!(expected.len(), 44);
+    assert_eq!(expected.len(), 45);
     for (i, (action, scope, repeats, enabled, bindings)) in expected.into_iter().enumerate() {
         let row = def(action);
         assert_eq!(
@@ -480,7 +507,7 @@ fn chord_display_mac_and_other() {
 proptest! {
     #[test]
     fn conflict_is_symmetric(
-        ops in prop::collection::vec((0usize..44, 0usize..6), 0..12)
+        ops in prop::collection::vec((0usize..45, 0usize..6), 0..12)
     ) {
         const SMALL_CHORDS: [&str; 6] = ["A", "B", "C", "Space", "Left", "Q"];
         let mut registry = ActionRegistry::new(KeymapOverrides::default());
@@ -523,6 +550,10 @@ fn resolve_returns_none_for_conflicting_chord() {
 #[test]
 fn disabled_action_never_conflicts_or_blocks() {
     let mut registry = ActionRegistry::new(KeymapOverrides::default());
+    // 008 flips TempoStepUp's own shipped default to enabled (T049);
+    // disable it explicitly to exercise the disabled-action mechanics
+    // this test pins.
+    registry.set_enabled(HostAction::TempoStepUp, false);
     assert!(!registry.is_enabled(HostAction::TempoStepUp));
 
     let equals = chord("Equals");
@@ -530,9 +561,8 @@ fn disabled_action_never_conflicts_or_blocks() {
         .add_binding(HostAction::AddPointMarker, equals)
         .unwrap_or_else(|_| unreachable!());
 
-    // TempoStepUp ships bound to "Equals" too, but is disabled by
-    // default, so it must never enter the conflict set nor block
-    // resolution.
+    // TempoStepUp ships bound to "Equals" too, but is disabled here, so
+    // it must never enter the conflict set nor block resolution.
     assert!(!registry.is_conflicting(HostAction::AddPointMarker, equals));
     assert!(!registry.is_conflicting(HostAction::TempoStepUp, equals));
 
@@ -549,6 +579,9 @@ fn disabled_action_never_conflicts_or_blocks() {
 #[test]
 fn enabling_action_flags_existing_collision() {
     let mut registry = ActionRegistry::new(KeymapOverrides::default());
+    // 008 flips TempoStepUp's own shipped default to enabled (T049);
+    // start it disabled here so enabling it below is the thing under test.
+    registry.set_enabled(HostAction::TempoStepUp, false);
     let equals = chord("Equals");
     registry
         .add_binding(HostAction::AddPointMarker, equals)
@@ -646,12 +679,14 @@ fn reset_all_clears_every_conflict() {
 #[test]
 fn disabled_action_never_resolves() {
     let mut registry = ActionRegistry::new(KeymapOverrides::default());
+    // 008 flips TempoStepUp's own shipped default to enabled (T049);
+    // disable it explicitly so it ships bound to "Plus" but disabled.
+    registry.set_enabled(HostAction::TempoStepUp, false);
     let plus = chord("Plus");
     let state = ScopeState {
         now_playing_shown: true,
         marker_focused: false,
     };
-    // TempoStepUp ships bound to "Plus" but disabled: nothing resolves it.
     assert_eq!(registry.resolve(plus, &state), None);
 
     registry.set_enabled(HostAction::TempoStepUp, true);
@@ -697,7 +732,7 @@ fn remove_last_binding_leaves_action_unbound_and_resolvable_by_nothing() {
 proptest! {
     #[test]
     fn overrides_are_sparse_relative_to_defaults(
-        action_idx in 0usize..44,
+        action_idx in 0usize..45,
         set_to_default in any::<bool>(),
     ) {
         let action = HostAction::ALL[action_idx];
@@ -737,7 +772,7 @@ fn chord_sets_eq(a: &[Chord], b: &[Chord]) -> bool {
 proptest! {
     #[test]
     fn overrides_round_trip_through_raw_settings(
-        ops in prop::collection::vec((0usize..44, 0usize..8), 0..10)
+        ops in prop::collection::vec((0usize..45, 0usize..8), 0..10)
     ) {
         use modplayer_core::settings::{AudioSettings, RawSettings};
 

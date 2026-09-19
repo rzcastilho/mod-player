@@ -14,11 +14,19 @@ use librespot_playback::convert::Converter;
 use librespot_playback::decoder::AudioPacket;
 use rtrb::RingBuffer;
 
+#[path = "../src/program.rs"]
+#[allow(dead_code)]
+mod program;
 #[path = "../src/sink.rs"]
 #[allow(dead_code)]
 mod sink;
+#[path = "../src/swap.rs"]
+#[allow(dead_code)]
+mod swap;
 
+use modplayer_audio_source::SourceRtShared;
 use sink::RingSink;
+use swap::RingSwap;
 
 #[test]
 fn back_pressure_delivers_every_sample_through_a_smaller_ring() {
@@ -27,7 +35,12 @@ fn back_pressure_delivers_every_sample_through_a_smaller_ring() {
 
     let (producer, mut consumer) = RingBuffer::<f32>::new(RING_CAPACITY);
     let written = Arc::new(AtomicU64::new(0));
-    let mut ring_sink = RingSink::new(producer, Arc::clone(&written));
+    let mut ring_sink = RingSink::new(
+        producer,
+        Arc::clone(&written),
+        Arc::new(RingSwap::default()),
+        Arc::new(SourceRtShared::new()),
+    );
 
     let samples: Vec<f64> = (0..SAMPLE_COUNT)
         .map(|i| (i as f64 % 100.0) / 100.0)

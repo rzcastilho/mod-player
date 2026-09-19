@@ -16,6 +16,7 @@ use modplayer_audio_source::{SourceHealth, SourceHost};
 use modplayer_core::{ActiveState, AnalysisStatus, Intent, PlaybackController, tr, tr_args};
 
 use crate::artwork::{ArtworkCache, ArtworkState};
+use crate::effects_view;
 use crate::markers;
 use crate::queue_view;
 use crate::waveform::{
@@ -26,6 +27,11 @@ use crate::widgets::{peak_meter, volume};
 
 /// The artwork square's side length (matches `rows.rs`'s row artwork).
 const ARTWORK_SIZE: f32 = 96.0;
+
+/// Height kept free below the Effect Chain panel's scroll area for the
+/// master volume row, the peak meter and the Queue toggle's panel header,
+/// so an open panel never pushes them off the bottom of the window.
+const EFFECTS_PANEL_RESERVED_HEIGHT: f32 = 140.0;
 
 /// Persists the Queue panel's open/closed state across frames in egui's
 /// own per-viewer memory (ui-surface.md §2: reached from Now Playing via a
@@ -77,6 +83,10 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     let mut queue_open = ui
         .memory(|memory| memory.data.get_temp::<bool>(queue_id))
         .unwrap_or(false);
+    let effects_id = effects_view::panel_open_id();
+    let mut effects_open = ui
+        .memory(|memory| memory.data.get_temp::<bool>(effects_id))
+        .unwrap_or(false);
 
     ui.horizontal(|ui| {
         let playing = controller.transport_state().intent == Intent::Playing;
@@ -123,13 +133,42 @@ pub fn show<B: OutputBackend, H: SourceHost>(
         {
             queue_open = !queue_open;
         }
+
+        if ui
+            .selectable_label(effects_open, tr("effects-toggle"))
+            .clicked()
+        {
+            effects_open = !effects_open;
+        }
     });
     ui.memory_mut(|memory| memory.data.insert_temp(queue_id, queue_open));
+    ui.memory_mut(|memory| memory.data.insert_temp(effects_id, effects_open));
 
     if controller.current_track().is_some() {
         show_waveform(ui, controller, waveform, available, track_changed);
         markers::panel(ui, controller, waveform);
         markers::handle_focused_marker_keys(ui, controller, waveform);
+    }
+
+    // 008, contracts/ui-effect-chain.md §1: drawn after the waveform/
+    // markers block and before the Queue panel, regardless of whether a
+    // track is loaded (an empty chain with 0 % figures is valid).
+    if effects_open {
+        ui.separator();
+        // The panel scrolls on its own: a full 16-node chain (or two
+        // equalizers) is taller than the window, and without this the
+        // "Add node…" row, master volume and the Queue panel fell off the
+        // bottom with no way to reach them (2026-09-19 manual walk, M8/
+        // M10). Capped so the controls below it stay on screen.
+        let max_height = (ui.available_height() - EFFECTS_PANEL_RESERVED_HEIGHT).max(160.0);
+        egui::ScrollArea::vertical()
+            .id_salt("now-playing-effect-chain-scroll")
+            .max_height(max_height)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                effects_view::show(ui, controller);
+                effects_view::handle_focused_handle_keys(ui, controller);
+            });
     }
 
     if let Some(new_volume) = volume::master_volume(ui, controller.master_volume()) {

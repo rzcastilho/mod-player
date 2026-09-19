@@ -62,6 +62,38 @@ pub fn crossfade_gains(index: u64, x: u64) -> (f32, f32) {
     (theta.cos(), theta.sin())
 }
 
+/// The published position after subtracting a chain lead of `lead`
+/// source frames from `raw` (the source's raw position), while a loop
+/// `[a, b)` is active and `raw >= a` (008, research R7, contracts/
+/// engine-effect-chain.md §9): `a + ((raw - a) - lead) mod (b - a)` —
+/// the smallest non-negative representative, computed via wraparound
+/// modular arithmetic rather than literally searching for `k`. Reduces
+/// to 006's `b - (lead - (raw - a))` whenever `lead - (raw - a) < b - a`
+/// (a lead shorter than one loop period). Degenerate `b <= a` falls back
+/// to `raw.saturating_sub(lead)` (no loop to rewind within); the caller
+/// (`Processor::render`) is responsible for the `raw >= a` precondition
+/// (contracts/engine-effect-chain.md §9's `if loop active && raw >= a`
+/// guard) — this function itself still behaves sanely (via `raw - a`
+/// saturating to `0`) if that precondition is violated.
+///
+/// ```
+/// use modplayer_engine::loop_math::rewind_in_loop;
+/// // A 25-frame lead inside a [1_000, 1_100) loop, well within one period.
+/// assert_eq!(rewind_in_loop(1_050, 25, 1_000, 1_100), 1_025);
+/// // A lead that wraps past `a` lands back near `b`.
+/// assert_eq!(rewind_in_loop(1_010, 25, 1_000, 1_100), 1_085);
+/// ```
+pub fn rewind_in_loop(raw: u64, lead: u64, a: u64, b: u64) -> u64 {
+    if b <= a {
+        return raw.saturating_sub(lead);
+    }
+    let period = b - a;
+    let offset = raw.saturating_sub(a) % period;
+    let lead_mod = lead % period;
+    let diff = (offset + period - lead_mod) % period;
+    a + diff
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,6 +146,41 @@ mod tests {
         ) {
             let elapsed = a.saturating_sub(1).min(before);
             prop_assert_eq!(wrap_position(a, a + len, elapsed), elapsed);
+        }
+
+        /// 008, research R7: `rewind_in_loop`'s result always lands inside
+        /// `[a, b)`, for any `raw >= a` and any `lead` (including one
+        /// longer than the loop period itself).
+        #[test]
+        fn rewind_in_loop_lands_in_region(
+            a in 0u64..1_000_000,
+            len in 1u64..100_000,
+            extra in 0u64..500_000,
+            lead in 0u64..1_000_000,
+        ) {
+            let b = a + len;
+            let raw = a + extra;
+            let published = rewind_in_loop(raw, lead, a, b);
+            prop_assert!(published >= a && published < b, "published={published} a={a} b={b}");
+        }
+
+        /// A lead shorter than one loop period reduces to 006's original
+        /// "republish through B" rule.
+        #[test]
+        fn rewind_in_loop_matches_006_when_lead_fits_one_period(
+            a in 0u64..1_000_000,
+            len in 2u64..100_000,
+            offset_raw in 0u64..100_000,
+            deficit_raw in 1u64..100_000,
+        ) {
+            let b = a + len;
+            let offset = offset_raw % len;
+            // `lead - offset` in `[1, len)`, so the lead fits one period.
+            let deficit = 1 + deficit_raw % (len - 1);
+            let lead = offset + deficit;
+            let raw = a + offset;
+            let published = rewind_in_loop(raw, lead, a, b);
+            prop_assert_eq!(published, b - deficit);
         }
     }
 

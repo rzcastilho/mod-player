@@ -210,6 +210,18 @@ pub fn marker_claims() -> Vec<ChordPattern> {
     ]
 }
 
+/// `effects_view.rs`'s drag handle (008, contracts/ui-effect-chain.md
+/// §4) — only `↑`/`↓`, so `effects_view::handle_focused_handle_keys` (not
+/// this dispatcher) moves the focused node while the handle has focus.
+pub fn effect_handle_claims() -> Vec<ChordPattern> {
+    vec![
+        plain(key("Up")),
+        plain(key("Down")),
+        plain(key("Tab")),
+        shift(key("Tab")),
+    ]
+}
+
 /// `rows.rs`'s library/search/queue rows (contracts/ui-actions.md §2).
 pub fn row_claims() -> Vec<ChordPattern> {
     vec![
@@ -300,14 +312,23 @@ fn candidate_chords(
 /// — either its declared `Keys` set, egui's toolkit default for an
 /// unclaimed focused widget, or `Tab`/`Shift+Tab` (always left to the
 /// toolkit once a widget is focused, contracts/ui-actions.md §2 rule 2).
+///
+/// Matched against the same layout-normalised chord the registry lookup
+/// below uses (`candidate_chords`' first slot: `Shift` dropped when the
+/// layout consumed it to produce a different character), not the raw
+/// modifiers — a real `+` is `Shift`+`=` on a US layout, so a claim for
+/// `plain(Plus)` otherwise never matched and `+` on a focused waveform
+/// stepped tempo instead of zooming (2026-09-19 manual walk, M6).
 fn focused_widget_owns_event(
     claims: &FocusClaims,
     focused: Id,
     key: EguiKey,
+    physical_key: Option<EguiKey>,
     modifiers: Modifiers,
     is_mac: bool,
 ) -> bool {
-    let pattern = mods_from_egui(modifiers, is_mac).zip(key_name_from_egui(key));
+    let (normalised, _) = candidate_chords(key, physical_key, modifiers, is_mac);
+    let pattern = normalised.map(|chord| (chord.mods, chord.key));
     match claims.claim_for(focused) {
         Some(Claim::Keys(set)) => {
             key == EguiKey::Tab || pattern.is_some_and(|pattern| set.contains(&pattern))
@@ -356,7 +377,7 @@ pub fn dispatch(
             };
 
             if let Some(id) = focused
-                && focused_widget_owns_event(claims, id, key, modifiers, is_mac)
+                && focused_widget_owns_event(claims, id, key, physical_key, modifiers, is_mac)
             {
                 return true;
             }
@@ -477,11 +498,14 @@ pub fn invoke<B: OutputBackend, H: SourceHost>(
             shell.section = Section::Search;
             shell.focus_search_requested = true;
         }
-        // Disabled by default (`enabled_by_default: false`); never
-        // indexed, so `dispatch` can never actually produce one of these
-        // — the arm exists only to keep this match exhaustive over all 44
-        // actions (research R8).
-        HostAction::TempoStepUp | HostAction::TempoStepDown => {}
+        // FR-017/SC-012, US1 AS7/AS8: the waveform's own `WAVEFORM_CLAIMS`
+        // already own `Plus`/`Equals`/`Minus` while it is focused, so
+        // `dispatch` only ever produces one of these when the waveform is
+        // not the focused widget.
+        HostAction::TempoStepUp => controller.tempo_step(1),
+        HostAction::TempoStepDown => controller.tempo_step(-1),
+        // 008, contracts/ui-effect-chain.md §5.
+        HostAction::ToggleEffectChain => crate::effects_view::toggle_effect_chain_panel(ctx),
     }
 }
 

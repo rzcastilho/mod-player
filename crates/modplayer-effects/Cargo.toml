@@ -1,0 +1,26 @@
+[package]
+name = "modplayer-effects"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+# 008: catalog/mode-rule/smooth/crossfade/chain proptests.
+proptest.workspace = true
+# 008: per-node-kind and reference-chain benches (research R16).
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+
+# 008 T094/T095: criterion benches, run via `cargo bench -p modplayer-effects`
+# (quickstart.md Release measurements). `harness = false` hands the entry
+# point to criterion instead of the unstable built-in bench harness.
+[[bench]]
+name = "nodes"
+harness = false
+
+[[bench]]
+name = "reference_chain"
+harness = false

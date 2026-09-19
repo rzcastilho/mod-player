@@ -151,9 +151,13 @@ pub fn playhead(painter: &Painter, space: &TimeSpace, playhead: Option<u64>, vis
     }
     if let Some(frame) = playhead {
         let x = space.x_of(frame);
+        // Strong text colour (near-black on light, near-white on dark),
+        // not the bars' own `selection.bg_fill`: the playhead has to read
+        // *over* a dense column of peaks, where a same-colour line simply
+        // disappears (maintainer request, 2026-09-19 manual walk).
         painter.line_segment(
             [pos2(x, rect.top()), pos2(x, rect.bottom())],
-            Stroke::new(1.0, visuals.selection.bg_fill),
+            Stroke::new(1.5, visuals.strong_text_color()),
         );
     }
 }

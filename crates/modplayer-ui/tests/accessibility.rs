@@ -30,7 +30,8 @@ use modplayer_core::settings::SettingsStore;
 use modplayer_core::{
     ActiveState, NotificationAction, NotificationCenter, PlaybackController, Severity, tr, tr_args,
 };
-use modplayer_engine::{BufferPreset, DeviceId, FrameCount, SampleRate};
+use modplayer_effects::catalog::NodeKind;
+use modplayer_engine::{BufferPreset, DeviceId, Event as EngineEvent, FrameCount, SampleRate};
 use modplayer_ui::artwork::ArtworkCache;
 use modplayer_ui::detail_view::{self, DetailTarget};
 use modplayer_ui::library_view::{self, LibraryTab, LibraryViewState};
@@ -333,6 +334,209 @@ fn queue_row_actions_expose_accessible_names() {
             "expected at least one `{key}` button, found none in {nodes:?}"
         );
     }
+}
+
+/// 008 Phase 4 (US2, FR-015, contracts/ui-effect-chain.md §2): the Effect
+/// Chain panel's handle, bypass, remove, level slider and mode combo each
+/// expose a non-empty accessible name, the correct role, and — for
+/// bypass — the correct AccessKit toggled state.
+#[test]
+fn effect_chain_controls_expose_accessible_names_and_states() {
+    let (mut controller, _handle, _dir) = active_controller("effect-chain-a11y");
+    let gain = controller
+        .chain_add_node(NodeKind::Gain)
+        .unwrap_or_else(|_| unreachable!());
+    controller
+        .chain_add_node(NodeKind::PitchShift)
+        .unwrap_or_else(|_| unreachable!());
+
+    let nodes = render_nodes(|ui| modplayer_ui::effects_view::show(ui, &mut controller));
+
+    assert_eq!(
+        find_all(&nodes, Role::Button, &tr("effects-reorder-handle")).len(),
+        2,
+        "every row must have a named, focusable drag handle"
+    );
+    assert_eq!(
+        find_all(&nodes, Role::Button, &tr("effects-remove")).len(),
+        2,
+        "every row must have a named remove button"
+    );
+
+    let bypass = find_all(&nodes, Role::Button, &tr("effects-bypass"));
+    assert_eq!(bypass.len(), 2);
+    assert!(
+        bypass.iter().all(|b| b.toggled == Some(Toggled::False)),
+        "bypass must start off for every row: {bypass:?}"
+    );
+
+    controller
+        .chain_set_bypass(gain, true)
+        .unwrap_or_else(|_| unreachable!());
+    let nodes = render_nodes(|ui| modplayer_ui::effects_view::show(ui, &mut controller));
+    let bypass = find_all(&nodes, Role::Button, &tr("effects-bypass"));
+    assert!(
+        bypass.iter().any(|b| b.toggled == Some(Toggled::True)),
+        "a bypassed node's toggle must report Toggled::True: {bypass:?}"
+    );
+
+    // Parameter controls: Gain's level slider, Pitch shift's mode combo
+    // (at its default `Performance` value).
+    find_one(&nodes, Role::Slider, &tr("effects-param-level"));
+    find_one(&nodes, Role::ComboBox, &tr("effects-mode-performance"));
+}
+
+/// 008 Phase 5 (US3, FR-015, contracts/ui-effect-chain.md §3): the full
+/// six-kind catalog's remaining controls — the equalizer's 8 bands
+/// (`DragValue` × 3 + type combo each), the filter's mode combo/cutoff/
+/// resonance, and stereo tools' width/balance/mono-sum/phase-invert/swap
+/// (including phase invert's disabled-unless-mono-sum state) — each
+/// expose a non-empty accessible name/value and the correct role/state.
+#[test]
+fn eq_filter_stereo_controls_expose_accessible_names_and_states() {
+    let (mut controller, _handle, _dir) = active_controller("eq-filter-stereo-a11y");
+    controller
+        .chain_add_node(NodeKind::Equalizer)
+        .unwrap_or_else(|_| unreachable!());
+    controller
+        .chain_add_node(NodeKind::Filter)
+        .unwrap_or_else(|_| unreachable!());
+    let stereo = controller
+        .chain_add_node(NodeKind::StereoTools)
+        .unwrap_or_else(|_| unreachable!());
+
+    let nodes = render_nodes(|ui| modplayer_ui::effects_view::show(ui, &mut controller));
+
+    // Equalizer: 8 bands × (freq/gain/q `DragValue` + type `ComboBox`).
+    let eq_drag_values = nodes
+        .iter()
+        .filter(|node| {
+            node.role == Role::SpinButton
+                && node
+                    .value
+                    .as_deref()
+                    .is_some_and(|v| v.contains("Hz") || v.contains("dB"))
+        })
+        .count();
+    assert!(
+        eq_drag_values >= 8 * 2, // freq + gain per band at minimum (Q has no unit suffix to match on)
+        "expected every EQ band's freq/gain DragValues to expose a non-empty value"
+    );
+    assert_eq!(
+        find_all(&nodes, Role::ComboBox, &tr("effects-band-type-peak")).len(),
+        8,
+        "every band must default to the peak type combo"
+    );
+
+    // Filter: mode combo (default high-pass), cutoff DragValue, resonance
+    // slider.
+    find_one(&nodes, Role::ComboBox, &tr("effects-filter-high-pass"));
+    find_one(&nodes, Role::Slider, &tr("effects-param-resonance"));
+
+    // Stereo tools: width/balance sliders, mono-sum/channel-swap toggles,
+    // phase-invert disabled while mono sum is off.
+    find_one(&nodes, Role::Slider, &tr("effects-param-width"));
+    find_one(&nodes, Role::Slider, &tr("effects-param-balance"));
+    find_one(&nodes, Role::Button, &tr("effects-param-mono-sum"));
+    find_one(&nodes, Role::Button, &tr("effects-param-channel-swap"));
+    let phase_invert = find_one(&nodes, Role::Button, &tr("effects-param-phase-invert"));
+    assert!(
+        phase_invert.disabled,
+        "phase invert must be disabled while mono sum is off: {phase_invert:?}"
+    );
+
+    controller
+        .chain_set_param(stereo, modplayer_effects::catalog::ParamId(2), 1.0)
+        .unwrap_or_else(|_| unreachable!());
+    let nodes = render_nodes(|ui| modplayer_ui::effects_view::show(ui, &mut controller));
+    let phase_invert = find_one(&nodes, Role::Button, &tr("effects-param-phase-invert"));
+    assert!(
+        !phase_invert.disabled,
+        "phase invert must be enabled once mono sum is on: {phase_invert:?}"
+    );
+}
+
+/// 008 Phase 6 (US4, FR-011/FR-012/FR-015, contracts/ui-effect-chain.md
+/// §2/§6): the header's pre-/post-chain level pairs and 64-band spectrum
+/// each expose a non-empty `Role::ProgressIndicator` accessible name, the
+/// over-budget badge and overload counter follow `ChainView`, and a
+/// row's "auto-bypassed" label appears only once that row's
+/// `auto_bypassed` flag is set.
+#[test]
+fn effect_chain_meters_spectrum_and_overload_controls_expose_accessible_names() {
+    let (mut controller, _handle, _dir) = active_controller("effect-chain-overload-a11y");
+    let id = controller
+        .chain_add_node(NodeKind::Gain)
+        .unwrap_or_else(|_| unreachable!());
+    let slot = controller
+        .chain()
+        .nodes()
+        .iter()
+        .find(|node| node.id == id)
+        .unwrap_or_else(|| unreachable!())
+        .slot;
+
+    // Baseline: no badge, a zero overload counter, no auto-bypassed label.
+    let nodes = render_nodes(|ui| modplayer_ui::effects_view::show(ui, &mut controller));
+    assert!(
+        find_all(&nodes, Role::Label, &tr("effects-over-budget-badge")).is_empty(),
+        "badge must not show while not over budget: {nodes:?}"
+    );
+    find_one(
+        &nodes,
+        Role::Label,
+        &tr_args("effects-overloads", &[("count", "0".to_string())]),
+    );
+    assert!(
+        find_all(&nodes, Role::Label, &tr("effects-auto-bypassed")).is_empty(),
+        "auto-bypassed label must not show before any auto-bypass: {nodes:?}"
+    );
+
+    // Pre-/post-chain level pairs and the spectrum are always present, each
+    // a real `Role::ProgressIndicator` with a non-empty, informative name.
+    let pre = nodes
+        .iter()
+        .find(|n| {
+            n.role == Role::ProgressIndicator
+                && n.accessible_name()
+                    .is_some_and(|name| name.starts_with(&tr("effects-pre")))
+        })
+        .unwrap_or_else(|| panic!("pre-chain level widget not found: {nodes:?}"));
+    assert!(!pre.disabled, "{pre:?}");
+    let post = nodes
+        .iter()
+        .find(|n| {
+            n.role == Role::ProgressIndicator
+                && n.accessible_name()
+                    .is_some_and(|name| name.starts_with(&tr("effects-post")))
+        })
+        .unwrap_or_else(|| panic!("post-chain level widget not found: {nodes:?}"));
+    assert!(!post.disabled, "{post:?}");
+    let spectrum = nodes
+        .iter()
+        .find(|n| {
+            n.role == Role::ProgressIndicator
+                && n.accessible_name()
+                    .is_some_and(|name| name.starts_with(&tr("effects-spectrum")))
+        })
+        .unwrap_or_else(|| panic!("spectrum widget not found: {nodes:?}"));
+    assert!(!spectrum.disabled, "{spectrum:?}");
+
+    // Drive the RtShared atomics an overload/auto-bypass would set and
+    // confirm the badge, counter and per-row label follow.
+    controller.shared().set_over_budget(true);
+    controller.shared().set_overload_count(2);
+    controller.debug_inject_engine_event(EngineEvent::AutoBypassed { slot });
+    controller.tick();
+
+    let nodes = render_nodes(|ui| modplayer_ui::effects_view::show(ui, &mut controller));
+    find_one(&nodes, Role::Label, &tr("effects-over-budget-badge"));
+    find_one(
+        &nodes,
+        Role::Label,
+        &tr_args("effects-overloads", &[("count", "2".to_string())]),
+    );
+    find_one(&nodes, Role::Label, &tr("effects-auto-bypassed"));
 }
 
 #[test]
@@ -1625,10 +1829,12 @@ fn controls_capture_control_exposes_accessible_name_and_role() {
 #[test]
 fn controls_disabled_row_shows_inactive_suffix_and_keeps_controls_enabled() {
     let (mut controller, _dir) = fresh_bare_controller("controls-disabled-a11y");
+    // 008 flips this action's shipped default to enabled (T049); disable
+    // it explicitly to exercise the disabled-row rendering this test pins.
+    let action = HostAction::TempoStepUp;
+    controller.set_action_enabled(action, false);
     let mut screen = ControlsScreen::default();
     let nodes = render_nodes(|ui| controls::show(ui, &mut controller, &mut screen, None));
-
-    let action = HostAction::TempoStepUp;
     let expected_label = format!("{} {}", tr(action.label_key()), tr("controls-inactive"));
     assert!(
         nodes

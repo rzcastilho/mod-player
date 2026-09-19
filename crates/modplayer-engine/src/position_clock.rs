@@ -22,7 +22,11 @@ impl PositionClock {
         let anchor = shared.read_anchor();
         let position_frames = if anchor.playing {
             let elapsed = Instant::now().saturating_duration_since(anchor.instant);
-            let extra_frames = (elapsed.as_secs_f64() * f64::from(source_rate.max(1))) as u64;
+            // 008, research R7: the playhead advances at `source_rate *
+            // advance_rate` while an engaged time-stretch stage changes
+            // tempo (`1.0` at unity, unchanged from 001-006's behaviour).
+            let rate = f64::from(source_rate.max(1)) * f64::from(anchor.advance_rate);
+            let extra_frames = (elapsed.as_secs_f64() * rate) as u64;
             // Capped at `position + one_buffer_duration * 2` (engine-delta.md
             // §3) so a stalled anchor (e.g. the audio thread wedged) cannot
             // make position run away unboundedly.
@@ -47,7 +51,7 @@ mod tests {
     #[test]
     fn frozen_while_not_playing() {
         let shared = RtShared::new();
-        shared.write_anchor(44_100, Instant::now(), false, 256);
+        shared.write_anchor(44_100, Instant::now(), false, 256, 1.0);
         let d1 = PositionClock::now(&shared, 44_100);
         thread::sleep(Duration::from_millis(20));
         let d2 = PositionClock::now(&shared, 44_100);
@@ -58,7 +62,7 @@ mod tests {
     #[test]
     fn extrapolates_while_playing() {
         let shared = RtShared::new();
-        shared.write_anchor(0, Instant::now(), true, 1024);
+        shared.write_anchor(0, Instant::now(), true, 1024, 1.0);
         thread::sleep(Duration::from_millis(20));
         let elapsed = PositionClock::now(&shared, 44_100);
         assert!(
@@ -72,7 +76,7 @@ mod tests {
         let shared = RtShared::new();
         // A tiny buffer (1 frame) with a long-stale anchor: extrapolation
         // must not run away past the cap.
-        shared.write_anchor(0, Instant::now() - Duration::from_secs(10), true, 1);
+        shared.write_anchor(0, Instant::now() - Duration::from_secs(10), true, 1, 1.0);
         let position = PositionClock::now(&shared, 44_100);
         let cap = frames_to_duration(2, 44_100);
         assert!(

@@ -23,6 +23,7 @@
 use std::sync::Arc;
 
 use modplayer_audio_source::AudioSource;
+use modplayer_effects::catalog::{NodeKind, NodeOwner, ParamId};
 use modplayer_engine::{
     CeilingDb, Command, Processor, ProcessorConfig, RtShared, Transport, VolumePercent,
 };
@@ -252,5 +253,89 @@ fn render_tolerates_callback_larger_than_max_frames() {
     assert!(
         buffer.iter().all(|&s| s != 0.0),
         "the whole 1024-frame buffer must be rendered"
+    );
+}
+
+/// contracts/engine-effect-chain.md §2: a `Chain*` command pushed between
+/// two render calls affects only the next buffer, from its first sample
+/// — generic across add/param/bypass timing, proven with a `Gain` node.
+/// Two identically-driven twin processors diverge only once one of them
+/// receives an extra `ChainSetBypass`, and only starting at the very
+/// first sample of the render that follows it.
+#[test]
+fn chain_commands_apply_at_next_boundary() {
+    fn build() -> (Processor<ConstantSource>, rtrb::Producer<Command>) {
+        let (command_tx, command_rx) = RingBuffer::<Command>::new(256);
+        let (event_tx, _event_rx) = RingBuffer::<modplayer_engine::Event>::new(256);
+        let config = ProcessorConfig {
+            source_rate: 44_100,
+            device_rate: 44_100,
+            device_channels: 2,
+            max_frames: 64,
+            transport: Transport::Playing,
+            position_frames: 0,
+            master_volume: VolumePercent::new(100),
+            ceiling: CeilingDb::default(),
+            shared: Arc::new(RtShared::new()),
+        };
+        let processor =
+            Processor::new(config, ConstantSource { position: 0 }, command_rx, event_tx);
+        (processor, command_tx)
+    }
+
+    let (mut a, mut tx_a) = build();
+    let (mut b, mut tx_b) = build();
+
+    // Insert an identical, strongly attenuating Gain node on both twins,
+    // and drive them for long enough that both the 5 ms insert crossfade
+    // and the 20 ms param ramp are fully settled (well under 60 * 64
+    // frames at 44.1 kHz).
+    for tx in [&mut tx_a, &mut tx_b] {
+        let _ = tx.push(Command::ChainInsert {
+            slot: 0,
+            position: 0,
+            kind: NodeKind::Gain,
+            owner: NodeOwner::Host,
+        });
+        let _ = tx.push(Command::ChainSetParam {
+            slot: 0,
+            param: ParamId(0),
+            value: -60.0,
+        });
+    }
+    let mut warmup = vec![0.0f32; 64 * 2];
+    for _ in 0..60 {
+        a.render(&mut warmup);
+        b.render(&mut warmup);
+    }
+
+    // Buffer N: rendered from the now-settled, identical state on both
+    // twins — must still agree exactly, since neither has received the
+    // bypass command yet.
+    let mut buffer_n_a = vec![0.0f32; 64 * 2];
+    let mut buffer_n_b = vec![0.0f32; 64 * 2];
+    a.render(&mut buffer_n_a);
+    b.render(&mut buffer_n_b);
+    assert_eq!(
+        buffer_n_a, buffer_n_b,
+        "buffer N must be unaffected by a command not yet pushed"
+    );
+
+    // Push the bypass on `a` only, between renders.
+    let _ = tx_a.push(Command::ChainSetBypass {
+        slot: 0,
+        bypassed: true,
+    });
+
+    // Buffer N+1: `a` must already diverge from `b` at its very first
+    // sample — the bypass fade starts immediately, not mid-buffer or a
+    // buffer late.
+    let mut buffer_n1_a = vec![0.0f32; 64 * 2];
+    let mut buffer_n1_b = vec![0.0f32; 64 * 2];
+    a.render(&mut buffer_n1_a);
+    b.render(&mut buffer_n1_b);
+    assert_ne!(
+        buffer_n1_a[0], buffer_n1_b[0],
+        "buffer N+1 must reflect the bypass from its first sample"
     );
 }
