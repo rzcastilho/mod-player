@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! `HostAction`, `ActionDef` and the 44-entry default catalog (007,
-//! data-model.md §1.1-1.2, spec § Default Action Catalog).
+//! `HostAction`, `ActionDef` and the 45-entry default catalog (007,
+//! data-model.md §1.1-1.2, spec § Default Action Catalog; 008 appends
+//! `ToggleEffectChain`, contracts/effects-service.md §4).
 
 use super::{ActionCategory, ActionKind, ActionOwner, Scope};
 use crate::markers::CueSlot;
 
-/// A named, dispatchable host operation (DM-14). Exactly 44 variants,
+/// A named, dispatchable host operation (DM-14). Exactly 45 variants,
 /// in the catalog's display order; ids are append-only across slices
 /// (never renumbered or removed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -47,6 +48,10 @@ pub enum HostAction {
     // Effects
     TempoStepUp,
     TempoStepDown,
+    // 008, contracts/effects-service.md §4: appended last (append-only
+    // ids) even though its category is Navigation, so no earlier
+    // variant's id/position shifts.
+    ToggleEffectChain,
 }
 
 /// `n = 1..=8`, in that order, via [`CueSlot::new_const`] (no `Option`
@@ -64,7 +69,7 @@ const CUE_SLOTS: [CueSlot; 8] = [
 
 impl HostAction {
     /// Every action, in catalog order (data-model.md §1.1).
-    pub const ALL: [HostAction; 44] = [
+    pub const ALL: [HostAction; 45] = [
         HostAction::Play,
         HostAction::Pause,
         HostAction::TogglePlayPause,
@@ -109,6 +114,7 @@ impl HostAction {
         HostAction::FocusSearch,
         HostAction::TempoStepUp,
         HostAction::TempoStepDown,
+        HostAction::ToggleEffectChain,
     ];
 
     /// The stable, namespaced identifier persisted to `settings.toml`
@@ -164,6 +170,7 @@ impl HostAction {
             HostAction::FocusSearch => "host.nav.focus_search",
             HostAction::TempoStepUp => "host.effects.tempo_step_up",
             HostAction::TempoStepDown => "host.effects.tempo_step_down",
+            HostAction::ToggleEffectChain => "host.nav.toggle_effect_chain",
         }
     }
 
@@ -225,6 +232,7 @@ impl HostAction {
             HostAction::FocusSearch => "action-nav-focus-search",
             HostAction::TempoStepUp => "action-effects-tempo-step-up",
             HostAction::TempoStepDown => "action-effects-tempo-step-down",
+            HostAction::ToggleEffectChain => "action-nav-toggle-effect-chain",
         }
     }
 
@@ -257,7 +265,8 @@ impl HostAction {
             | HostAction::NavPlugins
             | HostAction::NavSettings
             | HostAction::ToggleQueue
-            | HostAction::FocusSearch => ActionCategory::Navigation,
+            | HostAction::FocusSearch
+            | HostAction::ToggleEffectChain => ActionCategory::Navigation,
             HostAction::TempoStepUp | HostAction::TempoStepDown => ActionCategory::Effects,
         }
     }
@@ -297,7 +306,7 @@ macro_rules! def {
 
 /// The shipped default catalog (spec § Default Action Catalog),
 /// verbatim: one entry per [`HostAction::ALL`], in the same order.
-pub const CATALOG: [ActionDef; 44] = [
+pub const CATALOG: [ActionDef; 45] = [
     def!(HostAction::Play, Scope::App, false, true, &[]),
     def!(HostAction::Pause, Scope::App, false, true, &[]),
     def!(
@@ -566,15 +575,22 @@ pub const CATALOG: [ActionDef; 44] = [
         HostAction::TempoStepUp,
         Scope::NowPlaying,
         true,
-        false,
+        true,
         &["Equals", "Plus"]
     ),
     def!(
         HostAction::TempoStepDown,
         Scope::NowPlaying,
         true,
-        false,
+        true,
         &["Minus"]
+    ),
+    def!(
+        HostAction::ToggleEffectChain,
+        Scope::NowPlaying,
+        false,
+        true,
+        &["E"]
     ),
 ];
 

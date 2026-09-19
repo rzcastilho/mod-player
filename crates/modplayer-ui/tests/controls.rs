@@ -705,11 +705,12 @@ fn disabled_rows_greyed_rebindable_and_never_fire() {
     ctx.enable_accesskit();
     let mut screen = ControlsScreen::default();
 
+    // 008 flips the two Effects actions' shipped default to enabled
+    // (T049); disable one explicitly to exercise this row's disabled
+    // rendering/rebinding/never-fires behaviour.
     let action = HostAction::TempoStepUp;
-    assert!(
-        !controller.actions().is_enabled(action),
-        "sanity: the two Effects actions ship disabled"
-    );
+    controller.set_action_enabled(action, false);
+    assert!(!controller.actions().is_enabled(action));
 
     let texts = rendered_texts(&ctx, &mut controller, &mut screen);
     let expected_label = format!("{} {}", tr(action.label_key()), tr("controls-inactive"));

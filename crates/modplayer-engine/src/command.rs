@@ -4,6 +4,8 @@
 //! (contracts/engine-commands.md). Every setter is a `Command`; there is no
 //! `&mut Processor` reachable from outside the audio callback.
 
+use modplayer_effects::catalog::{NodeKind, NodeOwner, ParamId};
+
 use crate::types::{CeilingDb, VolumePercent};
 
 /// A command sent from the `PlaybackController` to a running `Processor`.
@@ -53,6 +55,38 @@ pub enum Command {
     /// still finishes, but without jumping at `B` (006, contracts/
     /// engine-loop.md §2).
     LoopDisarm,
+    /// Activate `slot` with `kind`/`owner` at catalog defaults, fading in
+    /// over the 5 ms crossfade, inserted at `min(position, len)` in the
+    /// processing order (008, contracts/engine-effect-chain.md §2).
+    /// No-op when `slot` is already active, the chain is full, or `slot`
+    /// is out of range.
+    ChainInsert {
+        slot: u8,
+        position: u8,
+        kind: NodeKind,
+        owner: NodeOwner,
+    },
+    /// Fade `slot` to dry over the 5 ms crossfade; it leaves the
+    /// processing order and deactivates once that fade completes
+    /// (008, contracts/engine-effect-chain.md §2). No-op for an inactive
+    /// slot.
+    ChainRemove { slot: u8 },
+    /// Two-phase reorder (research R6): `slot` fades to dry, is
+    /// relocated to `position`, then fades back in. No-op for an
+    /// inactive slot or a move to its current index.
+    ChainMove { slot: u8, position: u8 },
+    /// `slot`'s dry/wet mix targets `!bypassed`; un-bypassing clears any
+    /// `auto_bypassed` flag. No-op for an inactive slot.
+    ChainSetBypass { slot: u8, bypassed: bool },
+    /// Re-clamp and retarget `slot`'s `param` toward `value` (20 ms ramp
+    /// for a continuous parameter, an immediate jump — the kernel owns
+    /// any click-free switch of its own — for a discrete one). No-op for
+    /// an inactive slot or a param the kind lacks.
+    ChainSetParam {
+        slot: u8,
+        param: ParamId,
+        value: f32,
+    },
 }
 
 const _: () = assert!(

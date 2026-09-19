@@ -51,6 +51,13 @@ impl OutputStage {
         self.device_channels
     }
 
+    /// The device sample rate this stage converts to (008, FR-012a: the
+    /// overload state machine's `render_pct` is a percentage of the
+    /// device callback period, `out_frames / device_rate`).
+    pub fn device_rate(&self) -> u32 {
+        self.device_rate
+    }
+
     /// Frames of source-rate stereo material `process` will need to
     /// produce `out_frames` of device-rate output, including one guard
     /// frame for interpolation lookahead. Capped at `MAX_FRAMES`.

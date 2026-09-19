@@ -14,7 +14,10 @@ use std::time::Duration;
 use librespot_playback::audio_backend::{Sink, SinkError, SinkResult};
 use librespot_playback::convert::Converter;
 use librespot_playback::decoder::AudioPacket;
+use modplayer_audio_source::SourceRtShared;
 use rtrb::Producer;
+
+use crate::swap::RingSwap;
 
 /// How long to park between retries when the ring is full (contract §1).
 const BACKPRESSURE_PARK: Duration = Duration::from_micros(500);
@@ -28,13 +31,40 @@ pub struct RingSink {
     /// clock markers (`program.rs::Marker`) are stamped against
     /// (research R4).
     written_frames: Arc<AtomicU64>,
+    /// Where `attach()` parks the producer of a re-attached RT's ring
+    /// (`swap.rs`); checked once per `write`.
+    swap: Arc<RingSwap>,
+    /// The RT-side consumed-frames clock, credited with whatever the
+    /// abandoned ring still held at a swap so markers stamped against
+    /// `written_frames` stay due at the right moment on the new ring.
+    shared: Arc<SourceRtShared>,
 }
 
 impl RingSink {
-    pub fn new(producer: Producer<f32>, written_frames: Arc<AtomicU64>) -> Self {
+    pub fn new(
+        producer: Producer<f32>,
+        written_frames: Arc<AtomicU64>,
+        swap: Arc<RingSwap>,
+        shared: Arc<SourceRtShared>,
+    ) -> Self {
         Self {
             producer,
             written_frames,
+            swap,
+            shared,
+        }
+    }
+
+    /// Adopt a re-attached RT's ring if one is parked. The old ring's
+    /// unread samples are gone with its consumer, so their frame count is
+    /// added to the consumed clock: every marker stamped at a write-side
+    /// frame beyond them must still fall due on the new ring.
+    fn adopt_parked_producer(&mut self) {
+        if let Some(fresh) = self.swap.take_sample() {
+            let capacity = self.producer.buffer().capacity();
+            let unread_samples = capacity.saturating_sub(self.producer.slots());
+            self.producer = fresh;
+            self.shared.add_consumed_frames((unread_samples / 2) as u64);
         }
     }
 
@@ -54,6 +84,7 @@ impl RingSink {
 
 impl Sink for RingSink {
     fn write(&mut self, packet: AudioPacket, converter: &mut Converter) -> SinkResult<()> {
+        self.adopt_parked_producer();
         let samples = match packet {
             AudioPacket::Samples(samples) => samples,
             AudioPacket::Raw(_) => {
@@ -77,7 +108,9 @@ impl Sink for RingSink {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
+    use crate::program::Marker;
     use librespot_playback::config::DithererBuilder;
+    use modplayer_audio_source::DecodedStore;
     use rtrb::RingBuffer;
     use std::thread;
 
@@ -92,7 +125,12 @@ mod tests {
         // concurrently so the producer's park loop makes progress.
         let (producer, mut consumer) = RingBuffer::<f32>::new(8);
         let written = Arc::new(AtomicU64::new(0));
-        let mut sink = RingSink::new(producer, Arc::clone(&written));
+        let mut sink = RingSink::new(
+            producer,
+            Arc::clone(&written),
+            Arc::new(RingSwap::default()),
+            Arc::new(SourceRtShared::new()),
+        );
 
         let samples: Vec<f64> = (0..200).map(|i| f64::from(i) / 200.0).collect();
         let expected_len = samples.len();
@@ -116,10 +154,62 @@ mod tests {
         assert_eq!(written.load(Ordering::Acquire), (samples.len() / 2) as u64);
     }
 
+    /// `swap.rs`: a producer parked for a re-attached RT is adopted on
+    /// the next `write`; the samples land in the new ring, and the old
+    /// ring's unread frames are credited to the consumed clock so
+    /// markers stamped against `written_frames` stay on time.
+    #[test]
+    fn parked_producer_is_adopted_and_unread_frames_credited() {
+        let (old_producer, old_consumer) = RingBuffer::<f32>::new(64);
+        let written = Arc::new(AtomicU64::new(0));
+        let swap = Arc::new(RingSwap::default());
+        let shared = Arc::new(SourceRtShared::new());
+        let mut sink = RingSink::new(
+            old_producer,
+            Arc::clone(&written),
+            Arc::clone(&swap),
+            Arc::clone(&shared),
+        );
+
+        // 10 frames into the old ring, none of them consumed.
+        sink.write(AudioPacket::Samples(vec![0.5; 20]), &mut converter())
+            .unwrap();
+        assert_eq!(shared.consumed_frames(), 0);
+
+        let (new_producer, mut new_consumer) = RingBuffer::<f32>::new(64);
+        let (marker_tx, _marker_rx) = RingBuffer::<Marker>::new(4);
+        let (_retired_tx, retired_rx) = RingBuffer::<Arc<DecodedStore>>::new(4);
+        swap.park(new_producer, marker_tx, retired_rx);
+
+        sink.write(AudioPacket::Samples(vec![0.25; 8]), &mut converter())
+            .unwrap();
+
+        // The new ring got the second packet, the old one nothing more.
+        let mut got = Vec::new();
+        while let Ok(v) = new_consumer.pop() {
+            got.push(v);
+        }
+        assert_eq!(got, vec![0.25; 8]);
+        assert_eq!(
+            old_consumer.slots(),
+            20,
+            "old ring untouched after the swap"
+        );
+        // The 10 unread old frames were credited, so a marker stamped at
+        // written frame 14 (10 + 4) is due once 4 new frames are popped.
+        assert_eq!(shared.consumed_frames(), 10);
+        assert_eq!(written.load(Ordering::Acquire), 14);
+    }
+
     #[test]
     fn raw_packets_are_rejected() {
         let (producer, _consumer) = RingBuffer::<f32>::new(8);
-        let mut sink = RingSink::new(producer, Arc::new(AtomicU64::new(0)));
+        let mut sink = RingSink::new(
+            producer,
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(RingSwap::default()),
+            Arc::new(SourceRtShared::new()),
+        );
         let result = sink.write(AudioPacket::Raw(vec![0u8; 4]), &mut converter());
         assert!(result.is_err());
     }

@@ -11,6 +11,7 @@ modplayer-core = { path = "../modplayer-core", version = "0.1.0" }
 modplayer-audio-io = { path = "../modplayer-audio-io", version = "0.1.0" }
 modplayer-audio-source = { path = "../modplayer-audio-source", version = "0.1.0" }
 modplayer-engine = { path = "../modplayer-engine", version = "0.1.0" }
+modplayer-effects = { path = "../modplayer-effects", version = "0.1.0" }
 modplayer-account = { path = "../modplayer-account", version = "0.1.0" }
 modplayer-secure-store = { path = "../modplayer-secure-store", version = "0.1.0" }
 eframe.workspace = true

@@ -10,6 +10,7 @@ pub mod actions;
 pub mod analysis;
 pub mod controller;
 pub mod device_policy;
+pub mod effects;
 pub mod i18n;
 pub mod library;
 pub mod links;
@@ -34,6 +35,9 @@ pub use controller::{
     ActiveDevice, LoopState, LoopStatus, PlaybackController, QueueRow, QueueView, TrackListState,
 };
 pub use device_policy::{DeviceResolution, DeviceWarning};
+pub use effects::{
+    ChainError, ChainModel, ChainView, LevelPair, MeterSnapshot, NodeId, NodeModel, NodeRow,
+};
 pub use i18n::{tr, tr_args};
 pub use library::{Connectivity, LibraryIndex, LibraryStatus, PlayLog, SyncScheduler};
 pub use links::STATUS_PAGE_URL;

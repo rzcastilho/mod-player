@@ -74,6 +74,26 @@ pub const KEY_TRACK_STATE_SAVE_FAILED: &str = "track-state-save-failed";
 /// chord string. `{ $ids }`.
 pub const KEY_KEYBINDINGS_INVALID_ENTRIES: &str = "keybindings-invalid-entries";
 
+/// FR-017: `tempo_step` had no `TimeStretch` node to target (008,
+/// contracts/effects-service.md §2 rule C3) — coalesced: raised only
+/// while not already visible.
+pub const KEY_EFFECTS_NO_TIME_STRETCH: &str = "effects-no-time-stretch";
+
+/// FR-012, research R10: the chain's whole-render cost crossed the
+/// overload threshold (008, contracts/effects-service.md §2 rule C5).
+/// `{ $node }` (the costliest node's kind label), `{ $owner }`. Raised
+/// only while not already visible; re-used (not re-raised) while the
+/// excursion continues; dismissed by key once `RtShared::over_budget()`
+/// clears (rule C6).
+pub const KEY_EFFECT_CHAIN_OVER_BUDGET: &str = "effect-chain-over-budget";
+
+/// FR-012: a non-host node was auto-bypassed after an overload event
+/// named it the costliest active slot (008, contracts/effects-service.md
+/// §2 rule C5). `{ $node }`. Never raised by any controller path this
+/// slice's UI can reach (no plugin runtime yet) — exercised by engine
+/// tests ahead of 009.
+pub const KEY_EFFECT_CHAIN_AUTO_BYPASSED: &str = "effect-chain-auto-bypassed";
+
 /// Notification severity (data-model.md §6.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {

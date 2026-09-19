@@ -29,6 +29,7 @@ mod program;
 mod rt;
 mod sink;
 mod subfile;
+mod swap;
 mod tmp;
 mod worker;
 
@@ -121,6 +122,10 @@ pub struct ConnectSource {
     /// (research R1), so this handle is dropped freely on the next
     /// `DecodedStore`/`Stop`.
     current_store: Option<Arc<DecodedStore>>,
+    /// Where `attach()` parks the worker-side ends of a re-attached RT's
+    /// rings while a worker is already running (`swap.rs`); shared with
+    /// that worker and the `RingSink` inside its player.
+    swap: Arc<swap::RingSwap>,
     /// The last `LoadProgram` sent, resent on `SetDeviceName`'s
     /// re-registration and on a fresh worker (re)spawn (contract §2).
     last_program: Option<Program>,
@@ -149,6 +154,7 @@ impl ConnectSource {
             pending_marker_tx: None,
             pending_retired_rx: None,
             current_store: None,
+            swap: Arc::new(swap::RingSwap::default()),
             last_program: None,
             health: SourceHealth::Ok,
             tmp_dir: None,
@@ -196,6 +202,7 @@ impl ConnectSource {
             marker_tx,
             retired_rx,
             Arc::clone(&self.shared),
+            Arc::clone(&self.swap),
             self.last_program.clone(),
         );
         if self.worker.is_none() {
@@ -219,9 +226,23 @@ impl SourceHost for ConnectSource {
         // (pended until `Initialize`, like `pending_sample_tx`/
         // `pending_marker_tx`'s reversed counterparts).
         let (retired_tx, retired_rx) = RingBuffer::<Arc<DecodedStore>>::new(RETIRED_CAPACITY);
-        self.pending_sample_tx = Some(sample_tx);
-        self.pending_marker_tx = Some(marker_tx);
-        self.pending_retired_rx = Some(retired_rx);
+        if self.worker.is_some() {
+            // A stream rebuild after registration (preset/device change,
+            // device fallback — `swap.rs`): the running worker adopts
+            // these ends itself. Seed the new marker ring with the
+            // playing track's store first, so the new RT can serve
+            // sample-exact loop seams without waiting for the next
+            // `TrackStart`.
+            let mut marker_tx = marker_tx;
+            if let Some(store) = &self.current_store {
+                let _ = marker_tx.push(Marker::reattach(Arc::clone(store)));
+            }
+            self.swap.park(sample_tx, marker_tx, retired_rx);
+        } else {
+            self.pending_sample_tx = Some(sample_tx);
+            self.pending_marker_tx = Some(marker_tx);
+            self.pending_retired_rx = Some(retired_rx);
+        }
         ConnectRtSource::new(
             sample_rx,
             marker_rx,

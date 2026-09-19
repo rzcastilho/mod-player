@@ -148,6 +148,15 @@ impl ConnectRtSource {
                     // Bookkeeping only; the host mirrors `EndOfTrack` over
                     // the event channel.
                 }
+                MarkerKind::Reattach { store } => {
+                    // A re-attached RT starts with no store; adopt the
+                    // playing track's without touching cursor/track_seq.
+                    // Anything it somehow already held goes to the
+                    // retirement ring like every other replaced store.
+                    if let Some(old) = self.store.replace(store) {
+                        self.retire(old);
+                    }
+                }
             }
         }
     }
@@ -362,6 +371,37 @@ mod tests {
             "position resets then advances by delivered frames"
         );
         assert_eq!(source.track_seq, starting_seq.wrapping_add(1));
+    }
+
+    /// `swap.rs`: a re-attached RT adopts the playing track's store from
+    /// the `Reattach` marker `attach()` seeds its ring with — at the
+    /// cursor it was built with, same `track_seq`, no retirement — and
+    /// can then serve a sample-exact read from that store.
+    #[test]
+    fn reattach_marker_adopts_store_without_moving_cursor_or_track_seq() {
+        let (_sample_tx, mut marker_tx, mut retired_rx, mut source) = build(1_000);
+        source.shared.set_track_seq(7);
+        source.track_seq = 7;
+        let store = filled_store(2_048);
+        assert!(marker_tx.push(Marker::reattach(Arc::clone(&store))).is_ok());
+
+        let mut out = [0.0f32; 4];
+        source.fill(&mut out);
+
+        assert!(
+            source
+                .store
+                .as_ref()
+                .is_some_and(|held| Arc::ptr_eq(held, &store)),
+            "the store must be adopted"
+        );
+        assert_eq!(source.track_seq, 7, "not a track change");
+        assert_eq!(source.shared.track_seq(), 7);
+        assert!(retired_rx.pop().is_err(), "nothing to retire on a fresh RT");
+        // Ring empty, store covers the cursor: the rescue transition reads
+        // frames 1 000 and 1 001 sample-exactly from the store.
+        assert_eq!(source.position(), 1_002);
+        assert_eq!(out, [1_000.1, -1_000.1, 1_001.1, -1_001.1]);
     }
 
     #[test]

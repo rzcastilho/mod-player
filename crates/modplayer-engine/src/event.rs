@@ -24,6 +24,16 @@ pub enum Event {
     /// that reached it; `loop_active` is already `None` by the time this
     /// is pushed (006, contracts/engine-loop.md §3).
     LoopReleased { wraps: u32 },
+    /// This render's whole-chain `render_pct` crossed the overload
+    /// threshold (FR-012): `costliest_slot` ranks every active slot,
+    /// host included — only the *auto-bypass* that may follow is
+    /// restricted to a non-host owner (008, contracts/engine-effect-
+    /// chain.md §8). Raised starting Phase 6's overload state machine.
+    Overload { costliest_slot: u8, render_pct: u16 },
+    /// `slot` (always non-host) was auto-bypassed after an `Overload`
+    /// event named it the costliest active node (008, contracts/
+    /// engine-effect-chain.md §8). Raised starting Phase 6.
+    AutoBypassed { slot: u8 },
 }
 
 #[cfg(test)]

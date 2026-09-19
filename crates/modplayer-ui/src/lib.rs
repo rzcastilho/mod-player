@@ -15,6 +15,7 @@ pub mod app;
 pub mod artwork;
 pub mod detail_view;
 pub mod device_check;
+pub mod effects_view;
 pub mod library_view;
 pub mod markers;
 pub mod notifications;

@@ -51,6 +51,7 @@ use crate::health::{self, Backoff};
 use crate::mixer::HostMixer;
 use crate::program::{Marker, ProgramMap};
 use crate::sink::RingSink;
+use crate::swap::RingSwap;
 
 /// The decode-ahead thread for whatever track is current, shared between
 /// the player-event task (which spawns a fresh one per `TrackChanged`, its
@@ -140,6 +141,7 @@ pub fn spawn(
     marker_tx: Producer<Marker>,
     retired_rx: Consumer<Arc<DecodedStore>>,
     shared: Arc<SourceRtShared>,
+    swap: Arc<RingSwap>,
     initial_program: Option<Program>,
 ) -> Option<WorkerHandles> {
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<SourceCommand>();
@@ -157,6 +159,7 @@ pub fn spawn(
             marker_tx,
             retired_rx,
             shared,
+            swap,
             initial_program,
             force_fail,
         )
@@ -183,7 +186,8 @@ fn run(
     sample_tx: Producer<f32>,
     mut marker_tx: Producer<Marker>,
     mut retired_rx: Consumer<Arc<DecodedStore>>,
-    _shared: Arc<SourceRtShared>,
+    shared: Arc<SourceRtShared>,
+    swap: Arc<RingSwap>,
     mut pending_program: Option<Program>,
     force_fail: ForceFail,
 ) {
@@ -281,8 +285,15 @@ fn run(
                 ..PlayerConfig::default()
             };
             let written_frames_for_sink = Arc::clone(&written_frames);
+            let swap_for_sink = Arc::clone(&swap);
+            let shared_for_sink = Arc::clone(&shared);
             let sink_builder = move || -> Box<dyn librespot_playback::audio_backend::Sink> {
-                Box::new(RingSink::new(producer, written_frames_for_sink))
+                Box::new(RingSink::new(
+                    producer,
+                    written_frames_for_sink,
+                    swap_for_sink,
+                    shared_for_sink,
+                ))
             };
             player = Some(Player::new(
                 player_config,
@@ -575,6 +586,7 @@ fn run(
             &mut marker_tx,
             &marker_forward_rx,
             &mut retired_rx,
+            &swap,
             &decode_ahead,
             &ended,
             &transfer_requested,
@@ -674,6 +686,7 @@ fn command_loop(
     marker_tx: &mut Producer<Marker>,
     marker_forward_rx: &Receiver<Marker>,
     retired_rx: &mut Consumer<Arc<DecodedStore>>,
+    swap: &RingSwap,
     decode_ahead: &SharedDecodeAhead,
     ended: &AtomicBool,
     transfer_requested: &AtomicBool,
@@ -685,6 +698,19 @@ fn command_loop(
     catalog_semaphore: &Arc<tokio::sync::Semaphore>,
 ) -> SessionOutcome {
     loop {
+        // A re-attached RT (`swap.rs`): adopt its marker and retirement
+        // rings here, on the thread that owns both ends. The old marker
+        // ring's consumer is gone with the old RT, so anything still
+        // queued in it is dropped with it — the new RT already got its
+        // own `Reattach` marker from `attach()`. The old retirement ring
+        // is drained one last time first so no store is ever leaked.
+        if let Some(fresh) = swap.take_marker() {
+            *marker_tx = fresh;
+        }
+        if let Some(fresh) = swap.take_retired() {
+            drain_retired(retired_rx);
+            *retired_rx = fresh;
+        }
         // Once per iteration (contracts/connect-source-delta.md §2), plus
         // immediately before every marker push below.
         drain_retired(retired_rx);

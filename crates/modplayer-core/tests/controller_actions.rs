@@ -176,17 +176,20 @@ fn remove_reset_and_reset_all_bindings_persist() {
 #[test]
 fn set_action_enabled_is_not_persisted() {
     let (mut controller, _handle, dir) = ready_controller();
-    assert!(!controller.actions().is_enabled(HostAction::TempoStepUp));
-
-    controller.set_action_enabled(HostAction::TempoStepUp, true);
+    // 008 flips TempoStepUp's own shipped default to enabled (T049); this
+    // test now disables it (rather than enabling it) to exercise the same
+    // "the mutation isn't persisted" behaviour.
     assert!(controller.actions().is_enabled(HostAction::TempoStepUp));
+
+    controller.set_action_enabled(HostAction::TempoStepUp, false);
+    assert!(!controller.actions().is_enabled(HostAction::TempoStepUp));
 
     // Reconstructing from the same settings must not remember it: a
     // fresh registry re-seeds `enabled` from the catalog default.
     let store = SettingsStore::with_path(dir.path().join("settings.toml"));
     let host = ScriptedHost::new();
     let reconstructed = PlaybackController::new(FakeBackend::new(vec![fake_device()]), host, store);
-    assert!(!reconstructed.actions().is_enabled(HostAction::TempoStepUp));
+    assert!(reconstructed.actions().is_enabled(HostAction::TempoStepUp));
 }
 
 /// `position()` after a seek needs one `tick()` (to drain the reducer)

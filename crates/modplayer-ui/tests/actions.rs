@@ -26,8 +26,10 @@ use modplayer_audio_source::{Availability, TrackId, TrackRef};
 use modplayer_audio_source_synthetic::{ScriptedHost, ScriptedHostHandle};
 use modplayer_core::actions::{Chord, HostAction, KEY_NAMES, KeyName, Mods, ScopeState};
 use modplayer_core::markers::{CueSlot, TrackMarkers};
+use modplayer_core::notifications::KEY_EFFECTS_NO_TIME_STRETCH;
 use modplayer_core::settings::SettingsStore;
 use modplayer_core::{Intent, LoopState, PlaybackController};
+use modplayer_effects::catalog::NodeKind;
 use modplayer_engine::{BufferPreset, DeviceId, FrameCount, SampleRate};
 use modplayer_ui::actions::{Claim, FocusClaims, Invocation};
 use modplayer_ui::waveform::WaveformState;
@@ -1265,6 +1267,74 @@ fn q_toggles_queue_panel_in_now_playing_only() {
     assert!(!queue_open(), "a second Q must close it again");
 }
 
+/// `E` toggles the Effect Chain panel only while Now Playing is shown
+/// (008, contracts/ui-effect-chain.md §5, FR-017).
+#[test]
+fn toggle_effect_chain_dispatches_in_now_playing_only() {
+    let (mut controller, _handle, _dirs) = active_controller("e-effects-toggle");
+    controller.queue_replace(vec![track("a", 200_000)]);
+    controller.play();
+    controller.tick();
+
+    let mut shell = Shell::default();
+    let mut waveform = WaveformState::default();
+    let ctx = Context::default();
+    let claims = FocusClaims::default();
+    let effects_panel_id = modplayer_ui::effects_view::panel_open_id();
+    let effects_open = || {
+        ctx.memory(|m| m.data.get_temp::<bool>(effects_panel_id))
+            .unwrap_or(false)
+    };
+
+    assert!(
+        !effects_open(),
+        "sanity: the effect chain panel starts closed"
+    );
+
+    // Outside Now Playing: `E` is bound but `Scope::NowPlaying` isn't
+    // live, so it must not resolve at all.
+    let invocations = press(
+        &ctx,
+        key(EguiKey::E, Modifiers::NONE),
+        &claims,
+        &app_scope(),
+        &mut controller,
+        &mut shell,
+        &mut waveform,
+    );
+    assert!(
+        invocations.is_empty(),
+        "E must not fire outside Now Playing"
+    );
+    assert!(!effects_open());
+
+    // In Now Playing: opens, then closes.
+    press(
+        &ctx,
+        key(EguiKey::E, Modifiers::NONE),
+        &claims,
+        &now_playing_scope(),
+        &mut controller,
+        &mut shell,
+        &mut waveform,
+    );
+    assert!(
+        effects_open(),
+        "E must open the effect chain panel in Now Playing"
+    );
+
+    press(
+        &ctx,
+        key(EguiKey::E, Modifiers::NONE),
+        &claims,
+        &now_playing_scope(),
+        &mut controller,
+        &mut shell,
+        &mut waveform,
+    );
+    assert!(!effects_open(), "a second E must close it again");
+}
+
 // -- T053: FR-018 scopes -----------------------------------------------------
 
 /// `I` (`Scope::NowPlaying`) falls through untouched while Now Playing is
@@ -1525,10 +1595,11 @@ fn disabled_tempo_binding_does_not_block_and_flags_on_enable() {
     controller.queue_replace(vec![track("a", 200_000)]);
     controller.play();
     controller.tick();
-    assert!(
-        !controller.actions().is_enabled(HostAction::TempoStepUp),
-        "sanity: TempoStepUp ships disabled"
-    );
+    // 008 flips TempoStepUp's own shipped default to enabled (T049); this
+    // test's disabled starting state (needed to exercise the registry's
+    // enable/disable mechanics below) is created explicitly instead.
+    controller.set_action_enabled(HostAction::TempoStepUp, false);
+    assert!(!controller.actions().is_enabled(HostAction::TempoStepUp));
 
     let equals_name = KeyName::parse("Equals").unwrap_or_else(|| unreachable!());
     let equals = Chord::parse("Equals").unwrap_or_else(|_| unreachable!()); // TempoStepUp's own default.
@@ -1596,5 +1667,261 @@ fn disabled_tempo_binding_does_not_block_and_flags_on_enable() {
         shell.section,
         Section::Library,
         "NavPlugins must not have fired while conflicting"
+    );
+}
+
+// -----------------------------------------------------------------------
+// T050 (FR-017, SC-012, US1 AS7/AS8): the tempo-step actions.
+// -----------------------------------------------------------------------
+
+/// `TempoStepUp`/`TempoStepDown` ship enabled by default (008 flips T049)
+/// and both `repeats_while_held` — a held `Equals` fires once per event,
+/// nudging the first time-stretch node's ratio each time.
+#[test]
+fn tempo_actions_enabled_and_repeat() {
+    let (mut controller, _handle, _dirs) = active_controller("tempo-enabled-repeat");
+    assert!(controller.actions().is_enabled(HostAction::TempoStepUp));
+    assert!(controller.actions().is_enabled(HostAction::TempoStepDown));
+
+    controller.queue_replace(vec![track("a", 200_000)]);
+    controller.play();
+    controller.tick();
+    let id = controller
+        .chain_add_node(NodeKind::TimeStretch)
+        .expect("add time stretch");
+
+    let mut shell = Shell::default();
+    let mut waveform = WaveformState::default();
+    let ctx = Context::default();
+    let claims = FocusClaims::default(); // nothing focused: toolkit default owns nothing here
+    let scope = now_playing_scope();
+
+    let held_up = vec![
+        key(EguiKey::Equals, Modifiers::NONE),
+        key(EguiKey::Equals, Modifiers::NONE),
+        key(EguiKey::Equals, Modifiers::NONE),
+    ];
+    let invocations = frame(
+        &ctx,
+        held_up,
+        &claims,
+        &scope,
+        &mut controller,
+        &mut shell,
+        &mut waveform,
+    );
+    assert_eq!(
+        invocations.len(),
+        3,
+        "TempoStepUp repeats_while_held: every event must fire"
+    );
+    let ratio = controller
+        .chain()
+        .nodes()
+        .iter()
+        .find(|n| n.id == id)
+        .expect("node")
+        .params[0];
+    assert!(
+        (ratio - 1.30).abs() < 1e-6,
+        "three up-steps from the 1.0 default must land on 1.30, got {ratio}"
+    );
+}
+
+/// `Equals` steps tempo when no widget owns it, but a focused waveform's
+/// own `WAVEFORM_CLAIMS` (contracts/ui-actions.md §2) already claims
+/// `Plus`/`Equals`/`Minus`, so it keeps its own meaning for them instead of
+/// the tempo action ever reaching the dispatcher.
+#[test]
+fn plus_minus_step_tempo_unless_waveform_focused() {
+    let (mut controller, _handle, _dirs) = active_controller("tempo-vs-waveform");
+    controller.queue_replace(vec![track("a", 200_000)]);
+    controller.play();
+    controller.tick();
+    let id = controller
+        .chain_add_node(NodeKind::TimeStretch)
+        .expect("add time stretch");
+
+    let mut shell = Shell::default();
+    let mut waveform = WaveformState::default();
+    let ctx = Context::default();
+    let claims = FocusClaims::default();
+    let scope = now_playing_scope();
+
+    let invocations = press(
+        &ctx,
+        key(EguiKey::Equals, Modifiers::NONE),
+        &claims,
+        &scope,
+        &mut controller,
+        &mut shell,
+        &mut waveform,
+    );
+    assert_eq!(
+        invocations,
+        vec![Invocation {
+            action: HostAction::TempoStepUp,
+            repeat: false
+        }],
+        "Equals must step tempo when no widget owns it"
+    );
+    let ratio_after_first = controller
+        .chain()
+        .nodes()
+        .iter()
+        .find(|n| n.id == id)
+        .expect("node")
+        .params[0];
+    assert!((ratio_after_first - 1.10).abs() < 1e-6);
+
+    let waveform_id = Id::new("test-waveform-overview-tempo");
+    ctx.memory_mut(|m| m.request_focus(waveform_id));
+    let mut claims = FocusClaims::default();
+    claims.register(waveform_id, Claim::Keys(actions::waveform_claims()));
+
+    let invocations = press(
+        &ctx,
+        key(EguiKey::Equals, Modifiers::NONE),
+        &claims,
+        &scope,
+        &mut controller,
+        &mut shell,
+        &mut waveform,
+    );
+    assert!(
+        invocations.is_empty(),
+        "a focused waveform must own Equals via its own claim, not the tempo action"
+    );
+    let ratio_after_second = controller
+        .chain()
+        .nodes()
+        .iter()
+        .find(|n| n.id == id)
+        .expect("node")
+        .params[0];
+    assert_eq!(
+        ratio_after_second, ratio_after_first,
+        "the ratio must not change while the waveform owns the key"
+    );
+}
+
+/// The real-keyboard form of the test above: on a US layout `+` arrives
+/// as logical `Plus` + physical `Equals` with `Shift` held. The focused
+/// waveform's `plain(Plus)` claim must still own it — the claim check
+/// normalises the layout-consumed `Shift` exactly like the registry
+/// lookup does — so the tempo never steps (2026-09-19 manual walk, M6,
+/// where the raw-modifier match let `Shift`+`=` fall through to
+/// `TempoStepUp` with the waveform focused).
+#[test]
+fn shift_equals_plus_on_focused_waveform_never_steps_tempo() {
+    let (mut controller, _handle, _dirs) = active_controller("tempo-vs-waveform-shift-plus");
+    controller.queue_replace(vec![track("a", 200_000)]);
+    controller.play();
+    controller.tick();
+    let id = controller
+        .chain_add_node(NodeKind::TimeStretch)
+        .expect("add time stretch");
+
+    let mut shell = Shell::default();
+    let mut waveform = WaveformState::default();
+    let ctx = Context::default();
+    let scope = now_playing_scope();
+
+    let waveform_id = Id::new("test-waveform-overview-shift-plus");
+    ctx.memory_mut(|m| m.request_focus(waveform_id));
+    let mut claims = FocusClaims::default();
+    claims.register(waveform_id, Claim::Keys(actions::waveform_claims()));
+
+    let invocations = press(
+        &ctx,
+        key_physical(EguiKey::Plus, EguiKey::Equals, Modifiers::SHIFT),
+        &claims,
+        &scope,
+        &mut controller,
+        &mut shell,
+        &mut waveform,
+    );
+    assert!(
+        invocations.is_empty(),
+        "Shift+= (a typed `+`) must be owned by the focused waveform, got {invocations:?}"
+    );
+    let ratio = controller
+        .chain()
+        .nodes()
+        .iter()
+        .find(|n| n.id == id)
+        .expect("node")
+        .params[0];
+    assert!(
+        (ratio - 1.0).abs() < 1e-6,
+        "tempo must stay at 1.0 while the waveform owns `+`, got {ratio}"
+    );
+
+    // Without the waveform focused the same event still steps tempo.
+    ctx.memory_mut(|m| m.surrender_focus(waveform_id));
+    let invocations = press(
+        &ctx,
+        key_physical(EguiKey::Plus, EguiKey::Equals, Modifiers::SHIFT),
+        &FocusClaims::default(),
+        &scope,
+        &mut controller,
+        &mut shell,
+        &mut waveform,
+    );
+    assert_eq!(
+        invocations,
+        vec![Invocation {
+            action: HostAction::TempoStepUp,
+            repeat: false
+        }],
+        "unfocused, Shift+= is the tempo step"
+    );
+}
+
+/// contracts/effects-service.md §2 rule C3: holding `Plus` with no
+/// time-stretch node in the chain raises the keyed `effects-no-time-
+/// stretch` Info exactly once, even though every held event still
+/// produces its own `TempoStepUp` invocation (`repeats_while_held`).
+#[test]
+fn plus_without_time_stretch_notifies_once_while_held() {
+    let (mut controller, _handle, _dirs) = active_controller("tempo-no-node-notify");
+    controller.queue_replace(vec![track("a", 200_000)]);
+    controller.play();
+    controller.tick();
+
+    let mut shell = Shell::default();
+    let mut waveform = WaveformState::default();
+    let ctx = Context::default();
+    let claims = FocusClaims::default();
+    let scope = now_playing_scope();
+
+    let held_plus = vec![
+        key(EguiKey::Plus, Modifiers::NONE),
+        key(EguiKey::Plus, Modifiers::NONE),
+        key(EguiKey::Plus, Modifiers::NONE),
+    ];
+    let invocations = frame(
+        &ctx,
+        held_plus,
+        &claims,
+        &scope,
+        &mut controller,
+        &mut shell,
+        &mut waveform,
+    );
+    assert_eq!(
+        invocations.len(),
+        3,
+        "TempoStepUp still repeats_while_held with no time-stretch node"
+    );
+
+    let visible_count = controller
+        .notifications()
+        .visible()
+        .filter(|n| n.message_key == KEY_EFFECTS_NO_TIME_STRETCH)
+        .count();
+    assert_eq!(
+        visible_count, 1,
+        "must raise the no-time-stretch notification exactly once across the held run"
     );
 }

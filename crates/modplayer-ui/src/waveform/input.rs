@@ -94,6 +94,17 @@ pub fn handle(
         Claim::Keys(actions::waveform_claims()),
     );
 
+    // A pointer press on the waveform also takes keyboard focus, so the
+    // keyboard rows below (and 007's claim above — `+`/`-` zoom instead
+    // of stepping tempo, US1 AS8/SC-012 of 008) apply to the widget the
+    // user just clicked. egui hands focus to a `Sense::click_and_drag()`
+    // rect only on `Tab`, never on a click, which the 2026-09-19 manual
+    // walk (M6) showed left `+` stepping tempo right after a waveform
+    // click.
+    if response.clicked() || response.drag_started() {
+        ui.memory_mut(|memory| memory.request_focus(response.id));
+    }
+
     if previewing && ui.input(|input| input.key_pressed(Key::Escape)) {
         return Some(WaveformEvent::CancelDrag);
     }
