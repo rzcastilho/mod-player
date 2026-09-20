@@ -18,6 +18,8 @@ use modplayer_core::{ActiveState, AnalysisStatus, Intent, PlaybackController, tr
 use crate::artwork::{ArtworkCache, ArtworkState};
 use crate::effects_view;
 use crate::markers;
+use crate::plugin_overlays::{self, ViewKind};
+use crate::plugin_panels;
 use crate::queue_view;
 use crate::transport_view;
 use crate::waveform::{
@@ -73,6 +75,12 @@ pub fn show<B: OutputBackend, H: SourceHost>(
         waveform.drag = None;
         waveform.last_track = current_id;
     }
+
+    // 011-plugin-ui-contributions, contracts/ui-panels.md L1: the docked
+    // column must draw first, exactly like `app.rs`'s own nav rail
+    // (`Panel::left`), so the rest of this content correctly sees the
+    // narrower remaining width once at least one panel is docked.
+    plugin_panels::show_dock(ui, controller);
 
     show_heading(ui, controller, artwork);
     show_status_line(ui, controller);
@@ -203,6 +211,10 @@ pub fn show<B: OutputBackend, H: SourceHost>(
         ui.separator();
         queue_view::show(ui, controller);
     }
+
+    // contracts/ui-panels.md L2: floated panels last (position-independent
+    // overlay windows; drawn after all other Now Playing content).
+    plugin_panels::show_floated_windows(ui.ctx(), controller);
 
     // Position advances at the audio-clock rate (>= 60 Hz, FR-006/SC-003)
     // independent of egui's own input-driven repaint cadence; keep the
@@ -404,6 +416,10 @@ fn show_waveform<B: OutputBackend, H: SourceHost>(
     let markers_snapshot = controller.markers().cloned();
     let loop_state = controller.shared().loop_state();
     let focused_marker = waveform.focused_marker;
+    // 011-plugin-ui-contributions (US3, FR-014/FR-015): every `Active`
+    // plugin's overlay layers, read once for both waveforms this frame —
+    // painting them costs zero plugin calls (O10, SC-003).
+    let overlay_layers = controller.plugin_overlays();
     markers::lane(
         ui,
         "overview",
@@ -422,6 +438,11 @@ fn show_waveform<B: OutputBackend, H: SourceHost>(
         unavailable_text: &unavailable_text,
         highlight: Some(detail.start_frame..(detail.start_frame + detail.width_frames)),
     };
+    // US3 T089 (O7): reserve the 16px glyph/label lane directly above the
+    // overview's own rect — `plugin_overlays::paint` (below) paints into
+    // exactly this strip, mirroring `markers::lane`'s own reserved-height
+    // precedent rather than a second widget call.
+    ui.add_space(plugin_overlays::LANE_HEIGHT);
     let (_overview_response, overview_event) = waveform::overview(
         ui,
         len_frames,
@@ -437,7 +458,17 @@ fn show_waveform<B: OutputBackend, H: SourceHost>(
                 markers_snapshot.as_ref(),
                 loop_state,
                 focused_marker,
-            )
+            );
+            // O5: after markers/loop, before the playhead (paint::paint
+            // already ran, `waveform::overview`'s own body calls
+            // `paint::playhead` right after this closure returns).
+            plugin_overlays::paint(
+                painter,
+                space,
+                len_frames,
+                ViewKind::Overview,
+                &overlay_layers,
+            );
         },
     );
     if let Some(event) = overview_event {
@@ -479,6 +510,8 @@ fn show_waveform<B: OutputBackend, H: SourceHost>(
         unavailable_text: &unavailable_text,
         highlight: None,
     };
+    // US3 T089: the detail view's own lane (O7 applies to both views).
+    ui.add_space(plugin_overlays::LANE_HEIGHT);
     let (_detail_response, detail_event) = waveform::detail(
         ui,
         detail_window,
@@ -494,7 +527,14 @@ fn show_waveform<B: OutputBackend, H: SourceHost>(
                 markers_snapshot.as_ref(),
                 loop_state,
                 focused_marker,
-            )
+            );
+            plugin_overlays::paint(
+                painter,
+                space,
+                len_frames,
+                ViewKind::Detail,
+                &overlay_layers,
+            );
         },
     );
     if let Some(event) = detail_event {

@@ -50,6 +50,15 @@ pub enum Control {
         name: String,
         reply: SyncSender<serde_json::Value>,
     },
+    /// 011-plugin-ui-contributions (R5): a Settings-page edit landed in
+    /// core; the scheduler applies `store.set(Scope::Settings, ..)` for
+    /// each change and *then* dispatches `settings_changed` with these
+    /// same `changes` in the same inbox item, so the plugin never
+    /// observes the event before the value (`get_settings()` already
+    /// reflects it).
+    SettingsWrite {
+        changes: std::collections::BTreeMap<String, serde_json::Value>,
+    },
 }
 
 /// One item in a plugin's inbox (research R5).

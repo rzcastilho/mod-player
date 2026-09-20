@@ -285,7 +285,12 @@ const CONTROLS_ARG_KEYS: &[&str] = &[
     "controls-remove-binding",
     "controls-capture",
     "controls-reset-action",
-    "controls-conflict-with",
+    // 011-plugin-ui-contributions US2 (T075/T076, contracts/
+    // action-registry-plugins.md G15): tier-aware conflict text and the
+    // plugin-group heading.
+    "controls-conflict-with-host",
+    "controls-conflict-with-plugin",
+    "controls-plugin-group",
 ];
 
 /// `controls.ftl`'s one new settings-load warning (FR-013;
@@ -458,6 +463,18 @@ const PLUGINS_KEYS: &[&str] = &[
     "plugin-suspended-cause-did-not-start",
     "notification-action-restart-plugin",
     "notification-action-disable-plugin",
+    // Plugin panels (011-plugin-ui-contributions, contracts/ui-panels.md
+    // §4).
+    "plugin-panel-float",
+    "plugin-panel-dock",
+    "plugin-panel-close",
+    "plugin-panel-disable",
+    "plugin-panel-enable",
+    "plugin-panel-show",
+    "plugin-panel-hide",
+    "plugin-panel-restart",
+    "plugin-generic-glyph-desc",
+    "plugin-marker-list-empty",
 ];
 
 /// `plugins.ftl` keys that take a Fluent placeholder — resolved via
@@ -469,6 +486,9 @@ const PLUGINS_ARG_KEYS: &[&str] = &[
     "plugins-memory",
     "plugin-suspended",
     "plugin-auto-disabled",
+    "plugin-panel-suspended",
+    "plugin-panel-header",
+    "plugin-notification",
 ];
 
 /// Every Settings-screen key (US5, T086): the eleven fixed-order category
@@ -519,6 +539,11 @@ const SETTINGS_SCREEN_KEYS: &[&str] = &[
     // Controls category (007-keyboard-actions-and-shortcuts, T061/T068).
     "setting-keybindings",
     "setting-keybindings-desc",
+    // Plugins category (011-plugin-ui-contributions US4 T104, contracts/
+    // overlays-settings-notify.md §2 "S2"/"S6").
+    "settings-plugins-pages",
+    "settings-plugins-none",
+    "settings-plugins-back",
 ];
 
 /// Every Welcome/Decline/Privacy-Notice key (US1, T037; contracts/
@@ -884,6 +909,7 @@ fn every_shell_nav_and_notification_key_resolves() {
                 ("binding", "⌘⇧→".to_string()),
                 ("action", "Play/pause".to_string()),
                 ("other", "Stop".to_string()),
+                ("plugin", "Fixture".to_string()),
             ],
         );
         assert_ne!(
@@ -1040,6 +1066,8 @@ fn plugins_ftl_keys_used_exist() {
                 ("pct", "3".to_string()),
                 ("used", "1.2".to_string()),
                 ("cause", "it stopped responding".to_string()),
+                ("title", "Controls".to_string()),
+                ("text", "example text".to_string()),
             ],
         );
         assert_ne!(

@@ -25,7 +25,7 @@ refusal_codes = [
 
 [api_version]
 major = 1
-minor = 1
+minor = 2
 
 # ---------------------------------------------------------------------------
 # Permission catalog (25 entries; data-model.md §1.1, FR-015)
@@ -93,22 +93,22 @@ operable = false
 [[permission]]
 name = "ui.panel"
 category = "ui"
-operable = false
+operable = true
 
 [[permission]]
 name = "ui.overlay"
 category = "ui"
-operable = false
+operable = true
 
 [[permission]]
 name = "ui.shortcuts"
 category = "ui"
-operable = false
+operable = true
 
 [[permission]]
 name = "ui.settings"
 category = "ui"
-operable = false
+operable = true
 
 [[permission]]
 name = "files.read"
@@ -158,7 +158,7 @@ operable = false
 [[permission]]
 name = "ui.notify"
 category = "ui"
-operable = false
+operable = true
 
 # ---------------------------------------------------------------------------
 # Requests (data-model.md §1.4; contracts/plugin-api-v1.md §3)
@@ -502,6 +502,83 @@ method = "debug_probe"
 needs_focus = false
 category = "transport"
 
+# -- ui namespace (011-plugin-ui-contributions, contracts/plugin-api-v1.2.md
+# §2-§3): every call is rate-limited under the "ui" bucket except `notify`,
+# which has its own "notify" bucket (PL-8.1). None of these needs focus —
+# `no_focus` is never produced by a `ui.*` call.
+
+[[request]]
+name = "RegisterPanel"
+namespace = "ui"
+method = "register_panel"
+requires = "ui.panel"
+needs_focus = false
+category = "ui"
+
+[[request]]
+name = "UpdateWidget"
+namespace = "ui"
+method = "update_widget"
+requires = "ui.panel"
+needs_focus = false
+category = "ui"
+
+[[request]]
+name = "AddOverlays"
+namespace = "ui"
+method = "add_overlays"
+requires = "ui.overlay"
+needs_focus = false
+category = "ui"
+
+[[request]]
+name = "RemoveOverlays"
+namespace = "ui"
+method = "remove_overlays"
+requires = "ui.overlay"
+needs_focus = false
+category = "ui"
+
+[[request]]
+name = "ClearOverlays"
+namespace = "ui"
+method = "clear_overlays"
+requires = "ui.overlay"
+needs_focus = false
+category = "ui"
+
+[[request]]
+name = "RegisterAction"
+namespace = "ui"
+method = "register_action"
+requires = "ui.shortcuts"
+needs_focus = false
+category = "ui"
+
+[[request]]
+name = "RegisterSettings"
+namespace = "ui"
+method = "register_settings"
+requires = "ui.settings"
+needs_focus = false
+category = "ui"
+
+[[request]]
+name = "GetSettings"
+namespace = "ui"
+method = "get_settings"
+requires = "ui.settings"
+needs_focus = false
+category = "ui"
+
+[[request]]
+name = "Notify"
+namespace = "ui"
+method = "notify"
+requires = "ui.notify"
+needs_focus = false
+category = "notify"
+
 # ---------------------------------------------------------------------------
 # Events (data-model.md §1.5; contracts/plugin-api-v1.md §4)
 # ---------------------------------------------------------------------------
@@ -581,3 +658,22 @@ payload = ["holder"]
 name = "FocusRevoked"
 requires = "transport.control"
 payload = ["holder"]
+
+# -- ui namespace events (011-plugin-ui-contributions, contracts/
+# plugin-api-v1.2.md §4): delivered direct to the handle, never fanned out
+# (the owning registration already implies the permission).
+
+[[event]]
+name = "PanelInteraction"
+requires = "ui.panel"
+payload = ["panel", "widget", "value"]
+
+[[event]]
+name = "ActionInvoked"
+requires = "ui.shortcuts"
+payload = ["action", "source", "value"]
+
+[[event]]
+name = "SettingsChanged"
+requires = "ui.settings"
+payload = ["changes"]

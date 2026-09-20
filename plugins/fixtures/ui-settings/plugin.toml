@@ -1,0 +1,17 @@
+identifier  = "org.modplayer.fixture.ui-settings"
+name        = "UI settings fixture"
+description = "Registers a 4-field settings schema and logs every settings_changed delivery (US4 T105)."
+version     = "1.0.0"
+api         = "1.2"
+author      = "ModPlayer project"
+license     = "MIT OR Apache-2.0"
+source      = "fixture"
+entry       = "main.luau"
+
+[[permissions.required]]
+permission    = "ui.settings"
+justification = "Registers the fixture's own 4-field settings page (M8: Snap to beat, Semitone shift, Label, Mode)."
+
+[[permissions.required]]
+permission    = "state.plugin"
+justification = "Probe 'state_shift' proves Scope::Settings is a separate store from Scope::Plugin (FR-018): state.plugin.get('shift') must never see the settings page's own value."

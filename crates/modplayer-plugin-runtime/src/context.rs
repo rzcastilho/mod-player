@@ -10,6 +10,7 @@ use mlua::{Lua, LuaOptions, StdLib};
 use modplayer_capability_gateway::budgets::Budgets;
 use modplayer_capability_gateway::gateway::Gateway;
 use modplayer_capability_gateway::state::PluginStateStore;
+use modplayer_capability_gateway::ui::SettingsField;
 
 use crate::budget::BudgetState;
 use crate::handle::RuntimeDeps;
@@ -47,6 +48,16 @@ pub struct Shared {
     /// observed (US3 T095): a change resets the position "changed" edge
     /// only (position timers are left running, unlike a track change).
     pub last_seen_position_epoch: u64,
+    /// 011-plugin-ui-contributions (R4): the schema from this plugin's
+    /// last successful `register_settings` RPC, `None` until then —
+    /// `get_settings()`'s local binding reads it to substitute each
+    /// field's `default` for a missing/invalid stored value.
+    pub settings_schema: Option<Vec<SettingsField>>,
+    /// R16/FR-026: set only while the scheduler is running a
+    /// `panel_interaction`/`action_invoked` handler; `transport.
+    /// request_focus`'s binding reads it (and only it) to mark the RPC as
+    /// user-interaction-originated.
+    pub in_interaction_handler: bool,
 }
 
 /// A context failed to come up (RT5 "script error -> Exited").

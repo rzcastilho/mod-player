@@ -3,9 +3,12 @@
 //! Plugin package manifest (`plugin.toml`) parsing and validation
 //! (FR-001, FR-002; contracts/manifest.md; data-model.md §1.2).
 
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 
 use crate::api::Permission;
+use crate::ui::limits::{MAX_GLYPHS, matches_glyph_key_grammar};
 
 /// A plugin's reverse-domain identity (contract §2): at least two
 /// `[a-z0-9-]` labels joined by `.`, at most 128 bytes, immutable once
@@ -161,6 +164,20 @@ pub struct Manifest {
     pub ui: Vec<UiContribution>,
     pub effect_nodes: Vec<IntendedNode>,
     pub min_host_version: Option<Version>,
+    /// 011-plugin-ui-contributions (FR-014a): package-relative PNG path,
+    /// optional.
+    pub icon: Option<String>,
+    /// FR-014a: `[glyphs]` table, key ([`GLYPH_KEY_GRAMMAR`]-matching) ->
+    /// package-relative PNG path; at most [`MAX_GLYPHS`] entries.
+    ///
+    /// [`GLYPH_KEY_GRAMMAR`]: crate::ui::limits::GLYPH_KEY_GRAMMAR
+    pub glyphs: BTreeMap<String, String>,
+    /// FR-021: the locale this plugin's own `[strings.*]` fall back to;
+    /// defaults to `"en-US"`.
+    pub default_locale: String,
+    /// FR-021: `[strings.<locale>]` tables, resolved by `plugins::ui::
+    /// strings::resolve` for any `"@key"`-prefixed user-facing string.
+    pub strings: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 /// Every way [`validate`] can reject a manifest (contract §3). Each
@@ -249,6 +266,10 @@ fn default_entry() -> String {
     "main.luau".to_string()
 }
 
+fn default_locale_default() -> String {
+    "en-US".to_string()
+}
+
 /// The as-parsed-from-TOML manifest, before validation (data-model.md
 /// §1.2). Every field is optional/loosely typed here; [`validate`]
 /// applies contract §3's ordered rules to turn it into a [`Manifest`] or
@@ -278,6 +299,14 @@ pub struct ManifestDto {
     ui: Vec<UiDto>,
     #[serde(default)]
     effect_nodes: Vec<EffectNodeDto>,
+    #[serde(default)]
+    icon: Option<String>,
+    #[serde(default)]
+    glyphs: BTreeMap<String, String>,
+    #[serde(default = "default_locale_default")]
+    default_locale: String,
+    #[serde(default)]
+    strings: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 /// Rule 1 (contract §3): parse the raw TOML text into a [`ManifestDto`].
@@ -407,6 +436,20 @@ pub fn validate(dto: ManifestDto, entry_exists: bool) -> Result<Manifest, Manife
         return Err(ManifestError::EntryMissing(dto.entry.clone()));
     }
 
+    // Rule 3 (011-plugin-ui-contributions, FR-014a): every `[glyphs]` key
+    // matches `GLYPH_KEY_GRAMMAR` and there are at most `MAX_GLYPHS`
+    // entries — the *map* is schema (checked here); asset presence/
+    // format/size is never a manifest error (checked at discovery,
+    // `plugins::ui::assets::load`).
+    if dto.glyphs.len() > MAX_GLYPHS || dto.glyphs.keys().any(|k| !matches_glyph_key_grammar(k)) {
+        return Err(ManifestError::MalformedField {
+            field: "glyphs",
+            detail: format!(
+                "glyph keys must match [a-z][a-z0-9_]{{0,31}} and number at most {MAX_GLYPHS}"
+            ),
+        });
+    }
+
     Ok(Manifest {
         identifier,
         name,
@@ -439,6 +482,10 @@ pub fn validate(dto: ManifestDto, entry_exists: bool) -> Result<Manifest, Manife
             })
             .collect(),
         min_host_version,
+        icon: dto.icon,
+        glyphs: dto.glyphs,
+        default_locale: dto.default_locale,
+        strings: dto.strings,
     })
 }
 

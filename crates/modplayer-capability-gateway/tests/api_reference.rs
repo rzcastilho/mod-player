@@ -182,14 +182,14 @@ fn reference_is_current() {
     );
 }
 
-/// 010-transport-focus (research R6, Constitution IX): the schema bump
-/// that gates every other crate's focus-arbitration change.
+/// 011-plugin-ui-contributions (research R1, Constitution IX): the
+/// schema bump that gates the `ui.*` namespace.
 #[test]
-fn api_version_is_1_1() {
+fn api_version_is_1_2() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let schema_path = manifest_dir.join("api/v1.toml");
     let text = fs::read_to_string(&schema_path).expect("read api/v1.toml");
     let schema: Schema = toml::from_str(&text).expect("parse api/v1.toml");
     assert_eq!(schema.api_version.major, 1);
-    assert_eq!(schema.api_version.minor, 1);
+    assert_eq!(schema.api_version.minor, 2);
 }

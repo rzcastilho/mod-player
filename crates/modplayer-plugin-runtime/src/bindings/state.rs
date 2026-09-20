@@ -3,6 +3,13 @@
 //! `api.state.plugin.*` / `api.state.track.*` (contract §3): local
 //! key-value reads/writes on the plugin's own `PluginStateStore` — never
 //! an RPC (research R9, R3).
+//!
+//! 011-plugin-ui-contributions (R5, FR-018): `Scope::Settings` is
+//! deliberately never installed here — a plugin's settings-page values
+//! are host-written only (`Control::SettingsWrite`), so `install_scope`
+//! only ever runs for `Plugin`/`Track` and [`Request::StateGet`]/
+//! [`Request::StateSet`]/[`Request::StateRemove`] can never carry
+//! `Scope::Settings` from this binding.
 
 use mlua::{Lua, LuaSerdeExt, Table, Value};
 
@@ -52,6 +59,10 @@ pub fn set(
         return Err(Refusal::no_track());
     }
     guard.store.set(*scope, key, value.clone())?;
+    guard
+        .budget
+        .gauges
+        .set_storage_used_bytes(guard.store.used_bytes());
     Ok(Response::Ok)
 }
 
@@ -73,6 +84,10 @@ pub fn remove(
         return Err(Refusal::no_track());
     }
     guard.store.remove(*scope, key);
+    guard
+        .budget
+        .gauges
+        .set_storage_used_bytes(guard.store.used_bytes());
     Ok(Response::Ok)
 }
 
@@ -96,6 +111,9 @@ fn install_scope(
             RequestKind::StateTrackSet,
             RequestKind::StateTrackRemove,
         ),
+        // FR-018: never reachable — `install` below calls this only with
+        // `Plugin`/`Track`; `Scope::Settings` is host-written only.
+        Scope::Settings => unreachable!("Scope::Settings is never installed for Lua (FR-018)"),
     };
 
     let shared_get = shared.clone();

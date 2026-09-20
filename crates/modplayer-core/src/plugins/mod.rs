@@ -14,6 +14,7 @@ pub mod fanout;
 pub mod focus;
 pub mod host;
 pub mod log;
+pub mod ui;
 pub mod view;
 
 use std::collections::BTreeMap;
@@ -28,10 +29,15 @@ use modplayer_plugin_runtime::handle::PluginHandle;
 
 pub use bundled::BundledPackage;
 pub(crate) use focus::TransportActor;
-pub use focus::{FocusArbiter, FocusChange, FocusHolder, FocusPolicy, Vacancy};
+pub use focus::{FocusArbiter, FocusChange, FocusHolder, FocusPolicy, RequestOrigin, Vacancy};
 pub use host::PluginHost;
 pub use log::{LogEntry, PluginLog};
-pub use view::{FocusRow, PluginRow, PluginsView, TransportFocusView};
+pub use ui::PluginUi;
+pub use ui::assets::PluginAssets;
+pub use view::{
+    FocusRow, OverlayLayer, PanelBody, PanelRowControl, PanelView, PluginPanelsView, PluginRow,
+    PluginSettingsView, PluginsView, TransportFocusView,
+};
 
 /// A plugin's session-stable identity within `modplayer-core` — the same
 /// numeric space `modplayer-effects`' `NodeOwner::Plugin`/`markers::model::
@@ -175,6 +181,11 @@ pub struct PluginRecord {
     /// Reserved (research: no API-minor compatibility shim exists this
     /// slice — always `false`).
     pub compatibility_mode: bool,
+    /// 011-plugin-ui-contributions (FR-014a, R11): this plugin's decoded
+    /// icon/glyphs, resolved once at discovery. Empty until `host.rs`'s
+    /// `discover()` actually loads them (US1 T048) — every record starts
+    /// with `PluginAssets::default()`.
+    pub assets: PluginAssets,
 }
 
 impl PluginRecord {

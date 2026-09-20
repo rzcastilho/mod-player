@@ -104,6 +104,73 @@ fn malformed_identifier_cases() {
     assert!(PluginIdentifier::parse("org.modplayer.ok").is_some());
 }
 
+// -- 011-plugin-ui-contributions: icon/glyphs/default_locale/strings ------
+
+#[test]
+fn icon_glyphs_locale_and_strings_round_trip() {
+    // Inserted right after `entry = ...` — VALID already opens
+    // `[[permissions.required]]` further down, and TOML bare keys after a
+    // table header belong to that table, not the document root.
+    let toml = VALID.replace(
+        "entry = \"main.luau\"\n",
+        "entry = \"main.luau\"\nicon = \"icon.png\"\ndefault_locale = \"en-US\"\n\n[glyphs]\nchord = \"glyphs/chord.png\"\n\n[strings.en-US]\ntempo = \"Tempo\"\n",
+    );
+    let manifest = manifest::parse_and_validate(&toml, true).expect("valid");
+    assert_eq!(manifest.icon.as_deref(), Some("icon.png"));
+    assert_eq!(manifest.default_locale, "en-US");
+    assert_eq!(
+        manifest.glyphs.get("chord").map(String::as_str),
+        Some("glyphs/chord.png")
+    );
+    assert_eq!(
+        manifest
+            .strings
+            .get("en-US")
+            .and_then(|table| table.get("tempo"))
+            .map(String::as_str),
+        Some("Tempo")
+    );
+}
+
+#[test]
+fn missing_icon_glyphs_locale_and_strings_default_sensibly() {
+    let manifest = manifest::parse_and_validate(VALID, true).expect("valid");
+    assert_eq!(manifest.icon, None);
+    assert_eq!(manifest.default_locale, "en-US");
+    assert!(manifest.glyphs.is_empty());
+    assert!(manifest.strings.is_empty());
+}
+
+#[test]
+fn malformed_glyph_key_is_malformed_field() {
+    let toml = format!("{VALID}\n[glyphs]\nBadKey = \"glyphs/bad.png\"\n");
+    let err = manifest::parse_and_validate(&toml, true).unwrap_err();
+    assert_eq!(
+        err,
+        ManifestError::MalformedField {
+            field: "glyphs",
+            detail: "glyph keys must match [a-z][a-z0-9_]{0,31} and number at most 32".to_string(),
+        }
+    );
+}
+
+#[test]
+fn over_limit_glyph_count_is_malformed_field() {
+    let mut glyphs_table = String::from("[glyphs]\n");
+    for i in 0..33 {
+        glyphs_table.push_str(&format!("g{i} = \"glyphs/g{i}.png\"\n"));
+    }
+    let toml = format!("{VALID}\n{glyphs_table}");
+    let err = manifest::parse_and_validate(&toml, true).unwrap_err();
+    assert!(matches!(
+        err,
+        ManifestError::MalformedField {
+            field: "glyphs",
+            ..
+        }
+    ));
+}
+
 mod proptests {
     use super::*;
     use modplayer_capability_gateway::manifest::Version;

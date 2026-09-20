@@ -14,7 +14,9 @@ use egui::{
 };
 use modplayer_audio_io::OutputBackend;
 use modplayer_audio_source::SourceHost;
-use modplayer_core::actions::{ActionCategory, ActionDef, ActionKind, Chord, HostAction, Platform};
+use modplayer_core::actions::{
+    ActionCategory, ActionId, ActionKind, Chord, Platform, RowCategory, RowLabel,
+};
 use modplayer_core::{PlaybackController, tr, tr_args};
 
 use crate::actions::{self, Claim, key_name_from_egui, mods_from_egui};
@@ -26,10 +28,13 @@ use crate::actions::{self, Claim, key_name_from_egui, mods_from_egui};
 /// first requested focus lives in `egui::Context` memory instead (mirrors
 /// `settings/account.rs`'s sign-out modal `modal_focus_pending_id`), so
 /// this struct stays exactly the four fields the contract names.
+/// `capture: Option<ActionId>` (011-plugin-ui-contributions, widened from
+/// `HostAction`, contracts/action-registry-plugins.md FR-010): a plugin
+/// action's row opens the very same capture control.
 #[derive(Debug, Clone, Default)]
 pub struct ControlsScreen {
     pub filter: String,
-    pub capture: Option<HostAction>,
+    pub capture: Option<ActionId>,
     pub capture_error: Option<&'static str>,
     pub reset_all_confirm: bool,
 }
@@ -144,16 +149,30 @@ fn canonical_capture_chord(
     Some(Chord::new(mods, logical))
 }
 
+/// Which heading group a row falls under (011-plugin-ui-contributions,
+/// contracts/action-registry-plugins.md G15): a host category, or a
+/// named owning plugin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RowGroup {
+    Host(ActionCategory),
+    Plugin(String),
+}
+
 /// One catalog row's data, snapshotted from `controller.actions().rows()`
 /// before any widget can mutate the registry through a button in the
 /// same frame (`ActionRow` borrows the registry; holding that borrow
 /// across a `controller.add_binding`/`remove_binding` call would not
-/// compile).
+/// compile). Widened from the 007 `HostAction`-only shape
+/// (011-plugin-ui-contributions, contracts/action-registry-plugins.md
+/// G15) so a plugin's own actions render through this exact same row.
 struct RowSnapshot {
-    action: HostAction,
-    def: &'static ActionDef,
+    id: ActionId,
+    label: String,
+    kind: ActionKind,
     enabled: bool,
     bindings: Vec<Chord>,
+    conflicts: Vec<Chord>,
+    group: RowGroup,
 }
 
 fn snapshot_rows<B: OutputBackend, H: SourceHost>(
@@ -162,13 +181,70 @@ fn snapshot_rows<B: OutputBackend, H: SourceHost>(
     controller
         .actions()
         .rows()
-        .map(|row| RowSnapshot {
-            action: row.def.action,
-            def: row.def,
-            enabled: row.enabled,
-            bindings: row.bindings.to_vec(),
+        .map(|row| {
+            let label = match row.label {
+                RowLabel::Fluent(key) => tr(key),
+                RowLabel::Literal(s) => s,
+            };
+            let group = match row.category {
+                RowCategory::Host(category) => RowGroup::Host(category),
+                RowCategory::Plugin { name } => RowGroup::Plugin(name),
+            };
+            RowSnapshot {
+                id: row.id,
+                label,
+                kind: row.kind,
+                enabled: row.enabled,
+                bindings: row.bindings.to_vec(),
+                conflicts: row.conflicts,
+                group,
+            }
         })
         .collect()
+}
+
+/// `id`'s display label, resolved the same way [`snapshot_rows`] resolves
+/// a row's own — used to name a *conflict partner* (`show_chip`), which
+/// is looked up fresh against the live registry rather than carried in
+/// `RowSnapshot` (a chip's conflict partner is a different row, not
+/// itself).
+fn action_label<B: OutputBackend, H: SourceHost>(
+    controller: &PlaybackController<B, H>,
+    id: &ActionId,
+) -> String {
+    match id {
+        ActionId::Host(action) => tr(action.label_key()),
+        ActionId::Plugin(plugin_id) => controller
+            .actions()
+            .plugin_action_def(plugin_id)
+            .map(|def| def.label.clone())
+            .unwrap_or_default(),
+    }
+}
+
+/// The tier-aware "conflicts with …" message (contracts/action-registry-
+/// plugins.md G15: "conflict text names the partner's tier"):
+/// `controls-conflict-with-host` when `partner` is the host catalog,
+/// `controls-conflict-with-plugin` (naming the owning plugin) otherwise.
+fn conflict_message<B: OutputBackend, H: SourceHost>(
+    controller: &PlaybackController<B, H>,
+    partner: &ActionId,
+) -> String {
+    let other = action_label(controller, partner);
+    match partner {
+        ActionId::Host(_) => tr_args("controls-conflict-with-host", &[("other", other)]),
+        ActionId::Plugin(plugin_id) => {
+            let plugin = controller
+                .actions()
+                .plugin_action_def(plugin_id)
+                .map(|def| def.name.clone())
+                .unwrap_or_default();
+            tr_args(
+                "controls-conflict-with-plugin",
+                &[("plugin", plugin), ("other", other)],
+            )
+        }
+    }
 }
 
 /// Draw the Controls screen: the filter box, "Reset all to defaults",
@@ -211,8 +287,8 @@ pub fn show<B: OutputBackend, H: SourceHost>(
         let category_matches = tr(category.label_key()).to_lowercase().contains(&query);
         let category_rows: Vec<&RowSnapshot> = rows
             .iter()
-            .filter(|row| row.def.category == category)
-            .filter(|row| category_matches || tr(row.def.label_key).to_lowercase().contains(&query))
+            .filter(|row| row.group == RowGroup::Host(category))
+            .filter(|row| category_matches || row.label.to_lowercase().contains(&query))
             .collect();
         if category_rows.is_empty() {
             continue;
@@ -223,6 +299,39 @@ pub fn show<B: OutputBackend, H: SourceHost>(
             show_row(ui, controller, screen, row, platform);
         }
     }
+
+    // One heading per owning plugin, in `rows()`'s own order (already
+    // sorted by display name, contracts/action-registry-plugins.md G15) —
+    // `dedup`-free grouping by walking the already-grouped snapshot once.
+    let mut seen_plugins: Vec<&str> = Vec::new();
+    for row in &rows {
+        let RowGroup::Plugin(name) = &row.group else {
+            continue;
+        };
+        if seen_plugins.contains(&name.as_str()) {
+            continue;
+        }
+        seen_plugins.push(name.as_str());
+
+        let heading_matches = name.to_lowercase().contains(&query);
+        let plugin_rows: Vec<&RowSnapshot> = rows
+            .iter()
+            .filter(|r| matches!(&r.group, RowGroup::Plugin(n) if n == name))
+            .filter(|r| heading_matches || r.label.to_lowercase().contains(&query))
+            .collect();
+        if plugin_rows.is_empty() {
+            continue;
+        }
+        any_match = true;
+        ui.heading(tr_args(
+            "controls-plugin-group",
+            &[("plugin", name.clone())],
+        ));
+        for row in plugin_rows {
+            show_row(ui, controller, screen, row, platform);
+        }
+    }
+
     if !any_match {
         ui.label(tr("controls-no-match"));
     }
@@ -232,7 +341,9 @@ fn filter_box_id() -> Id {
     Id::new("controls-filter-box")
 }
 
-/// One action's row: label (+ "(inactive)" when disabled, de-emphasized),
+/// One action's row: label (+ "(inactive)" when disabled/the owning
+/// plugin is not Active, de-emphasized — contracts/action-registry-
+/// plugins.md G15 "a row whose plugin is not Active renders greyed"),
 /// kind, one chip per binding, "Add binding" (or the open capture
 /// control), and "Reset to default" (contracts/ui-actions.md §4).
 fn show_row<B: OutputBackend, H: SourceHost>(
@@ -243,7 +354,7 @@ fn show_row<B: OutputBackend, H: SourceHost>(
     platform: Platform,
 ) {
     ui.horizontal_wrapped(|ui| {
-        let label = tr(row.def.label_key);
+        let label = row.label.clone();
         let label_text = if row.enabled {
             label.clone()
         } else {
@@ -257,42 +368,48 @@ fn show_row<B: OutputBackend, H: SourceHost>(
         };
         ui.label(text);
 
-        let kind_key = match row.def.kind {
+        let kind_key = match row.kind {
             ActionKind::Trigger => "controls-kind-trigger",
             ActionKind::Continuous => "controls-kind-continuous",
         };
         ui.label(tr(kind_key));
 
         for &chord in &row.bindings {
-            show_chip(ui, controller, row.action, chord, platform);
+            let conflicting = row.conflicts.contains(&chord);
+            show_chip(ui, controller, row.id.clone(), chord, platform, conflicting);
         }
 
-        if screen.capture == Some(row.action) {
-            show_capture_control(ui, controller, screen, row.action, &row.bindings);
+        if screen.capture.as_ref() == Some(&row.id) {
+            show_capture_control(ui, controller, screen, row.id.clone(), &row.bindings);
         } else if ui.button(tr("controls-add-binding")).clicked() {
-            open_capture(ui, screen, row.action);
+            open_capture(ui, screen, row.id.clone());
         }
 
         let reset_label = tr_args("controls-reset-action", &[("action", label)]);
         if ui.button(reset_label).clicked() {
-            controller.reset_binding(row.action);
+            controller.reset_binding(row.id.clone());
         }
     });
 }
 
 /// One binding chip: a non-interactive label showing the platform display
 /// string (accessible name `controls-binding-chip { $binding }`), a `⚠` +
-/// `controls-conflict-with { $other }` note when `chord` is currently
-/// flagged as conflicting (US3, contracts/ui-actions.md §4), and a `×`
+/// a tier-aware "conflicts with …" note ([`conflict_message`]) when
+/// `chord` is currently flagged as conflicting (`conflicting`, from the
+/// row's own snapshotted `ActionRow::conflicts` — US3, contracts/
+/// ui-actions.md §4, contracts/action-registry-plugins.md G15), and a `×`
 /// button that removes it immediately (FR-008).
 fn show_chip<B: OutputBackend, H: SourceHost>(
     ui: &mut Ui,
     controller: &mut PlaybackController<B, H>,
-    action: HostAction,
+    action: ActionId,
     chord: Chord,
     platform: Platform,
+    conflicting: bool,
 ) {
-    let conflict_partner = controller.actions().conflict_partner(action, chord);
+    let conflict_partner = conflicting
+        .then(|| controller.actions().conflict_partner(action.clone(), chord))
+        .flatten();
 
     ui.horizontal(|ui| {
         let display = chord.display(platform);
@@ -302,10 +419,7 @@ fn show_chip<B: OutputBackend, H: SourceHost>(
         ));
 
         if let Some(other) = conflict_partner {
-            let message = tr_args(
-                "controls-conflict-with",
-                &[("other", tr(other.label_key()))],
-            );
+            let message = conflict_message(controller, &other);
             ui.label(format!("⚠ {message}"));
         }
 
@@ -313,7 +427,7 @@ fn show_chip<B: OutputBackend, H: SourceHost>(
         let remove_name = tr_args("controls-remove-binding", &[("binding", display)]);
         remove.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, remove_name.clone()));
         if remove.clicked() {
-            controller.remove_binding(action, chord);
+            controller.remove_binding(action.clone(), chord);
         }
     });
 }
@@ -327,7 +441,7 @@ fn capture_focus_pending_id() -> Id {
     Id::new("controls-capture-focus-pending")
 }
 
-fn open_capture(ui: &Ui, screen: &mut ControlsScreen, action: HostAction) {
+fn open_capture(ui: &Ui, screen: &mut ControlsScreen, action: ActionId) {
     screen.capture = Some(action);
     screen.capture_error = None;
     ui.memory_mut(|memory| memory.data.insert_temp(capture_focus_pending_id(), true));
@@ -350,10 +464,13 @@ fn show_capture_control<B: OutputBackend, H: SourceHost>(
     ui: &mut Ui,
     controller: &mut PlaybackController<B, H>,
     screen: &mut ControlsScreen,
-    action: HostAction,
+    action: ActionId,
     existing: &[Chord],
 ) {
-    let accessible = tr_args("controls-capture", &[("action", tr(action.label_key()))]);
+    let accessible = tr_args(
+        "controls-capture",
+        &[("action", action_label(controller, &action))],
+    );
     let response = ui.add(Button::new(tr("controls-capture-prompt")));
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, accessible.clone()));
     actions::register_claim(ui.ctx(), response.id, Claim::TextLike);
@@ -410,23 +527,20 @@ fn show_capture_control<B: OutputBackend, H: SourceHost>(
 
     match CaptureRule::check(&event, is_mac, existing) {
         Ok(chord) => {
-            let _ = controller.add_binding(action, chord);
+            let _ = controller.add_binding(action.clone(), chord);
             cancel_capture(ui, screen);
             // US3 (FR-007's "accepted and immediately produces the
             // conflict"): the chip loop above already ran against the
             // pre-add snapshot, so the just-added chord's own chip won't
             // carry its `⚠` until next frame — surface the conflict-
             // partner name inline, right here, in this same frame.
-            if let Some(other) = controller.actions().conflict_partner(action, chord) {
+            if let Some(other) = controller.actions().conflict_partner(action.clone(), chord) {
                 let display = chord.display(if ui.ctx().os().is_mac() {
                     Platform::Mac
                 } else {
                     Platform::Other
                 });
-                let message = tr_args(
-                    "controls-conflict-with",
-                    &[("other", tr(other.label_key()))],
-                );
+                let message = conflict_message(controller, &other);
                 ui.label(format!(
                     "{} ⚠ {message}",
                     tr_args("controls-binding-chip", &[("binding", display)])

@@ -24,7 +24,7 @@ use modplayer_audio_source::{
 };
 use modplayer_audio_source_synthetic::ScriptedHost;
 use modplayer_audio_source_synthetic::scripted::HydratedReply;
-use modplayer_core::actions::{Chord, HostAction, Platform};
+use modplayer_core::actions::{ActionId, Chord, HostAction, Platform};
 use modplayer_core::markers::CueSlot;
 use modplayer_core::plugins::{Lifecycle, PluginId};
 use modplayer_core::settings::SettingsStore;
@@ -1817,7 +1817,7 @@ fn controls_capture_control_exposes_accessible_name_and_role() {
     let (mut controller, _dir) = fresh_bare_controller("controls-capture-a11y");
     let action = HostAction::NavLibrary;
     let mut screen = ControlsScreen {
-        capture: Some(action),
+        capture: Some(ActionId::Host(action)),
         ..Default::default()
     };
     let nodes = render_nodes(|ui| controls::show(ui, &mut controller, &mut screen, None));
@@ -1936,11 +1936,13 @@ fn plugins_section_controls_named() {
     let nodes = render_nodes(|ui| modplayer_ui::plugins_view::show(ui, &mut controller));
 
     let checkboxes: Vec<_> = nodes.iter().filter(|n| n.role == Role::CheckBox).collect();
-    // 10 fixtures (`plugins/bundled/` is empty this slice;
-    // 010-transport-focus adds `focus-a`/`focus-b`) => 10 toggles.
+    // 16 fixtures (`plugins/bundled/` is empty this slice;
+    // 010-transport-focus adds `focus-a`/`focus-b`; 011-plugin-ui-
+    // contributions adds `ui-panel`/`ui-shortcuts`/`ui-overlay`/
+    // `ui-icons`/`ui-settings`/`ui-notify`, T115) => 16 toggles.
     assert_eq!(
         checkboxes.len(),
-        10,
+        16,
         "expected one toggle per fixture: {nodes:?}"
     );
     for checkbox in &checkboxes {
@@ -1965,13 +1967,13 @@ fn plugins_section_controls_named() {
     assert_eq!(invalid_toggle.toggled, Some(Toggled::False));
 
     // No plugin is `Active` pre-launch, so every health label reads `ok`
-    // (the 9 valid fixtures) — each a real, non-empty accessible name,
+    // (the 15 valid fixtures) — each a real, non-empty accessible name,
     // never a bare colour dot.
     let ok_labels = find_all(&nodes, Role::Label, &tr("plugins-health-ok"));
     assert_eq!(
         ok_labels.len(),
-        9,
-        "expected 9 `ok` health labels: {nodes:?}"
+        15,
+        "expected 15 `ok` health labels: {nodes:?}"
     );
 }
 
@@ -2062,6 +2064,73 @@ fn wait_plugin_active(
         }
         std::thread::sleep(Duration::from_millis(2));
     }
+}
+
+/// Waits for the `ui-panel` fixture's `ready_ack` handler to have
+/// actually finished its own `register_panel` RPC (asynchronous relative
+/// to `Active` — mirrors `controller_plugin_ui.rs`'s own
+/// `wait_panel_registered`, through the public `plugin_panels_view()`
+/// read model rather than reaching into `plugins_mut()`).
+fn wait_panel_registered(controller: &mut PlaybackController<FakeBackend, ScriptedHost>) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        controller.tick();
+        if !controller.plugin_panels_view().docked.is_empty() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// 011-plugin-ui-contributions (US1, contracts/ui-panels.md §3): every
+/// widget kind the `ui-panel` fixture registers exposes a real AccessKit
+/// role and a non-empty accessible name once its panel is live — end to
+/// end, through a real running plugin (not a synthetic `PanelView`).
+#[test]
+fn plugin_panel_widgets_expose_accessible_names() {
+    let (mut controller, _handle, _dir, _psd, _tsd) =
+        fixture_controller_with_track("plugin-panel-a11y");
+    let id = plugin_id_by_identifier(&mut controller, "org.modplayer.fixture.ui-panel");
+    assert!(wait_plugin_active(&mut controller, id));
+    assert!(wait_panel_registered(&mut controller));
+
+    let nodes = render_nodes(|ui| modplayer_ui::plugin_panels::show_dock(ui, &mut controller));
+
+    // The fixture's "Controls" panel registers one of every widget kind
+    // (T059): a `button`("Take Over"/"Hang"/"Throw"), a `toggle`
+    // ("Power"), a `slider`("Tempo") and a `knob`("Gain") — both painted
+    // over a `Role::Slider` — every one of them must carry a non-empty
+    // name, never a bare, nameless control (A1).
+    for role in [Role::Button, Role::CheckBox, Role::Slider] {
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.role == role && n.accessible_name().is_some_and(|name| !name.is_empty())),
+            "expected at least one named {role:?} node: {nodes:?}"
+        );
+    }
+    let sliders = find_all_named_nonempty(&nodes, Role::Slider);
+    assert!(
+        sliders.iter().any(|n| n.contains("Tempo")),
+        "the Tempo slider must announce its own label: {sliders:?}"
+    );
+    assert!(
+        sliders.iter().any(|n| n.contains("Gain")),
+        "the Gain knob (painted over a Slider) must announce its own label: {sliders:?}"
+    );
+}
+
+/// Every non-empty accessible name among `role`-role nodes.
+fn find_all_named_nonempty(nodes: &[AccessNode], role: Role) -> Vec<String> {
+    nodes
+        .iter()
+        .filter(|n| n.role == role)
+        .filter_map(|n| n.accessible_name().map(str::to_string))
+        .filter(|name| !name.is_empty())
+        .collect()
 }
 
 /// Every control the Transport panel renders — title, holder label,

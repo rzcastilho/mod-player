@@ -273,8 +273,18 @@ fn dispatch<B: OutputBackend, H: SourceHost>(
         // `request_focus`/`release_focus` RPC to core — always recorded,
         // never refused (FR-003/FR-004/FR-011); the arbiter decides
         // whether it grants immediately.
-        Request::RequestFocus => {
-            controller.focus_request(plugin);
+        //
+        // 011-plugin-ui-contributions (R16, FR-026): `interaction` is the
+        // plugin thread's own flag, `true` only while a
+        // `panel_interaction`/`action_invoked` handler is running —
+        // passed straight through as the arbiter's `RequestOrigin`.
+        Request::RequestFocus { interaction } => {
+            let origin = if interaction {
+                super::RequestOrigin::UserInteraction
+            } else {
+                super::RequestOrigin::Api
+            };
+            controller.focus_request(plugin, origin);
             Ok(Response::Ok)
         }
         Request::ReleaseFocus => {
@@ -520,6 +530,198 @@ fn dispatch<B: OutputBackend, H: SourceHost>(
             Err(not_yet_implemented())
         }
 
+        // -- ui.panel (US1 T045/T051, contracts/ui-panels.md §1/§3): every
+        // user-facing string is resolved (FR-021, R17) against this
+        // plugin's own manifest before the gateway's own `validate_panel`
+        // ever sees it — an `@key` resolving to an empty label is
+        // therefore already `unlabeled_widget` by the time validation
+        // runs, exactly as FR-021 requires. Capacity (`panel_limit`) is
+        // enforced by the registry itself (design note 2).
+        Request::RegisterPanel {
+            panel,
+            title,
+            mut widgets,
+        } => {
+            // Defensive only: a plugin thread only ever exists once its
+            // manifest validated, so this record/manifest lookup cannot
+            // actually fail for a real admitted call.
+            let Some(manifest) = controller
+                .plugins_mut()
+                .record(plugin)
+                .and_then(|r| r.manifest.as_ref().ok())
+            else {
+                return Err(Refusal::invalid_state(
+                    "invalid_state",
+                    "This plugin has no valid manifest.",
+                ));
+            };
+            let title = resolve_string(manifest, &title);
+            for widget in &mut widgets {
+                widget.label = resolve_string(manifest, &widget.label);
+                if let Some(text) = &widget.text {
+                    widget.text = Some(resolve_string(manifest, text));
+                }
+            }
+            modplayer_capability_gateway::ui::validate_panel(&title, &widgets)?;
+            controller
+                .plugins_mut()
+                .ui_mut()
+                .panels_mut()
+                .register(plugin, panel, title, widgets)?;
+            Ok(Response::Ok)
+        }
+
+        // -- ui.panel `update_widget` (US1 T045/T051, FR-007): the
+        // gateway's `validate_update` needs the widget's already-declared
+        // shape, so it is looked up first; `not_found` covers an unknown
+        // panel/widget path either way.
+        Request::UpdateWidget {
+            panel,
+            widget,
+            value,
+        } => {
+            let Some(spec) = controller
+                .plugins_mut()
+                .ui()
+                .panels()
+                .widget_spec(plugin, &panel, &widget)
+                .cloned()
+            else {
+                return Err(Refusal::not_found());
+            };
+            modplayer_capability_gateway::ui::validate_update(&spec, &value)?;
+            controller
+                .plugins_mut()
+                .ui_mut()
+                .panels_mut()
+                .update(plugin, &panel, &widget, value)?;
+            Ok(Response::Ok)
+        }
+
+        // -- ui.shortcuts `register_action` (US2 T067-T073, contracts/
+        // action-registry-plugins.md §2/§3): the label is resolved
+        // against this plugin's own manifest strings (R17), exactly like
+        // `RegisterPanel`'s own title/widget labels, before it ever
+        // reaches the action registry.
+        Request::RegisterAction { mut action } => {
+            let Some(manifest) = controller
+                .plugins_mut()
+                .record(plugin)
+                .and_then(|r| r.manifest.as_ref().ok())
+            else {
+                return Err(Refusal::invalid_state(
+                    "invalid_state",
+                    "This plugin has no valid manifest.",
+                ));
+            };
+            action.label = resolve_string(manifest, &action.label);
+            modplayer_capability_gateway::ui::validate_action(&action)?;
+            controller.register_plugin_action(plugin, action)?;
+            Ok(Response::Ok)
+        }
+
+        // -- ui.overlay (US3 T084/T086, contracts/overlays-settings-
+        // notify.md §1.1): `validate_primitives` needs this plugin's own
+        // manifest `[glyphs]` key set (the gateway crate has no manifest
+        // access of its own, design note 2) — a `Package` glyph ref
+        // outside it is `invalid_value` before the registry ever sees the
+        // batch.
+        Request::AddOverlays { primitives } => {
+            let Some(manifest) = controller
+                .plugins_mut()
+                .record(plugin)
+                .and_then(|r| r.manifest.as_ref().ok())
+            else {
+                return Err(Refusal::invalid_state(
+                    "invalid_state",
+                    "This plugin has no valid manifest.",
+                ));
+            };
+            let glyph_keys: std::collections::BTreeSet<String> =
+                manifest.glyphs.keys().cloned().collect();
+            modplayer_capability_gateway::ui::validate_primitives(&primitives, &glyph_keys)?;
+            controller
+                .plugins_mut()
+                .ui_mut()
+                .overlays_mut()
+                .add(plugin, primitives)?;
+            Ok(Response::Ok)
+        }
+        Request::RemoveOverlays { ids } => {
+            controller
+                .plugins_mut()
+                .ui_mut()
+                .overlays_mut()
+                .remove(plugin, &ids)?;
+            Ok(Response::Ok)
+        }
+        Request::ClearOverlays => {
+            controller
+                .plugins_mut()
+                .ui_mut()
+                .overlays_mut()
+                .clear(plugin);
+            Ok(Response::Ok)
+        }
+
+        // -- ui.settings `register_settings` (US4 T098/T101, contracts/
+        // overlays-settings-notify.md §2 "S1"): label/description resolved
+        // against this plugin's own manifest strings (R17), exactly like
+        // every other `ui.*` registration's text, before the gateway's own
+        // `validate_schema` (shape) and the registry's own `register`
+        // (values reconciliation) ever see it.
+        Request::RegisterSettings { mut fields, stored } => {
+            let Some(manifest) = controller
+                .plugins_mut()
+                .record(plugin)
+                .and_then(|r| r.manifest.as_ref().ok())
+            else {
+                return Err(Refusal::invalid_state(
+                    "invalid_state",
+                    "This plugin has no valid manifest.",
+                ));
+            };
+            for field in &mut fields {
+                field.label = resolve_string(manifest, &field.label);
+                if let Some(description) = &field.description {
+                    field.description = Some(resolve_string(manifest, description));
+                }
+            }
+            modplayer_capability_gateway::ui::validate_schema(&fields)?;
+            controller
+                .plugins_mut()
+                .ui_mut()
+                .settings_mut()
+                .register(plugin, fields, stored);
+            Ok(Response::Ok)
+        }
+
+        // -- ui.notify (US5 T111, contracts/overlays-settings-notify.md
+        // §3 N1/N2): the notify rate bucket already admitted this request
+        // (Foundational `limiter.rs`) before it ever reaches here —
+        // `controller.plugin_notify`'s own `validate_notify` call is the
+        // refusal of record for a bad level or over-length text, and that
+        // refusal still cost this plugin its slot in the window (N1).
+        Request::Notify { level, text } => {
+            controller.plugin_notify(plugin, level, text)?;
+            Ok(Response::Ok)
+        }
+
+        // `GetSettings` is never sent as an RPC (R4) — kept here only for
+        // the match's own exhaustiveness (design note 1).
+        Request::GetSettings => Err(not_yet_implemented()),
+
         _ => Err(not_yet_implemented()),
     }
+}
+
+/// FR-021 (R17): resolve one user-facing string against `manifest`'s
+/// `[strings.*]` tables. The host's active locale is always `"en-US"`
+/// this slice (no locale switch exists yet); an unresolved `@key` renders
+/// literally (the caller then sees it as an ordinary — if odd-looking —
+/// label, never a panic or a refusal of its own). A resolution warning is
+/// deliberately not logged here: it is diagnostic-only (R17) and no
+/// `PluginLog` writer is exposed outside `plugins::host` this slice.
+fn resolve_string(manifest: &modplayer_capability_gateway::manifest::Manifest, s: &str) -> String {
+    super::ui::strings::resolve(manifest, "en-US", s).0
 }

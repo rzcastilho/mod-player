@@ -94,6 +94,37 @@ fn writer_is_atomic_and_acks() {
     assert!(!path.with_extension("json.tmp").exists());
 }
 
+// -- 011-plugin-ui-contributions: `Scope::Settings` (R5, FR-018) ----------
+
+#[test]
+fn settings_scope_round_trip() {
+    let mut store = PluginStateStore::new();
+    store
+        .set(Scope::Settings, "snap", json!(true))
+        .expect("under budget");
+    let bytes = store.encode(Scope::Settings);
+
+    let mut reloaded = PluginStateStore::new();
+    reloaded.load_settings(&bytes).expect("reload");
+    assert_eq!(reloaded.get(Scope::Settings, "snap"), Some(&json!(true)));
+    assert_eq!(reloaded.settings_snapshot().get("snap"), Some(&json!(true)));
+}
+
+#[test]
+fn settings_scope_counts_toward_cap() {
+    let mut store = PluginStateStore::new();
+    assert_eq!(store.used_bytes(), 0);
+    store
+        .set(Scope::Settings, "k", json!("value"))
+        .expect("under budget");
+    assert!(store.used_bytes() > 0);
+    let after_settings = store.used_bytes();
+    store
+        .set(Scope::Plugin, "k2", json!("value2"))
+        .expect("under budget");
+    assert!(store.used_bytes() > after_settings);
+}
+
 proptest! {
     #[test]
     fn state_roundtrip(pairs in proptest::collection::vec(("[a-z]{1,10}", 0i64..1000), 0..20)) {

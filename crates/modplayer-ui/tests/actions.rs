@@ -19,14 +19,19 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use egui::{Context, Event, Id, Key as EguiKey, Modifiers, Pos2, RawInput, Rect};
 use modplayer_audio_io::{FakeBackend, FakeDevice};
 use modplayer_audio_source::{Availability, TrackId, TrackRef};
 use modplayer_audio_source_synthetic::{ScriptedHost, ScriptedHostHandle};
-use modplayer_core::actions::{Chord, HostAction, KEY_NAMES, KeyName, Mods, ScopeState};
+use modplayer_core::actions::{
+    ActionId, Chord, HostAction, KEY_NAMES, KeyName, Mods, PluginActionId, ScopeState,
+};
 use modplayer_core::markers::{CueSlot, TrackMarkers};
 use modplayer_core::notifications::KEY_EFFECTS_NO_TIME_STRETCH;
+use modplayer_core::plugins::{Lifecycle, PluginId};
 use modplayer_core::settings::SettingsStore;
 use modplayer_core::{Intent, LoopState, PlaybackController};
 use modplayer_effects::catalog::NodeKind;
@@ -875,7 +880,7 @@ fn every_enabled_default_binding_dispatches() {
                 Chord::parse(binding).unwrap_or_else(|e| panic!("{binding:?} must parse: {e:?}"));
             assert_eq!(
                 controller.actions().resolve(chord, &scope),
-                Some(action),
+                Some(ActionId::Host(action)),
                 "{action:?}'s default binding {binding:?} must resolve back to it"
             );
         }
@@ -1558,7 +1563,7 @@ fn conflicting_chord_fires_neither_until_resolved() {
     assert_eq!(
         invocations,
         vec![Invocation {
-            action: HostAction::TogglePlayPause,
+            action: ActionId::Host(HostAction::TogglePlayPause),
             repeat: false
         }],
         "TogglePlayPause must fire again once the conflict is resolved"
@@ -1577,7 +1582,7 @@ fn conflicting_chord_fires_neither_until_resolved() {
     assert_eq!(
         invocations,
         vec![Invocation {
-            action: HostAction::ToggleLoop,
+            action: ActionId::Host(HostAction::ToggleLoop),
             repeat: false
         }],
         "ToggleLoop must still fire on its own remaining key, untouched by the resolved conflict"
@@ -1631,7 +1636,7 @@ fn disabled_tempo_binding_does_not_block_and_flags_on_enable() {
     assert_eq!(
         invocations,
         vec![Invocation {
-            action: HostAction::NavPlugins,
+            action: ActionId::Host(HostAction::NavPlugins),
             repeat: false
         }],
         "a disabled action must never block an enabled one from resolving its shared chord"
@@ -1760,7 +1765,7 @@ fn plus_minus_step_tempo_unless_waveform_focused() {
     assert_eq!(
         invocations,
         vec![Invocation {
-            action: HostAction::TempoStepUp,
+            action: ActionId::Host(HostAction::TempoStepUp),
             repeat: false
         }],
         "Equals must step tempo when no widget owns it"
@@ -1871,7 +1876,7 @@ fn shift_equals_plus_on_focused_waveform_never_steps_tempo() {
     assert_eq!(
         invocations,
         vec![Invocation {
-            action: HostAction::TempoStepUp,
+            action: ActionId::Host(HostAction::TempoStepUp),
             repeat: false
         }],
         "unfocused, Shift+= is the tempo step"
@@ -2051,4 +2056,206 @@ fn t_ignored_outside_now_playing() {
             .unwrap_or(false),
         "the Transport panel must stay closed"
     );
+}
+
+// -- 011-plugin-ui-contributions US2 (T065, contracts/action-registry-
+// plugins.md D1/D2): the dispatcher resolves a registered plugin action's
+// own bound chord to `ActionId::Plugin` and invokes it exactly like a
+// `HostAction` — mirrors `plugin_panels.rs`'s own fixture harness (this
+// file's `active_controller` above never sets `MODPLAYER_PLUGIN_FIXTURES`,
+// so a small dedicated harness lives here instead). --------------------
+
+const UI_SHORTCUTS: &str = "org.modplayer.fixture.ui-shortcuts";
+
+/// `MODPLAYER_PLUGIN_FIXTURES`/`MODPLAYER_PLUGIN_STATE_DIR`/
+/// `MODPLAYER_TRACK_STATE_DIR` are process-global (mirrors `plugin_panels.
+/// rs`'s own `PLUGIN_ENV_LOCK`) — a separate lock from
+/// `TRACK_STATE_ENV_LOCK` above since only this section's one test needs
+/// the fixture pipeline at all.
+static PLUGIN_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+fn plugin_fixture_controller(
+    label: &str,
+) -> (
+    PlaybackController<FakeBackend, ScriptedHost>,
+    TempDir,
+    TempDir,
+    TempDir,
+) {
+    let (store, dir) = fresh_store(label);
+    let plugin_state_dir = TempDir::new(&format!("{label}-plugin-state"));
+    let track_state_dir = TempDir::new(&format!("{label}-track-state"));
+    let controller = {
+        let _guard = PLUGIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // Safety: narrowly scopes each mutation to the one synchronous
+        // read `PlaybackController::new` makes of it, serialized against
+        // every other test in this binary via the lock above.
+        unsafe {
+            std::env::set_var("MODPLAYER_PLUGIN_FIXTURES", "1");
+            std::env::set_var("MODPLAYER_PLUGIN_STATE_DIR", plugin_state_dir.path());
+            std::env::set_var("MODPLAYER_TRACK_STATE_DIR", track_state_dir.path());
+        }
+        let controller =
+            PlaybackController::new(FakeBackend::new(vec![]), ScriptedHost::new(), store);
+        unsafe {
+            std::env::remove_var("MODPLAYER_PLUGIN_FIXTURES");
+            std::env::remove_var("MODPLAYER_PLUGIN_STATE_DIR");
+            std::env::remove_var("MODPLAYER_TRACK_STATE_DIR");
+        }
+        controller
+    };
+    (controller, dir, plugin_state_dir, track_state_dir)
+}
+
+fn plugin_fixture_id(
+    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+    identifier: &str,
+) -> PluginId {
+    controller
+        .plugins_mut()
+        .records()
+        .iter()
+        .find(|r| r.identifier.as_str() == identifier)
+        .map(|r| r.id)
+        .unwrap_or_else(|| unreachable!("fixture '{identifier}' must be discovered"))
+}
+
+fn pump_plugin_until(
+    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+    timeout: Duration,
+    mut done: impl FnMut(&mut PlaybackController<FakeBackend, ScriptedHost>) -> bool,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        controller.tick();
+        if done(controller) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// `dispatch` resolves a registered plugin action's own (freshly bound,
+/// conflict-free) chord to `ActionId::Plugin`, and `invoke` (D2) delivers
+/// it through `PlaybackController::invoke_plugin_action` exactly like a
+/// `HostAction` reaches its own `invoke` arm.
+#[test]
+fn dispatch_returns_plugin_action_id() {
+    let (mut controller, _dir, _psd, _tsd) = plugin_fixture_controller("dispatch-plugin-action");
+    let id = plugin_fixture_id(&mut controller, UI_SHORTCUTS);
+    // `plugin_fixture_controller` only discovers records — spawn this one
+    // explicitly (mirrors `plugin_panels.rs::launch_ui_panel`).
+    let shared = std::sync::Arc::clone(controller.shared());
+    controller.plugins_mut().spawn(id, &shared);
+    assert!(pump_plugin_until(
+        &mut controller,
+        Duration::from_secs(2),
+        |c| {
+            matches!(
+                c.plugins_mut().record(id).map(|r| &r.lifecycle),
+                Some(Lifecycle::Active)
+            )
+        }
+    ));
+
+    let identifier = controller
+        .plugins_mut()
+        .record(id)
+        .unwrap_or_else(|| unreachable!())
+        .identifier
+        .clone();
+    // `tab_bound` ships with a default `Tab` binding 007's own capture
+    // would reject (G10), so it registers unbound — free to bind to a
+    // fresh, conflict-free chord here without disturbing any other
+    // fixture's own default (contrast `take_over`/`nudge`, deliberately
+    // conflicting for M5/M6).
+    let action_id =
+        PluginActionId::parse(&format!("{identifier}.tab_bound")).unwrap_or_else(|| unreachable!());
+    assert!(pump_plugin_until(
+        &mut controller,
+        Duration::from_secs(2),
+        |c| { c.actions().plugin_action_registered(&action_id) }
+    ));
+
+    let chord = Chord::parse("F8").unwrap_or_else(|_| unreachable!());
+    controller
+        .add_binding(action_id.clone(), chord)
+        .unwrap_or_else(|_| unreachable!());
+    assert!(
+        !controller
+            .actions()
+            .is_conflicting(action_id.clone(), chord),
+        "sanity: F8 must be free"
+    );
+
+    let mut shell = Shell::default();
+    let mut waveform = WaveformState::default();
+    let ctx = Context::default();
+    let claims = FocusClaims::default();
+    let scope = app_scope();
+
+    let invocations = press(
+        &ctx,
+        key(egui_key(chord.key), egui_mods(chord.mods)),
+        &claims,
+        &scope,
+        &mut controller,
+        &mut shell,
+        &mut waveform,
+    );
+    assert_eq!(
+        invocations,
+        vec![Invocation {
+            action: ActionId::Plugin(action_id.clone()),
+            repeat: false
+        }],
+        "dispatch must resolve the plugin action's own bound chord to ActionId::Plugin"
+    );
+
+    assert!(
+        pump_plugin_until(&mut controller, Duration::from_secs(2), |c| {
+            call_probe(c, id, "invoked_tab_bound") == 1
+        }),
+        "invoke() must deliver action_invoked to the plugin via invoke_plugin_action"
+    );
+}
+
+/// `Request::DebugProbe` straight to `drain_plugin_requests()`, bypassing
+/// the gateway's own admission (mirrors `plugin_panels.rs`'s own
+/// `call`/`interaction_count` pair, and `controller_plugin_ui.rs`'s own
+/// core-side equivalent). `-1` for any refusal/decode failure — every
+/// counter this file probes starts at `0`, so `-1` never spuriously
+/// compares equal to an expected count.
+fn call_probe(
+    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+    plugin: PluginId,
+    name: &str,
+) -> i64 {
+    use modplayer_capability_gateway::request::{Request, Response};
+    use modplayer_core::plugins::to_gateway_id;
+    use modplayer_plugin_runtime::handle::RpcEnvelope;
+
+    let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+    let envelope = RpcEnvelope {
+        plugin: to_gateway_id(plugin),
+        request: Request::DebugProbe {
+            name: name.to_string(),
+        },
+        reply: reply_tx,
+    };
+    controller
+        .plugins_mut()
+        .debug_requests_sender()
+        .send(envelope)
+        .unwrap_or_else(|_| unreachable!("the request channel must accept a synthetic envelope"));
+    controller.tick();
+    match reply_rx.try_recv() {
+        Ok(Ok(Response::Probe(value))) => value.as_i64().unwrap_or(-1),
+        _ => -1,
+    }
 }

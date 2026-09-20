@@ -18,7 +18,9 @@
 use egui::{Context, Event, Id, Key as EguiKey, Modifiers};
 use modplayer_audio_io::OutputBackend;
 use modplayer_audio_source::SourceHost;
-use modplayer_core::actions::{ActionRegistry, Chord, HostAction, KeyName, Mods, ScopeState, def};
+use modplayer_core::actions::{
+    ActionId, ActionRegistry, ActionSource, Chord, HostAction, KeyName, Mods, ScopeState,
+};
 use modplayer_core::{Intent, PlaybackController};
 
 use crate::markers;
@@ -238,10 +240,13 @@ pub fn row_claims() -> Vec<ChordPattern> {
     ]
 }
 
-/// One resolved key press to apply this frame (data-model.md §4.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One resolved key press to apply this frame (data-model.md §4.2;
+/// 011-plugin-ui-contributions D1: `action` widened from `HostAction` to
+/// `ActionId` so a plugin shortcut dispatches through this exact same
+/// path). Not `Copy`: `ActionId::Plugin` owns a `PluginActionId`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Invocation {
-    pub action: HostAction,
+    pub action: ActionId,
     pub repeat: bool,
 }
 
@@ -388,13 +393,13 @@ pub fn dispatch(
             };
 
             if let Some(action) = registry.resolve(pass1, scope) {
-                push_invocation(&mut invocations, action, repeat);
+                push_invocation(&mut invocations, registry, action, repeat);
                 return false;
             }
             if let Some(pass2) = pass2
                 && let Some(action) = registry.resolve(pass2, scope)
             {
-                push_invocation(&mut invocations, action, repeat);
+                push_invocation(&mut invocations, registry, action, repeat);
                 return false;
             }
             true
@@ -406,9 +411,16 @@ pub fn dispatch(
 
 /// FR-019's repeat rule: a repeat event for an action that does not
 /// `repeats_while_held` is consumed (by the caller) but produces no
-/// invocation; every other case fires.
-fn push_invocation(invocations: &mut Vec<Invocation>, action: HostAction, repeat: bool) {
-    if repeat && !def(action).repeats_while_held {
+/// invocation; every other case fires. D1: `repeats_while_held` is read
+/// from `registry` (the catalog for a `HostAction`, the plugin def for a
+/// plugin action) rather than the catalog alone.
+fn push_invocation(
+    invocations: &mut Vec<Invocation>,
+    registry: &ActionRegistry,
+    action: ActionId,
+    repeat: bool,
+) {
+    if repeat && !registry.repeats_while_held(&action) {
         return;
     }
     invocations.push(Invocation { action, repeat });
@@ -428,9 +440,12 @@ fn nudge<B: OutputBackend, H: SourceHost>(
     }
 }
 
-/// Apply one resolved [`Invocation`] (contracts/ui-actions.md §3): total
-/// over every `HostAction`, so the dispatcher's exhaustiveness invariant
-/// (plan.md Design Note 1) is a compiler-checked match.
+/// Apply one resolved [`Invocation`] (contracts/ui-actions.md §3,
+/// contracts/action-registry-plugins.md D2): `ActionId::Host` dispatches
+/// through the 007 match unchanged (total over every `HostAction`, so the
+/// dispatcher's exhaustiveness invariant, plan.md Design Note 1, is a
+/// compiler-checked match); `ActionId::Plugin` calls `PlaybackController::
+/// invoke_plugin_action` with `ActionSource::Keyboard` (D2).
 pub fn invoke<B: OutputBackend, H: SourceHost>(
     inv: Invocation,
     controller: &mut PlaybackController<B, H>,
@@ -438,7 +453,14 @@ pub fn invoke<B: OutputBackend, H: SourceHost>(
     waveform: &mut WaveformState,
     ctx: &Context,
 ) {
-    match inv.action {
+    let action = match inv.action {
+        ActionId::Host(action) => action,
+        ActionId::Plugin(id) => {
+            controller.invoke_plugin_action(&id, ActionSource::Keyboard);
+            return;
+        }
+    };
+    match action {
         HostAction::Play => controller.play(),
         HostAction::Pause => controller.pause(),
         HostAction::TogglePlayPause => {

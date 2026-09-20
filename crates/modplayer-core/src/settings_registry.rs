@@ -10,6 +10,7 @@
 //! automatically contribute nothing to search (SC-008).
 
 use crate::i18n::tr;
+use crate::plugins::{PluginId, PluginSettingsView};
 
 /// The eleven Settings categories, in fixed display order
 /// (contracts/ui-surface.md, data-model.md §5.4).
@@ -200,7 +201,64 @@ pub fn search(query: &str) -> Vec<&'static SettingDescriptor> {
         .collect()
 }
 
+/// One search hit inside a plugin's own settings page (US4 T100, research
+/// R13, contracts/overlays-settings-notify.md S6): the dynamic complement
+/// to [`DESCRIPTORS`]/[`search`] — plugin fields cannot join that
+/// `&'static` list (their label/description are plugin-declared strings,
+/// resolved at registration, not `Fluent` keys), so they get their own
+/// search path that the Settings screen's own search box (`modplayer-ui`)
+/// concatenates with `search`'s own results.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginSettingHit {
+    pub plugin: PluginId,
+    /// This field's own id within its page — `settings/plugins.rs`'s
+    /// "open this field" action's target.
+    pub field_id: String,
+    /// "Plugins › <plugin name> › <field label>" (S6), ready to render as
+    /// a search result row exactly like [`search`]'s own `"{category} ›
+    /// {title}"` results.
+    pub path: String,
+}
+
+/// S6: case-insensitive substring match over every visible plugin settings
+/// page's field label + description (mirrors [`search`]'s own matching
+/// rule) — `views` is the caller's already-built [`PluginSettingsView`]
+/// list (`PlaybackController::plugin_settings_views()`), so this function
+/// itself touches no registry or controller state. An empty query matches
+/// nothing, exactly like [`search`].
+#[must_use]
+pub fn search_plugin_settings(query: &str, views: &[PluginSettingsView]) -> Vec<PluginSettingHit> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let query = query.to_lowercase();
+    let mut hits = Vec::new();
+    for view in views {
+        for field in &view.page.fields {
+            let label_matches = field.label.to_lowercase().contains(&query);
+            let description_matches = field
+                .description
+                .as_deref()
+                .is_some_and(|d| d.to_lowercase().contains(&query));
+            if label_matches || description_matches {
+                hits.push(PluginSettingHit {
+                    plugin: view.plugin,
+                    field_id: field.id.as_str().to_string(),
+                    path: format!(
+                        "{} › {} › {}",
+                        tr(SettingsCategory::Plugins.label_key()),
+                        view.name,
+                        field.label
+                    ),
+                });
+            }
+        }
+    }
+    hits
+}
+
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
 
@@ -254,5 +312,39 @@ mod tests {
     #[test]
     fn empty_query_matches_nothing() {
         assert!(search("").is_empty());
+    }
+
+    /// S6: a plugin settings field's own label is searchable, and the hit
+    /// carries the "Plugins › <plugin name> › <label>" path.
+    #[test]
+    fn search_plugin_settings_finds_field_by_label() {
+        use crate::plugins::ui::settings::SettingsPage;
+        use modplayer_capability_gateway::ui::{FieldKind, SettingsField, UiId};
+
+        let view = PluginSettingsView {
+            plugin: PluginId(0),
+            name: "UI settings fixture".to_string(),
+            page: SettingsPage {
+                fields: vec![SettingsField {
+                    id: UiId::parse("shift").unwrap_or_else(|| unreachable!()),
+                    kind: FieldKind::Number {
+                        min: -12.0,
+                        max: 12.0,
+                        step: 1.0,
+                    },
+                    label: "Semitone shift".to_string(),
+                    description: None,
+                    default: serde_json::json!(0.0),
+                }],
+                values: std::collections::BTreeMap::new(),
+            },
+        };
+        let hits = search_plugin_settings("semitone", &[view]);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].field_id, "shift");
+        assert_eq!(
+            hits[0].path,
+            "Plugins › UI settings fixture › Semitone shift"
+        );
     }
 }

@@ -17,11 +17,21 @@ modplayer-secure-store = { path = "../modplayer-secure-store", version = "0.1.0"
 # `Permission::explanation_key` for the Plugins section's permission
 # summary column (009-plugin-runtime-and-permissions).
 modplayer-capability-gateway = { path = "../modplayer-capability-gateway", version = "0.1.0" }
+# `SuspendCause` (`plugins::view::PanelBody::Placeholder`'s own field
+# type) for `plugin_panels.rs`'s suspended-placeholder text
+# (011-plugin-ui-contributions, contracts/ui-panels.md P5).
+modplayer-plugin-runtime = { path = "../modplayer-plugin-runtime", version = "0.1.0" }
 eframe.workspace = true
 egui.workspace = true
 fluent-templates.workspace = true
 ureq.workspace = true
 image.workspace = true
+# Plugin settings-field values (011-plugin-ui-contributions US4,
+# `SettingsField::default`/`SettingsRegistry` values, contracts/overlays-
+# settings-notify.md S3/S4): `settings/plugins.rs` reads/writes them as
+# `serde_json::Value` directly, the same representation the gateway/core
+# crates already use end to end.
+serde_json.workspace = true
 
 [dev-dependencies]
 time.workspace = true

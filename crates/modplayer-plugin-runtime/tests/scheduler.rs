@@ -12,12 +12,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use modplayer_capability_gateway::budgets::Budgets;
-use modplayer_capability_gateway::event::{HostEvent, TrackInfo, UnloadReason};
+use modplayer_capability_gateway::event::{ActionSource, HostEvent, TrackInfo, UnloadReason};
 use modplayer_capability_gateway::focus::{FocusToken, PluginId};
 use modplayer_capability_gateway::grants::Grants;
 use modplayer_capability_gateway::manifest::{self, ApiRange};
-use modplayer_capability_gateway::request::{OwnerInfo, Response};
+use modplayer_capability_gateway::request::{OwnerInfo, Request, Response};
 use modplayer_capability_gateway::state::PluginStatePaths;
+use modplayer_capability_gateway::ui::WidgetValue;
 use modplayer_engine::RtShared;
 use modplayer_plugin_runtime::events::{AbortCause, PlaybackSnapshot, RuntimeEvent};
 use modplayer_plugin_runtime::handle::{
@@ -419,6 +420,185 @@ fn unloading_writes_committed_within_200ms() {
 
     writer.join();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// -----------------------------------------------------------------------
+// 011-plugin-ui-contributions Foundational subset (T029): the three new
+// `HostEvent` payload renderers, `Control::SettingsWrite`'s store-then-
+// dispatch ordering, and the interaction-origin flag (R16/FR-026).
+// -----------------------------------------------------------------------
+
+/// data-model.md §1.5 / contracts/plugin-api-v1.2.md §4: `panel_interaction`
+/// renders `panel`, `widget` and `value` (a plain scalar for the
+/// non-bulk `WidgetValue` variants) on the Lua side.
+#[test]
+fn panel_interaction_payload() {
+    let entry = r#"
+        api.on("panel_interaction", function(event)
+            api.log.info("panel=" .. event.panel .. " widget=" .. event.widget .. " value=" .. tostring(event.value))
+        end)
+        api.ready()
+    "#;
+    let (handle, events, _requests) =
+        spawn_test_plugin(entry, Grants::none(), Budgets::DEFAULT, None, None);
+    wait_for_ready(&events);
+
+    assert!(handle.send_event(HostEvent::PanelInteraction {
+        panel: "main".to_string(),
+        widget: "toggle1".to_string(),
+        value: WidgetValue::Bool(true),
+    }));
+
+    let message = wait_for_log(&events, Duration::from_secs(1));
+    assert_eq!(
+        message.as_deref(),
+        Some("panel=main widget=toggle1 value=true")
+    );
+}
+
+/// data-model.md §1.5: `action_invoked` renders `action`, `source`
+/// (`"keyboard"` | `"ui"`) and `value` (`nil` for a `Trigger` action).
+#[test]
+fn action_invoked_payload() {
+    let entry = r#"
+        api.on("action_invoked", function(event)
+            api.log.info("action=" .. event.action .. " source=" .. event.source .. " value=" .. tostring(event.value))
+        end)
+        api.ready()
+    "#;
+    let (handle, events, _requests) =
+        spawn_test_plugin(entry, Grants::none(), Budgets::DEFAULT, None, None);
+    wait_for_ready(&events);
+
+    assert!(handle.send_event(HostEvent::ActionInvoked {
+        action: "org.modplayer.fixture.ui-shortcuts.take_over".to_string(),
+        source: ActionSource::Keyboard,
+        value: None,
+    }));
+
+    let message = wait_for_log(&events, Duration::from_secs(1));
+    assert_eq!(
+        message.as_deref(),
+        Some("action=org.modplayer.fixture.ui-shortcuts.take_over source=keyboard value=nil")
+    );
+}
+
+/// R5: `Control::SettingsWrite` applies `store.set(Scope::Settings, ..)`
+/// for every change *before* dispatching `settings_changed` — a plugin
+/// reading its own settings back from inside that handler (`get_settings`,
+/// served locally) already observes the new value, never the old one.
+#[test]
+fn settings_changed_after_write() {
+    let entry = r#"
+        api.on("ready_ack", function(_event)
+            api.ui.register_settings({
+                { id = "f1", kind = "boolean", label = "F1", default = false },
+            })
+        end)
+        api.on("settings_changed", function(event)
+            local settings = api.ui.get_settings()
+            api.log.info("changed_f1=" .. tostring(event.changes.f1))
+            api.log.info("stored_f1=" .. tostring(settings.f1))
+        end)
+        api.ready()
+    "#;
+    let (handle, events, requests) = spawn_test_plugin(
+        entry,
+        grants_with(&["ui.settings"]),
+        Budgets::DEFAULT,
+        None,
+        None,
+    );
+    wait_for_ready(&events);
+
+    let envelope = requests
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap_or_else(|e| unreachable!("register_settings never reached the RPC channel: {e}"));
+    assert!(matches!(envelope.request, Request::RegisterSettings { .. }));
+    let _ = envelope.reply.send(Ok(Response::Ok));
+
+    let mut changes = std::collections::BTreeMap::new();
+    changes.insert("f1".to_string(), serde_json::Value::Bool(true));
+    assert!(handle.send_control(Control::SettingsWrite { changes }));
+
+    let first = wait_for_log(&events, Duration::from_secs(1)).unwrap_or_default();
+    let second = wait_for_log(&events, Duration::from_secs(1)).unwrap_or_default();
+    assert_eq!(first, "changed_f1=true");
+    assert_eq!(
+        second, "stored_f1=true",
+        "the store write must be visible to the handler that observes its own event"
+    );
+}
+
+/// R16/FR-026: `request_focus()` called synchronously from inside a
+/// `panel_interaction` (or `action_invoked`) handler sends
+/// `Request::RequestFocus { interaction: true }`; called from any other
+/// handler (here, `ready_ack`), it sends `interaction: false`.
+#[test]
+fn request_focus_flag_inside_interaction_handler() {
+    let entry = r#"
+        api.on("ready_ack", function(_event)
+            local ok = api.transport.request_focus()
+            api.log.info("ready_request_focus:" .. tostring(ok))
+        end)
+        api.on("panel_interaction", function(_event)
+            local ok = api.transport.request_focus()
+            api.log.info("interaction_request_focus:" .. tostring(ok))
+        end)
+        api.ready()
+    "#;
+    let (handle, events, requests) = spawn_test_plugin(
+        entry,
+        grants_with(&["transport.control", "ui.panel"]),
+        Budgets::DEFAULT,
+        None,
+        None,
+    );
+    wait_for_ready(&events);
+
+    let ready_envelope = requests
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap_or_else(|e| unreachable!("ready_ack's request_focus never arrived: {e}"));
+    let Request::RequestFocus { interaction } = ready_envelope.request else {
+        unreachable!(
+            "expected Request::RequestFocus, got {:?}",
+            ready_envelope.request
+        );
+    };
+    assert!(
+        !interaction,
+        "a request_focus() outside an interaction handler must not carry the flag"
+    );
+    let _ = ready_envelope.reply.send(Ok(Response::Ok));
+
+    assert!(handle.send_event(HostEvent::PanelInteraction {
+        panel: "main".to_string(),
+        widget: "btn".to_string(),
+        value: WidgetValue::Bool(true),
+    }));
+
+    let interaction_envelope = requests
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap_or_else(|e| unreachable!("panel_interaction's request_focus never arrived: {e}"));
+    let Request::RequestFocus { interaction } = interaction_envelope.request else {
+        unreachable!(
+            "expected Request::RequestFocus, got {:?}",
+            interaction_envelope.request
+        );
+    };
+    assert!(
+        interaction,
+        "request_focus() called from inside panel_interaction must carry the flag"
+    );
+    let _ = interaction_envelope.reply.send(Ok(Response::Ok));
+
+    let ready_log = wait_for_log(&events, Duration::from_secs(1));
+    assert_eq!(ready_log.as_deref(), Some("ready_request_focus:true"));
+    let interaction_log = wait_for_log(&events, Duration::from_secs(1));
+    assert_eq!(
+        interaction_log.as_deref(),
+        Some("interaction_request_focus:true")
+    );
 }
 
 // -----------------------------------------------------------------------

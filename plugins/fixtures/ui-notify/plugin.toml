@@ -1,0 +1,13 @@
+identifier  = "org.modplayer.fixture.ui-notify"
+name        = "UI notify fixture"
+description = "Posts attributed notifications on request, rate-limited to 6 per 60s (US5 T113)."
+version     = "1.0.0"
+api         = "1.2"
+author      = "ModPlayer project"
+license     = "MIT OR Apache-2.0"
+source      = "fixture"
+entry       = "main.luau"
+
+[[permissions.required]]
+permission    = "ui.notify"
+justification = "Posts one or more notifications per debug_probe request (M9: attribution, non-blocking display, 60s rate limit)."

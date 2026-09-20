@@ -118,6 +118,18 @@ pub enum Severity {
     Info,
 }
 
+/// A notification's plugin origin (011-plugin-ui-contributions, US5,
+/// contracts/overlays-settings-notify.md §3 N2): `id` for routing (e.g. a
+/// future per-plugin mute), `name` the manifest display name already
+/// resolved at raise time (mirrors `plugin-suspended`'s own
+/// `plugin_display_name`), so a later disable/suspend of the plugin never
+/// changes an already-shown notification's attribution (N4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginAttribution {
+    pub id: PluginId,
+    pub name: String,
+}
+
 /// An action a notification's button performs when clicked
 /// (002-first-launch-and-sign-in contracts/account-session.md "Events",
 /// contracts/ui-surface.md; 003-streaming-playback-and-queue data-model.md
@@ -161,6 +173,9 @@ pub struct Notification {
     /// `"plugin-suspended:<identifier>"`); `None` for every notification
     /// raised through the older `raise*` methods.
     pub dedupe_key: Option<String>,
+    /// This notification's plugin origin (US5 N2), `None` for every
+    /// host-raised notification (every `raise*` method above).
+    pub attribution: Option<PluginAttribution>,
 }
 
 /// The most action buttons a single notification renders alongside
@@ -239,7 +254,7 @@ impl NotificationCenter {
         args: Vec<(&'static str, String)>,
         actions: Vec<NotificationAction>,
     ) -> u64 {
-        self.raise_full_keyed(severity, message_key, args, actions, None)
+        self.raise_full_keyed(severity, message_key, args, actions, None, None)
     }
 
     fn raise_full_keyed(
@@ -249,6 +264,7 @@ impl NotificationCenter {
         args: Vec<(&'static str, String)>,
         actions: Vec<NotificationAction>,
         dedupe_key: Option<String>,
+        attribution: Option<PluginAttribution>,
     ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
@@ -262,8 +278,31 @@ impl NotificationCenter {
             created_at: Instant::now(),
             dismissed: false,
             dedupe_key,
+            attribution,
         });
         id
+    }
+
+    /// Raise a plugin-attributed notification (US5, contracts/overlays-
+    /// settings-notify.md §3 N2): an ordinary, non-blocking entry under
+    /// this type's own lifecycle (`Info` auto-dismisses, `Warning`/
+    /// `Critical` persist) — never a dedupe key, never an action button,
+    /// never a modal. Returns the new notification's id.
+    pub fn raise_attributed(
+        &mut self,
+        severity: Severity,
+        message_key: &'static str,
+        args: Vec<(&'static str, String)>,
+        attribution: PluginAttribution,
+    ) -> u64 {
+        self.raise_full_keyed(
+            severity,
+            message_key,
+            args,
+            Vec::new(),
+            None,
+            Some(attribution),
+        )
     }
 
     /// Raise a notification identified by `dedupe_key` (009 L6): any
@@ -281,7 +320,7 @@ impl NotificationCenter {
     ) -> u64 {
         let dedupe_key = dedupe_key.into();
         self.dismiss_by_dedupe(&dedupe_key);
-        self.raise_full_keyed(severity, message_key, args, actions, Some(dedupe_key))
+        self.raise_full_keyed(severity, message_key, args, actions, Some(dedupe_key), None)
     }
 
     /// Dismiss every visible notification whose `dedupe_key` matches

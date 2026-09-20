@@ -83,3 +83,19 @@ plugin-suspended-cause-did-not-start = it did not start in time
 plugin-auto-disabled = { $plugin } was suspended three times this session and has been disabled.
 notification-action-restart-plugin = Restart plugin
 notification-action-disable-plugin = Disable plugin
+
+## Plugin panels (011-plugin-ui-contributions, contracts/ui-panels.md §4).
+
+plugin-panel-float = Float
+plugin-panel-dock = Dock
+plugin-panel-close = Close
+plugin-panel-disable = Disable
+plugin-panel-enable = Enable
+plugin-panel-show = Show
+plugin-panel-hide = Hide
+plugin-panel-suspended = { $plugin }, suspended: { $cause }
+plugin-panel-restart = Restart
+plugin-panel-header = { $plugin } — { $title }
+plugin-generic-glyph-desc = plugin icon
+plugin-marker-list-empty = No markers yet
+plugin-notification = { $plugin }: { $text }

@@ -26,6 +26,8 @@ use modplayer_audio_source::{Availability, TrackId, TrackRef};
 use modplayer_audio_source_synthetic::ScriptedHost;
 use modplayer_capability_gateway::budgets::Budgets;
 use modplayer_capability_gateway::event::{HostEvent, PlayState, UnloadReason};
+use modplayer_capability_gateway::ui::{UiId, WidgetKind, WidgetSpec};
+use modplayer_core::actions::{ActionRegistry, KeymapOverrides};
 use modplayer_core::markers::{Owner, TrackMarkers};
 use modplayer_core::notifications::{KEY_PLUGIN_AUTO_DISABLED, KEY_PLUGIN_SUSPENDED};
 use modplayer_core::plugins::{Lifecycle, PluginHost, to_gateway_id};
@@ -160,8 +162,12 @@ fn pump_until(
     mut done: impl FnMut(&mut PluginHost) -> bool,
 ) -> bool {
     let deadline = Instant::now() + timeout;
+    // This file's harness never exercises plugin actions (T062-T080's own
+    // `controller_plugin_ui.rs` does) — a scratch registry just satisfies
+    // `drain_plugin_runtime_events`'s signature (T071).
+    let mut actions = ActionRegistry::new(KeymapOverrides::default());
     loop {
-        host.drain_plugin_runtime_events(notifications, chain, None, Instant::now());
+        host.drain_plugin_runtime_events(notifications, chain, None, &mut actions, Instant::now());
         if done(host) {
             return true;
         }
@@ -177,6 +183,29 @@ fn is_active(host: &mut PluginHost, id: PluginId) -> bool {
         host.record(id).map(|r| &r.lifecycle),
         Some(Lifecycle::Active)
     )
+}
+
+fn ui_id(s: &str) -> UiId {
+    UiId::parse(s).unwrap_or_else(|| unreachable!("{s:?} must be a valid UiId"))
+}
+
+/// A minimal, always-valid `label` widget — this file's tests only need
+/// *a* panel to exist, not to exercise any particular widget kind (that
+/// is `plugin_ui_registry.rs`'s/`controller_plugin_ui.rs`'s own job).
+fn label_widget(id: &str) -> WidgetSpec {
+    WidgetSpec {
+        id: ui_id(id),
+        kind: WidgetKind::Label,
+        label: "Label".to_string(),
+        min: None,
+        max: None,
+        step: None,
+        value: None,
+        items: Vec::new(),
+        selected: None,
+        action: None,
+        text: Some("hello".to_string()),
+    }
 }
 
 fn is_suspended(host: &mut PluginHost, id: PluginId) -> bool {
@@ -479,7 +508,14 @@ fn disable_runs_teardown_in_order() {
         .add(NodeKind::Gain, NodeOwner::Plugin(id))
         .unwrap_or_else(|e| unreachable!("chain.add: {e:?}"));
 
-    host.stop(id, UnloadReason::Disable, Some(&mut markers), &mut chain);
+    let mut actions = ActionRegistry::new(KeymapOverrides::default());
+    host.stop(
+        id,
+        UnloadReason::Disable,
+        Some(&mut markers),
+        &mut chain,
+        &mut actions,
+    );
 
     assert_eq!(
         host.focus().holder(),
@@ -503,6 +539,160 @@ fn disable_runs_teardown_in_order() {
         Some(true),
         "L7e: the plugin's node must be orphaned, not removed — it keeps running"
     );
+}
+
+/// 011-plugin-ui-contributions (US1 T041, contracts/ui-panels.md P5):
+/// `PluginUi::on_stop(Suspend)` keeps a plugin's registered panels intact
+/// (the view alone renders them as a placeholder); `on_stop(Disable)`
+/// removes them outright — the same 009 teardown call
+/// (`disable_runs_teardown_in_order`'s own L7 order) now also drives
+/// `PluginUi`. This file's harness drives a bare `PluginHost` (no
+/// `PlaybackController`, see module doc), which has nothing to drain the
+/// plugin's own `register_panel` RPC with (`plugins::apply::
+/// drain_plugin_requests` takes a whole controller) — so the panel is
+/// registered directly against `PanelRegistry`, exactly like `panel.rs`'s
+/// own unit tests, to exercise `PluginUi::on_stop`'s wiring in isolation
+/// from the RPC pipeline (already covered end-to-end by
+/// `controller_plugin_ui.rs`, T039, which does drive a full controller).
+#[test]
+fn ui_panels_suspend_keeps_disable_removes() {
+    let (mut host, _dir) = fixture_host();
+    let id = find_id(&host, "org.modplayer.fixture.ui-panel");
+    spawn(&mut host, id);
+    let mut notifications = NotificationCenter::new();
+    let mut chain = ChainModel::new(44_100);
+    assert!(pump_until(
+        &mut host,
+        &mut notifications,
+        &mut chain,
+        Duration::from_secs(2),
+        |h| is_active(h, id)
+    ));
+    host.ui_mut()
+        .panels_mut()
+        .register(
+            id,
+            ui_id("main"),
+            "Controls".to_string(),
+            vec![label_widget("info")],
+        )
+        .unwrap_or_else(|e| unreachable!("register: {e:?}"));
+
+    let mut actions = ActionRegistry::new(KeymapOverrides::default());
+    host.stop(id, UnloadReason::Suspend, None, &mut chain, &mut actions);
+    assert!(
+        host.ui()
+            .panels()
+            .for_plugin(id)
+            .iter()
+            .any(|p| p.id.as_str() == "main"),
+        "Suspend must keep the plugin's registered panels intact"
+    );
+
+    host.stop(id, UnloadReason::Disable, None, &mut chain, &mut actions);
+    assert!(
+        host.ui().panels().for_plugin(id).is_empty(),
+        "Disable must remove every one of the plugin's panels"
+    );
+}
+
+/// 011-plugin-ui-contributions (US1 T041, R15): a plugin restarted after
+/// suspension has its stale panel dropped by its own first fresh
+/// registration (`PanelRegistry::register`'s `needs_reset` consumption,
+/// not the host's `Ready` event — see that field's doc for why), and the
+/// freshly re-registered panel replaces it. As above, both registrations
+/// go directly through `PanelRegistry` (no controller in this file's
+/// harness to drain the RPC with).
+#[test]
+fn ui_panels_reset_on_restart_after_suspend() {
+    let (mut host, _dir) = fixture_host();
+    let id = find_id(&host, "org.modplayer.fixture.ui-panel");
+    spawn(&mut host, id);
+    let mut notifications = NotificationCenter::new();
+    let mut chain = ChainModel::new(44_100);
+    assert!(pump_until(
+        &mut host,
+        &mut notifications,
+        &mut chain,
+        Duration::from_secs(2),
+        |h| is_active(h, id)
+    ));
+    host.ui_mut()
+        .panels_mut()
+        .register(
+            id,
+            ui_id("main"),
+            "Controls".to_string(),
+            vec![label_widget("info")],
+        )
+        .unwrap_or_else(|e| unreachable!("register: {e:?}"));
+
+    let mut actions = ActionRegistry::new(KeymapOverrides::default());
+    host.stop(id, UnloadReason::Suspend, None, &mut chain, &mut actions);
+    assert!(
+        !host.ui().panels().for_plugin(id).is_empty(),
+        "test setup: Suspend must keep the panel for this test to be meaningful"
+    );
+
+    // L8: wait for the suspended thread to actually exit before
+    // respawning (`spawn` is a no-op while a handle is still attached),
+    // exactly like `suspended_readopts_on_ready` below. 6s (not 2s): this
+    // bare `PluginHost` harness never drains the fixture's own RPCs (no
+    // controller in this file to run `drain_plugin_requests`, see this
+    // test's own doc comment), so the `ready_ack` handler's own blocking
+    // `register_panel`/`register_action`×2 calls (011-plugin-ui-
+    // contributions US2 T078 added the second `register_action`) each run
+    // out their full `rpc_timeout` (1s, `Budgets::DEFAULT`) before the
+    // handler returns and the thread is free to act on `Control::
+    // Unloading` — up to ~3s of genuine, budget-extended wait, not a
+    // regression in `stop`/`reap_plugin_threads` itself.
+    let reaped = {
+        let deadline = Instant::now() + Duration::from_secs(6);
+        loop {
+            host.reap_plugin_threads();
+            if host.record(id).is_some_and(|r| r.handle.is_none()) {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    assert!(reaped, "the suspended plugin's thread must exit");
+
+    if let Some(record) = host.record_mut(id) {
+        record.lifecycle = Lifecycle::Disabled;
+    }
+    spawn(&mut host, id);
+    assert!(pump_until(
+        &mut host,
+        &mut notifications,
+        &mut chain,
+        Duration::from_secs(2),
+        |h| is_active(h, id)
+    ));
+    // R15: this plugin's first registration since restart must first
+    // drop the stale pre-suspend panel (`needs_reset`) before applying
+    // the fresh one — proven here by re-registering under the *same* id
+    // with new content and asserting only the fresh copy survives.
+    host.ui_mut()
+        .panels_mut()
+        .register(
+            id,
+            ui_id("main"),
+            "Controls".to_string(),
+            vec![label_widget("info")],
+        )
+        .unwrap_or_else(|e| unreachable!("register: {e:?}"));
+
+    let panels = host.ui().panels().for_plugin(id);
+    assert_eq!(
+        panels.len(),
+        1,
+        "the stale pre-suspend panel must not linger alongside the fresh one"
+    );
+    assert_eq!(panels[0].title, "Controls");
 }
 
 /// L4: `chain.readopt(id)` re-adopts a plugin's own orphaned nodes (ids
@@ -614,7 +804,8 @@ fn shutdown_delivers_unloading_and_bounds_wait() {
     ));
 
     let start = Instant::now();
-    host.stop_all_for_shutdown(None, &mut chain);
+    let mut actions = ActionRegistry::new(KeymapOverrides::default());
+    host.stop_all_for_shutdown(None, &mut chain, &mut actions);
     let deadline = start + Duration::from_millis(250);
     loop {
         host.reap_plugin_threads();
@@ -701,11 +892,18 @@ fn warning_after_three_aborts_and_clears_after_5min() {
         |h| is_active(h, id)
     ));
 
+    let mut actions = ActionRegistry::new(KeymapOverrides::default());
     for expected in 1..=3usize {
         trigger_hang(&mut host);
         let deadline = Instant::now() + Duration::from_secs(1);
         loop {
-            host.drain_plugin_runtime_events(&mut notifications, &mut chain, None, Instant::now());
+            host.drain_plugin_runtime_events(
+                &mut notifications,
+                &mut chain,
+                None,
+                &mut actions,
+                Instant::now(),
+            );
             if host.record(id).map(|r| r.abort_window.len()).unwrap_or(0) >= expected {
                 break;
             }

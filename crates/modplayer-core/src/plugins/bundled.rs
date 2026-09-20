@@ -19,6 +19,14 @@ pub struct BundledPackage {
     /// `MODPLAYER_PLUGIN_FIXTURES=1`); `false` for a real `plugins/
     /// bundled/` package.
     pub fixture: bool,
+    /// 011-plugin-ui-contributions (US3 T091, research R11): this
+    /// package's non-Lua/non-TOML files — a manifest-declared `icon`/
+    /// `[glyphs]` path resolves against this table (package-relative,
+    /// `("icon.png", include_bytes!("../../../../plugins/fixtures/
+    /// <name>/icon.png"))`, `plugins/ui/assets.rs::resource_bytes`'s own
+    /// linear lookup). Empty for every package that declares no
+    /// `icon`/`glyphs` at all.
+    pub resources: &'static [(&'static str, &'static [u8])],
 }
 
 /// The environment variable that gates [`fixtures`] (research R8,
@@ -56,6 +64,12 @@ pub fn fixtures() -> Vec<BundledPackage> {
         fixture_wellbehaved(),
         fixture_focus_a(),
         fixture_focus_b(),
+        fixture_ui_panel(),
+        fixture_ui_shortcuts(),
+        fixture_ui_overlay(),
+        fixture_ui_icons(),
+        fixture_ui_settings(),
+        fixture_ui_notify(),
     ]
 }
 
@@ -66,6 +80,7 @@ fn fixture_hang() -> BundledPackage {
         entry: include_str!("../../../../plugins/fixtures/hang/main.luau"),
         readme: include_str!("../../../../plugins/fixtures/hang/README.md"),
         fixture: true,
+        resources: &[],
     }
 }
 
@@ -76,6 +91,7 @@ fn fixture_throw() -> BundledPackage {
         entry: include_str!("../../../../plugins/fixtures/throw/main.luau"),
         readme: include_str!("../../../../plugins/fixtures/throw/README.md"),
         fixture: true,
+        resources: &[],
     }
 }
 
@@ -86,6 +102,7 @@ fn fixture_leak() -> BundledPackage {
         entry: include_str!("../../../../plugins/fixtures/leak/main.luau"),
         readme: include_str!("../../../../plugins/fixtures/leak/README.md"),
         fixture: true,
+        resources: &[],
     }
 }
 
@@ -96,6 +113,7 @@ fn fixture_noready() -> BundledPackage {
         entry: include_str!("../../../../plugins/fixtures/noready/main.luau"),
         readme: include_str!("../../../../plugins/fixtures/noready/README.md"),
         fixture: true,
+        resources: &[],
     }
 }
 
@@ -106,6 +124,7 @@ fn fixture_observer() -> BundledPackage {
         entry: include_str!("../../../../plugins/fixtures/observer/main.luau"),
         readme: include_str!("../../../../plugins/fixtures/observer/README.md"),
         fixture: true,
+        resources: &[],
     }
 }
 
@@ -119,6 +138,7 @@ fn fixture_invalid() -> BundledPackage {
         entry: include_str!("../../../../plugins/fixtures/invalid/main.luau"),
         readme: include_str!("../../../../plugins/fixtures/invalid/README.md"),
         fixture: true,
+        resources: &[],
     }
 }
 
@@ -129,6 +149,7 @@ fn fixture_flood() -> BundledPackage {
         entry: include_str!("../../../../plugins/fixtures/flood/main.luau"),
         readme: include_str!("../../../../plugins/fixtures/flood/README.md"),
         fixture: true,
+        resources: &[],
     }
 }
 
@@ -141,6 +162,7 @@ fn fixture_wellbehaved() -> BundledPackage {
         entry: include_str!("../../../../plugins/fixtures/wellbehaved/main.luau"),
         readme: include_str!("../../../../plugins/fixtures/wellbehaved/README.md"),
         fixture: true,
+        resources: &[],
     }
 }
 
@@ -154,6 +176,7 @@ fn fixture_focus_a() -> BundledPackage {
         entry: include_str!("../../../../plugins/fixtures/focus-a/main.luau"),
         readme: include_str!("../../../../plugins/fixtures/focus-a/README.md"),
         fixture: true,
+        resources: &[],
     }
 }
 
@@ -168,6 +191,110 @@ fn fixture_focus_b() -> BundledPackage {
         entry: include_str!("../../../../plugins/fixtures/focus-b/main.luau"),
         readme: include_str!("../../../../plugins/fixtures/focus-b/README.md"),
         fixture: true,
+        resources: &[],
+    }
+}
+
+/// 011-plugin-ui-contributions (US1 T059/T060): registers a panel with
+/// every widget kind; drives the request-focus-in-handler/timer,
+/// hang and throw probes.
+fn fixture_ui_panel() -> BundledPackage {
+    BundledPackage {
+        identifier: "org.modplayer.fixture.ui-panel",
+        manifest_toml: include_str!("../../../../plugins/fixtures/ui-panel/plugin.toml"),
+        entry: include_str!("../../../../plugins/fixtures/ui-panel/main.luau"),
+        readme: include_str!("../../../../plugins/fixtures/ui-panel/README.md"),
+        fixture: true,
+        resources: &[],
+    }
+}
+
+/// 011-plugin-ui-contributions (US2 T077/T079, contracts/
+/// action-registry-plugins.md): registers `take_over` (`L`, collides with
+/// the host's loop toggle, M5), `nudge` (continuous, `Shift+K`, collides
+/// with `ui-panel`'s own `focus_me`, M6) and `tab_bound` (`Tab`, a
+/// rejected default, G10).
+fn fixture_ui_shortcuts() -> BundledPackage {
+    BundledPackage {
+        identifier: "org.modplayer.fixture.ui-shortcuts",
+        manifest_toml: include_str!("../../../../plugins/fixtures/ui-shortcuts/plugin.toml"),
+        entry: include_str!("../../../../plugins/fixtures/ui-shortcuts/main.luau"),
+        readme: include_str!("../../../../plugins/fixtures/ui-shortcuts/README.md"),
+        fixture: true,
+        resources: &[],
+    }
+}
+
+/// 011-plugin-ui-contributions (US3 T090, contracts/overlays-settings-
+/// notify.md §1.1): one primitive of every kind per `track_changed`;
+/// probes `add_501st`/`bad_region`/`bad_icon`.
+fn fixture_ui_overlay() -> BundledPackage {
+    BundledPackage {
+        identifier: "org.modplayer.fixture.ui-overlay",
+        manifest_toml: include_str!("../../../../plugins/fixtures/ui-overlay/plugin.toml"),
+        entry: include_str!("../../../../plugins/fixtures/ui-overlay/main.luau"),
+        readme: include_str!("../../../../plugins/fixtures/ui-overlay/README.md"),
+        fixture: true,
+        resources: &[],
+    }
+}
+
+/// 011-plugin-ui-contributions (US3 T091, FR-014a): the first package to
+/// actually embed `resources` — a manifest `icon` plus two `[glyphs]`
+/// keys, one deliberately over the per-glyph size cap (`glyphs/big.png`,
+/// 64x64 against `GLYPH_MAX_PX = 32`), proving the "warn and omit, never
+/// a manifest error" asset path end to end.
+fn fixture_ui_icons() -> BundledPackage {
+    BundledPackage {
+        identifier: "org.modplayer.fixture.ui-icons",
+        manifest_toml: include_str!("../../../../plugins/fixtures/ui-icons/plugin.toml"),
+        entry: include_str!("../../../../plugins/fixtures/ui-icons/main.luau"),
+        readme: include_str!("../../../../plugins/fixtures/ui-icons/README.md"),
+        fixture: true,
+        resources: &[
+            (
+                "icon.png",
+                include_bytes!("../../../../plugins/fixtures/ui-icons/icon.png"),
+            ),
+            (
+                "glyphs/ok.png",
+                include_bytes!("../../../../plugins/fixtures/ui-icons/glyphs/ok.png"),
+            ),
+            (
+                "glyphs/big.png",
+                include_bytes!("../../../../plugins/fixtures/ui-icons/glyphs/big.png"),
+            ),
+        ],
+    }
+}
+
+/// 011-plugin-ui-contributions (US4 T105/T106, contracts/overlays-
+/// settings-notify.md §2): registers a 4-field settings schema (boolean,
+/// number, string, choice); logs `settings_changed`; probe `get`.
+fn fixture_ui_settings() -> BundledPackage {
+    BundledPackage {
+        identifier: "org.modplayer.fixture.ui-settings",
+        manifest_toml: include_str!("../../../../plugins/fixtures/ui-settings/plugin.toml"),
+        entry: include_str!("../../../../plugins/fixtures/ui-settings/main.luau"),
+        readme: include_str!("../../../../plugins/fixtures/ui-settings/README.md"),
+        fixture: true,
+        resources: &[],
+    }
+}
+
+/// 011-plugin-ui-contributions (US5 T113/T115, contracts/overlays-
+/// settings-notify.md §3): posts nothing on its own; `debug_probe`'s
+/// `post:<level>:<n>`/`post_invalid:<n>` drive `api.ui.notify` directly
+/// so a test controls exactly how many calls land inside the rolling
+/// 6-per-60s window.
+fn fixture_ui_notify() -> BundledPackage {
+    BundledPackage {
+        identifier: "org.modplayer.fixture.ui-notify",
+        manifest_toml: include_str!("../../../../plugins/fixtures/ui-notify/plugin.toml"),
+        entry: include_str!("../../../../plugins/fixtures/ui-notify/main.luau"),
+        readme: include_str!("../../../../plugins/fixtures/ui-notify/README.md"),
+        fixture: true,
+        resources: &[],
     }
 }
 

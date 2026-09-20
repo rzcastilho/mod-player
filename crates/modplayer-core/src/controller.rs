@@ -17,7 +17,7 @@
 //! contracts/engine-commands.md rule 3). Device-loss handling
 //! (T071-T074) is a later phase.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
@@ -38,9 +38,14 @@ use modplayer_engine::{
     BufferPreset, CeilingDb, Command, DeviceId, Event, NegotiatedBuffer, PositionClock, Processor,
     ProcessorConfig, RtShared, SampleRate, Theme, Transport, VolumePercent,
 };
+use modplayer_plugin_runtime::handle::Control;
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use crate::actions::{ActionRegistry, BindingError, Chord, HostAction};
+use crate::Refusal;
+use crate::actions::{
+    ActionId, ActionKind, ActionRegistry, ActionSource, BindingError, Chord, HostAction, OwnerTier,
+    PluginActionDef, PluginActionId,
+};
 use crate::analysis::{AnalysisPaths, AnalysisService, AnalysisSnapshot};
 use crate::device_policy::{self, DeviceLostOutcome, DeviceResolution, DeviceWarning};
 use crate::effects::{
@@ -60,10 +65,12 @@ use crate::notifications::{
     KEY_DEVICE_APPEARED, KEY_DEVICE_AVAILABLE_AGAIN, KEY_DEVICE_LOST, KEY_DEVICE_MISSING_AT_LAUNCH,
     KEY_EFFECT_CHAIN_AUTO_BYPASSED, KEY_EFFECT_CHAIN_OVER_BUDGET, KEY_EFFECTS_NO_TIME_STRETCH,
     KEY_NO_OUTPUT_DEVICES, KEY_QUEUE_ITEM_SKIPPED_UNAVAILABLE, KEY_TRACK_STATE_NEWER_VERSION,
-    KEY_TRACK_STATE_SAVE_FAILED, KEY_TRACK_STATE_UNREADABLE, NotificationCenter, Severity,
+    KEY_TRACK_STATE_SAVE_FAILED, KEY_TRACK_STATE_UNREADABLE, NotificationCenter, PluginAttribution,
+    Severity,
 };
 use crate::plugins::{
-    FocusPolicy, Lifecycle, PluginLog, PluginsView, TransportActor, TransportFocusView,
+    FocusPolicy, Lifecycle, PluginLog, PluginPanelsView, PluginSettingsView, PluginsView,
+    TransportActor, TransportFocusView,
 };
 use crate::queue::{
     AdvanceReason, Origin, PlaybackChange, Queue, QueueChange, QueueItem, QueueItemId, QueueMode,
@@ -581,6 +588,13 @@ pub struct PlaybackController<B: OutputBackend, H: SourceHost> {
     /// controller/transfer command. Set by [`Self::with_transport_actor`];
     /// [`Self::note_local_transport_action`] is the only reader.
     transport_actor: TransportActor,
+
+    /// `[plugin_panels]` shadow state (011-plugin-ui-contributions,
+    /// FR-005/FR-006): seeded from `settings.plugin_panels` at
+    /// construction and persisted, through `persist_settings`, on every
+    /// placement/geometry/disabled mutation — mirrors `actions`'s own
+    /// shadow-state convention above.
+    plugin_panels: BTreeMap<String, crate::settings::PanelPersisted>,
 }
 
 /// `transport.seek_forward_step`/`seek_backward_step`'s step size
@@ -737,6 +751,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
             plugin_snapshot_chain_revision: 0,
             plugin_snapshot_queue: Vec::new(),
             transport_actor: TransportActor::default(),
+            plugin_panels: settings.plugin_panels.clone(),
         };
         // 006, contracts/marker-service.md §4: resolved unconditionally at
         // construction, like `AnalysisPaths::resolve()` just above —
@@ -1202,8 +1217,16 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
     /// Add `chord` to `action`'s bindings and persist the result
     /// (contracts/action-registry.md §5). A failed write raises
     /// `settings-save-failed` and leaves the in-memory registry changed
-    /// (same semantics as `set_nudge_step_ms`).
-    pub fn add_binding(&mut self, action: HostAction, chord: Chord) -> Result<(), BindingError> {
+    /// (same semantics as `set_nudge_step_ms`). `impl Into<ActionId>`
+    /// (011-plugin-ui-contributions, contracts/action-registry-plugins.md
+    /// FR-010: a plugin action is "fully rebindable ... exactly like a
+    /// host action") so `modplayer-ui::settings::controls` calls this one
+    /// method for both.
+    pub fn add_binding(
+        &mut self,
+        action: impl Into<ActionId>,
+        chord: Chord,
+    ) -> Result<(), BindingError> {
         self.actions.add_binding(action, chord)?;
         self.persist_actions();
         Ok(())
@@ -1211,14 +1234,14 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
 
     /// Remove `chord` from `action`'s bindings (a no-op if it wasn't
     /// held) and persist the result.
-    pub fn remove_binding(&mut self, action: HostAction, chord: Chord) {
+    pub fn remove_binding(&mut self, action: impl Into<ActionId>, chord: Chord) {
         self.actions.remove_binding(action, chord);
         self.persist_actions();
     }
 
-    /// Restore `action`'s catalog default bindings and persist the
-    /// result (FR-011).
-    pub fn reset_binding(&mut self, action: HostAction) {
+    /// Restore `action`'s catalog (or plugin) default bindings and
+    /// persist the result (FR-011).
+    pub fn reset_binding(&mut self, action: impl Into<ActionId>) {
         self.actions.reset(action);
         self.persist_actions();
     }
@@ -1387,8 +1410,11 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
     /// exited or `SHUTDOWN_WAIT` has elapsed (contracts/plugin-host-
     /// service.md §1).
     fn shutdown_plugins(&mut self) {
-        self.plugins
-            .stop_all_for_shutdown(self.markers.as_mut(), &mut self.chain);
+        self.plugins.stop_all_for_shutdown(
+            self.markers.as_mut(),
+            &mut self.chain,
+            &mut self.actions,
+        );
         let deadline = self.now() + SHUTDOWN_WAIT;
         loop {
             self.plugins.reap_plugin_threads();
@@ -1928,6 +1954,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
             &mut self.notifications,
             &mut self.chain,
             self.markers.as_mut(),
+            &mut self.actions,
             plugin_now,
         );
         self.plugins.reap_plugin_threads();
@@ -2183,8 +2210,15 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
 
     /// The Plugins section's read model (FR-023, US4 T104): one row per
     /// discovered plugin, sorted by name, gauges live while `Active`.
+    /// 011-plugin-ui-contributions (FR-006): each row also lists its own
+    /// registered panels' Show/Hide + Enable/Disable controls.
     pub fn plugins_view(&self) -> PluginsView {
-        PluginsView::from_records(self.plugins.records(), self.now())
+        PluginsView::from_records(
+            self.plugins.records(),
+            self.now(),
+            self.plugins.ui().panels(),
+            &self.plugin_panels,
+        )
     }
 
     /// `Disabled -> Loading` (fresh thread/state); a no-op for `Invalid`
@@ -2221,6 +2255,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
                     UnloadReason::Disable,
                     self.markers.as_mut(),
                     &mut self.chain,
+                    &mut self.actions,
                 );
             }
             Lifecycle::Suspended { .. } => {
@@ -2228,6 +2263,13 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
                     self.notifications
                         .dismiss_by_dedupe(&format!("plugin-suspended:{identifier}"));
                 }
+                // 011-plugin-ui-contributions (contracts/action-registry-
+                // plugins.md G12): `stop()` already ran (and already
+                // deactivated this plugin's actions, G11) when it was
+                // suspended — `stop()` itself is not called again here,
+                // so unregistering (parking any override to `dormant`)
+                // is this branch's own job.
+                self.actions.unregister_plugin_actions(id);
             }
             Lifecycle::Invalid(_) | Lifecycle::Disabled | Lifecycle::Draining => {}
         }
@@ -2357,9 +2399,16 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
     }
 
     /// `plugins::apply`'s own `RequestFocus` handler (C1): always
-    /// recorded, never refused.
-    pub(crate) fn focus_request(&mut self, id: crate::plugins::PluginId) {
-        let changes = self.plugins.arbiter_mut().request(id, true);
+    /// recorded, never refused. `origin` is R16/FR-026's interaction-flag
+    /// passthrough — `RequestOrigin::UserInteraction` only when the
+    /// plugin's own `request_focus()` ran synchronously inside a
+    /// `panel_interaction`/`action_invoked` handler.
+    pub(crate) fn focus_request(
+        &mut self,
+        id: crate::plugins::PluginId,
+        origin: crate::plugins::RequestOrigin,
+    ) {
+        let changes = self.plugins.arbiter_mut().request(id, true, origin);
         self.plugins.apply_focus_changes(changes);
     }
 
@@ -2428,6 +2477,345 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         self.last_marker_actor = owner;
         Ok(id)
     }
+
+    // -- 011-plugin-ui-contributions: the controller façade for the five
+    // `ui.*` surfaces (data-model.md §5.4). Panels (US1 T051), plugin
+    // actions (US2 T073), overlays (US3 T086) and settings (US4 T101)
+    // below are all real. `plugin_assets` is real already (`PluginAssets`,
+    // T032/T048).
+
+    /// Every visible panel across every plugin, dock/float split
+    /// (data-model.md §4.7 `PluginPanelsView`; contracts/ui-panels.md §2
+    /// "Visibility").
+    #[must_use]
+    pub fn plugin_panels_view(&self) -> PluginPanelsView {
+        PluginPanelsView::from_records(
+            self.plugins.records(),
+            self.plugins.ui().panels(),
+            &self.plugin_panels,
+        )
+    }
+
+    /// US3 T086: every `Active` plugin's overlay layer, in cross-plugin
+    /// z-order (O4) — `modplayer-ui`'s sole read model for painting
+    /// `ui.overlay` primitives onto the waveform (contracts/overlays-
+    /// settings-notify.md §1.2).
+    #[must_use]
+    pub fn plugin_overlays(&self) -> Vec<crate::plugins::OverlayLayer> {
+        crate::plugins::OverlayLayer::from_records(
+            self.plugins.records(),
+            self.plugins.ui().overlays(),
+        )
+    }
+
+    /// `plugins::apply`'s own `RegisterPanel`/`UpdateWidget` targets:
+    /// deliver a UI-driven panel interaction to `plugin` and its
+    /// registry, then to the handle as `HostEvent::PanelInteraction`
+    /// (R9, contracts/ui-panels.md P4) — bypasses `FanOut` (the
+    /// permission is implied by the registration that produced this
+    /// widget). A no-op if the panel/widget no longer exists (a stale UI
+    /// frame) or the plugin's handle is gone.
+    pub fn plugin_panel_interaction(
+        &mut self,
+        plugin: crate::plugins::PluginId,
+        panel: &modplayer_capability_gateway::ui::UiId,
+        widget: &modplayer_capability_gateway::ui::UiId,
+        value: modplayer_capability_gateway::ui::WidgetValue,
+    ) {
+        let Some(outcome) = self
+            .plugins
+            .ui_mut()
+            .panels_mut()
+            .interact(plugin, panel, widget, value)
+        else {
+            return;
+        };
+        match outcome {
+            crate::plugins::ui::panel::Interaction::Value(delivered) => {
+                if let Some(handle) = self.plugins.record(plugin).and_then(|r| r.handle.as_ref()) {
+                    handle.send_event(HostEvent::PanelInteraction {
+                        panel: panel.to_string(),
+                        widget: widget.to_string(),
+                        value: delivered,
+                    });
+                }
+            }
+            // FR-008, contracts/action-registry-plugins.md D3: a button
+            // naming `action` never produces `panel_interaction` — resolve
+            // `"<identifier>.<name>"` against the registry instead.
+            crate::plugins::ui::panel::Interaction::Action(name) => {
+                let Some(identifier) = self.plugins.id_table().identifier_of(plugin).cloned()
+                else {
+                    return;
+                };
+                let full = format!("{identifier}.{name}");
+                match PluginActionId::parse(&full) {
+                    Some(id) if self.actions.plugin_action_registered(&id) => {
+                        self.invoke_plugin_action(&id, ActionSource::Ui);
+                    }
+                    _ => {
+                        self.plugins.plugin_log_mut().push(
+                            identifier,
+                            log::Level::Warn,
+                            format!(
+                                "panel button {panel}/{widget} names unregistered action {name:?}"
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The user's per-panel Close/Show/Disable/Enable controls
+    /// (data-model.md §8 "Panel" transitions, FR-006). Close/Show are
+    /// session-only, never persisted, never deliver an event to the
+    /// plugin (FR-006); Set-disabled persists into `[plugin_panels]`.
+    /// `key` is identifier-keyed (contracts/ui-panels.md L3) so these
+    /// work identically whether or not the plugin is currently running.
+    pub fn plugin_panel_close(&mut self, key: &crate::plugins::ui::panel::PanelKey) {
+        self.plugins.ui_mut().panels_mut().close(key.clone());
+    }
+
+    pub fn plugin_panel_show(&mut self, key: &crate::plugins::ui::panel::PanelKey) {
+        self.plugins.ui_mut().panels_mut().show(key);
+    }
+
+    pub fn plugin_panel_set_disabled(
+        &mut self,
+        key: &crate::plugins::ui::panel::PanelKey,
+        disabled: bool,
+    ) {
+        self.plugin_panel_persist(key, |entry| entry.disabled = disabled);
+    }
+
+    /// FR-005/L3/L4: persist a placement/geometry change for `key`.
+    /// Coalescing repeated calls while dragging (at most one write per
+    /// 500 ms, L3) is the caller's (UI) own job — this always writes
+    /// immediately, exactly like every other `persist_settings` caller.
+    pub fn plugin_panel_set_placement(
+        &mut self,
+        key: &crate::plugins::ui::panel::PanelKey,
+        placement: crate::settings::PanelPersisted,
+    ) {
+        self.plugin_panel_persist(key, |entry| *entry = placement);
+    }
+
+    /// Shared by every `[plugin_panels]`-persisting method above: read
+    /// the current (or default) entry for `key`, apply `mutate`, write it
+    /// back to both the in-memory shadow state and `settings.toml`.
+    fn plugin_panel_persist(
+        &mut self,
+        key: &crate::plugins::ui::panel::PanelKey,
+        mutate: impl FnOnce(&mut crate::settings::PanelPersisted),
+    ) {
+        let storage_key = key.storage_key();
+        let mut entry = self
+            .plugin_panels
+            .get(&storage_key)
+            .copied()
+            .unwrap_or_default();
+        mutate(&mut entry);
+        self.plugin_panels.insert(storage_key.clone(), entry);
+        self.persist_settings(move |settings| {
+            settings.plugin_panels.insert(storage_key.clone(), entry);
+        });
+    }
+
+    /// `plugins::apply`'s own `RegisterAction` target (US2, contracts/
+    /// action-registry-plugins.md G10): resolves `spec.id` against this
+    /// plugin, sets its owner tier (`Bundled` — every plugin record is
+    /// `Source::Bundled` this slice) and resolved display name (for
+    /// `rows()` grouping, `PluginActionDef::name`'s own doc), parses
+    /// `default_binding` and blanks it out (with a console warning) when
+    /// it fails to parse or 007 FR-007's own capture would reject it
+    /// (G10), then registers.
+    pub(crate) fn register_plugin_action(
+        &mut self,
+        plugin: crate::plugins::PluginId,
+        spec: modplayer_capability_gateway::ui::ActionSpec,
+    ) -> Result<(), Refusal> {
+        let Some(identifier) = self.plugins.id_table().identifier_of(plugin).cloned() else {
+            return Err(Refusal::invalid_state("invalid_state", "Unknown plugin."));
+        };
+        let Some(id) = PluginActionId::parse(&format!("{identifier}.{}", spec.id)) else {
+            return Err(Refusal::invalid_state(
+                "invalid_value",
+                "Invalid action id.",
+            ));
+        };
+        let name = self
+            .plugins
+            .record(plugin)
+            .map(crate::plugins::host::plugin_display_name)
+            .unwrap_or_default();
+        let kind = match spec.kind {
+            modplayer_capability_gateway::ui::ActionKindSpec::Trigger => ActionKind::Trigger,
+            modplayer_capability_gateway::ui::ActionKindSpec::Continuous => ActionKind::Continuous,
+        };
+        let mut default_binding = None;
+        if let Some(raw) = &spec.default_binding {
+            match Chord::parse(raw) {
+                Ok(c) if !crate::actions::capture_would_reject(&c) => default_binding = Some(c),
+                _ => {
+                    self.plugins.plugin_log_mut().push(
+                        identifier,
+                        log::Level::Warn,
+                        format!(
+                            "register_action({}): default binding {raw:?} is not bindable; registered unbound.",
+                            spec.id
+                        ),
+                    );
+                }
+            }
+        }
+        let def = PluginActionDef {
+            id,
+            owner: plugin,
+            tier: OwnerTier::Bundled,
+            name,
+            label: spec.label,
+            kind,
+            repeats_while_held: spec.repeats_while_held,
+            default_binding,
+        };
+        self.actions.register_plugin_action(def).map_err(|_| {
+            Refusal::invalid_state("action_limit", "A plugin may register at most 64 actions.")
+        })
+    }
+
+    /// `plugins::apply`'s own keyboard-or-button dispatch target (D4,
+    /// FR-008/FR-012/FR-013): gated by [`ActionRegistry::is_invocable`]
+    /// (registered, owning plugin Active, no flagged chord) — delivers
+    /// `HostEvent::ActionInvoked` directly to the owning handle (never via
+    /// `FanOut`, mirrors `plugin_panel_interaction`'s own bypass). Silent
+    /// no-op otherwise (D4: "an action whose owner has no running handle
+    /// delivers nothing"; a non-invocable action likewise delivers
+    /// nothing, FR-012). `pub` (not `pub(crate)`): `modplayer-ui::actions::
+    /// invoke`'s own `ActionId::Plugin` arm (D2, T074) calls this directly
+    /// with `ActionSource::Keyboard` from a separate crate.
+    pub fn invoke_plugin_action(&mut self, id: &PluginActionId, source: ActionSource) {
+        let action = ActionId::Plugin(id.clone());
+        if !self.actions.is_invocable(&action) {
+            return;
+        }
+        let Some(def) = self.actions.plugin_action_def(id) else {
+            return;
+        };
+        let owner = def.owner;
+        let value = (def.kind == ActionKind::Continuous).then_some(1.0);
+        if let Some(handle) = self.plugins.record(owner).and_then(|r| r.handle.as_ref()) {
+            handle.send_event(HostEvent::ActionInvoked {
+                action: id.id(),
+                source,
+                value,
+            });
+        }
+    }
+
+    /// Every Active plugin's settings page (data-model.md §4.7
+    /// `PluginSettingsView`, contracts/overlays-settings-notify.md S2) —
+    /// `modplayer-ui`'s sole read model for Settings › Plugins' per-plugin
+    /// sub-pages and for `settings_registry::search_plugin_settings`.
+    #[must_use]
+    pub fn plugin_settings_views(&self) -> Vec<PluginSettingsView> {
+        PluginSettingsView::from_records(self.plugins.records(), self.plugins.ui().settings())
+    }
+
+    /// `plugins::apply`'s own settings-page edit target (S4, contracts/
+    /// overlays-settings-notify.md §2): the registry's own `edit`
+    /// validates `value` against `field`'s kind/range and updates the
+    /// page's live copy; on success the change is dispatched to the
+    /// plugin thread as `Control::SettingsWrite` (R5) — the scheduler
+    /// applies `store.set(Scope::Settings, ..)` for the change and *then*
+    /// dispatches `settings_changed` in the same inbox item, so the plugin
+    /// never observes the event before the value. A silent no-op if the
+    /// plugin has no page, `field` doesn't exist, `value` doesn't fit the
+    /// field's kind/range (S4 names no refusal path for a UI-driven edit —
+    /// the widget itself only ever offers an in-range value), or the
+    /// plugin's handle is gone.
+    pub fn plugin_settings_edit(
+        &mut self,
+        plugin: crate::plugins::PluginId,
+        field: &str,
+        value: serde_json::Value,
+    ) {
+        let Some(changes) = self
+            .plugins
+            .ui_mut()
+            .settings_mut()
+            .edit(plugin, field, value)
+        else {
+            return;
+        };
+        if let Some(handle) = self.plugins.record(plugin).and_then(|r| r.handle.as_ref()) {
+            handle.send_control(Control::SettingsWrite { changes });
+        }
+    }
+
+    /// `plugins::apply`'s own `notify` dispatch target (US5, contracts/
+    /// overlays-settings-notify.md §3 N1/N2): `validate_notify` is the
+    /// refusal of record for a bad level or >200-char text — the `notify`
+    /// rate bucket itself already admitted the request before this runs
+    /// (N1, Foundational `limiter.rs`), so a refusal here still consumes
+    /// this plugin's slot in its 60 s window (the gateway-level
+    /// `notify_refused_at_validation_still_counts`, T016, already covers
+    /// the bucket itself; this is the same "still counts" rule one layer
+    /// up). On success, raises an ordinary, non-blocking `plugin-
+    /// notification` entry attributed to this plugin (N2) — never a
+    /// dedupe key, never an action button; the plugin's later disable/
+    /// suspend never touches an already-shown one (N4, `PluginAttribution`
+    /// is a snapshot, not a live lookup).
+    pub(crate) fn plugin_notify(
+        &mut self,
+        plugin: crate::plugins::PluginId,
+        level: modplayer_capability_gateway::ui::NotifyLevel,
+        text: String,
+    ) -> Result<(), Refusal> {
+        use modplayer_capability_gateway::ui::NotifyLevel;
+
+        let level_str = match level {
+            NotifyLevel::Critical => "critical",
+            NotifyLevel::Warning => "warning",
+            NotifyLevel::Info => "info",
+        };
+        modplayer_capability_gateway::ui::validate_notify(level_str, &text)?;
+        let name = self
+            .plugins
+            .record(plugin)
+            .map(crate::plugins::host::plugin_display_name)
+            .unwrap_or_default();
+        let severity = match level {
+            NotifyLevel::Critical => Severity::Critical,
+            NotifyLevel::Warning => Severity::Warning,
+            NotifyLevel::Info => Severity::Info,
+        };
+        self.notifications.raise_attributed(
+            severity,
+            "plugin-notification",
+            vec![("plugin", name.clone()), ("text", text)],
+            PluginAttribution { id: plugin, name },
+        );
+        Ok(())
+    }
+
+    /// This plugin's decoded icon/glyphs (FR-014a), for `modplayer-ui`'s
+    /// texture cache — real today: `PluginAssets` (T032) already lives
+    /// on every `PluginRecord`, defaulting to empty until `discover()`
+    /// loads it (US1 T048).
+    #[must_use]
+    pub fn plugin_assets(
+        &self,
+        plugin: crate::plugins::PluginId,
+    ) -> Option<&crate::plugins::PluginAssets> {
+        self.plugins.record(plugin).map(|record| &record.assets)
+    }
+
+    /// The current track's markers/loop-region endpoints owned by
+    /// `plugin`, as `marker list` widget rows (data-model.md §4.7
+    /// `MarkerListRow`) — placeholder until `panel.rs`'s `marker list`
+    /// kind (US1) and `view.rs`'s `MarkerListRow` (US1 T047) exist.
+    pub fn plugin_marker_list(&self, _plugin: crate::plugins::PluginId) {}
 
     /// The current track's latest waveform analysis, if any (contracts/
     /// analysis-service.md §1, contracts/transport-delta.md §2).
@@ -3579,6 +3967,11 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
             // `TrackChanged` itself fans out.
             let changes = self.plugins.arbiter_mut().on_track_changed();
             self.plugins.apply_focus_changes(changes);
+            // 011-plugin-ui-contributions (FR-016, O3): every plugin's
+            // overlays clear on this exact trigger, with zero plugin code
+            // running — same "track change" definition as the arbiter's
+            // own per-track reset just above, no second one.
+            self.plugins.ui_mut().on_track_changed();
             let track = self.queue.current().map(|item| TrackInfo {
                 id: item.track.id.to_string(),
                 title: item.track.title.clone(),

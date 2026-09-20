@@ -43,10 +43,12 @@ pub use i18n::{tr, tr_args};
 pub use library::{Connectivity, LibraryIndex, LibraryStatus, PlayLog, SyncScheduler};
 pub use links::STATUS_PAGE_URL;
 pub use modplayer_capability_gateway::refusal::Refusal;
-pub use notifications::{Notification, NotificationAction, NotificationCenter, Severity};
+pub use notifications::{
+    Notification, NotificationAction, NotificationCenter, PluginAttribution, Severity,
+};
 pub use plugins::{
-    FocusHolder, FocusPolicy, FocusRow, Health, Lifecycle, PluginHost, PluginId, PluginLog,
-    PluginRecord, PluginRow, PluginsView, Source, TransportFocusView,
+    FocusHolder, FocusPolicy, FocusRow, Health, Lifecycle, PluginAssets, PluginHost, PluginId,
+    PluginLog, PluginRecord, PluginRow, PluginUi, PluginsView, Source, TransportFocusView,
 };
 pub use queue::{
     AdvanceReason, Origin, PlaybackChange, Queue, QueueChange, QueueItem, QueueItemId, QueueMode,

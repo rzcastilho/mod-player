@@ -18,6 +18,13 @@ settings-cat-about = About
 settings-search = Search settings
 placeholder-settings-category = This category has no settings yet in this update.
 
+## 011-plugin-ui-contributions (US4 T104, contracts/overlays-settings-
+## notify.md §2 "S2"/"S6"): the Plugins category's own settings-page list
+## and its per-plugin sub-page.
+settings-plugins-pages = Plugin settings
+settings-plugins-none = No enabled plugin has a settings page.
+settings-plugins-back = Back
+
 account-recheck = Re-check subscription
 account-recheck-desc = Ask Spotify again whether this account currently has Premium.
 account-sign-out = Sign out

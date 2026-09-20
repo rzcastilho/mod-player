@@ -115,6 +115,19 @@ pub enum FocusChange {
     Granted { plugin: PluginId },
 }
 
+/// 011-plugin-ui-contributions (R16, FR-026): where a `request_focus()`
+/// call originated, from the arbiter's point of view — `UserInteraction`
+/// only for a call made synchronously inside a `panel_interaction`/
+/// `action_invoked` handler (the plugin thread's own `in_interaction_
+/// handler` flag, carried across the RPC as `Request::RequestFocus {
+/// interaction }`); every other call (an ordinary handler, a timer, a
+/// direct API call) is `Api`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestOrigin {
+    Api,
+    UserInteraction,
+}
+
 /// Who is currently driving a transport method call, from the
 /// controller's point of view (controller-private, research R3,
 /// data-model.md §1.5). Distinguishes the user's own local actions (the
@@ -188,24 +201,41 @@ impl FocusArbiter {
     /// this for a live RPC) instead purges `p` from `pending` and grants
     /// nothing.
     ///
+    /// 011-plugin-ui-contributions (R16, FR-026): under
+    /// `AutoOnInteraction`, `origin == UserInteraction` grants `p`
+    /// immediately — the same hand-over [`FocusArbiter::give`] performs
+    /// for the user's own "Give focus" — instead of merely queuing the
+    /// request. Every other `(policy, origin)` combination is unchanged
+    /// 010 behaviour.
+    ///
     /// ```
-    /// use modplayer_core::plugins::{FocusArbiter, FocusChange, FocusHolder, FocusPolicy};
+    /// use modplayer_core::plugins::{FocusArbiter, FocusChange, FocusHolder, FocusPolicy, RequestOrigin};
     /// use modplayer_effects::catalog::PluginId;
     ///
     /// let mut arbiter = FocusArbiter::new();
     /// arbiter.set_policy(FocusPolicy::FirstRequestWins);
-    /// let changes = arbiter.request(PluginId(0), true);
+    /// let changes = arbiter.request(PluginId(0), true, RequestOrigin::Api);
     /// assert_eq!(changes, vec![FocusChange::Granted { plugin: PluginId(0) }]);
     /// assert_eq!(arbiter.holder(), FocusHolder::Plugin(PluginId(0)));
     /// ```
     #[must_use]
-    pub fn request(&mut self, p: PluginId, running: bool) -> Vec<FocusChange> {
+    pub fn request(
+        &mut self,
+        p: PluginId,
+        running: bool,
+        origin: RequestOrigin,
+    ) -> Vec<FocusChange> {
         if !running {
             self.pending.retain(|&x| x != p);
             return Vec::new();
         }
         if self.holder == FocusHolder::Plugin(p) {
             return Vec::new();
+        }
+        if matches!(origin, RequestOrigin::UserInteraction)
+            && matches!(self.policy, FocusPolicy::AutoOnInteraction)
+        {
+            return self.give(p);
         }
         if self.pending.contains(&p) {
             return Vec::new();

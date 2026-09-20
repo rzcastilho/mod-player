@@ -12,6 +12,7 @@ pub mod queue;
 pub mod state;
 pub mod timers;
 pub mod transport;
+pub mod ui;
 
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -139,6 +140,7 @@ pub fn response_to_lua(lua: &Lua, response: Response) -> mlua::Result<Value> {
         },
         Response::TimerHandle(handle) => Value::Integer(i64::from(handle)),
         Response::Probe(json) => lua.to_value(&json)?,
+        Response::Settings(values) => lua.to_value(&values)?,
     })
 }
 
@@ -300,6 +302,9 @@ pub fn dispatch(
         | RequestKind::TimersScheduleAtPosition
         | RequestKind::TimersClear => self::timers::apply(shared, kind, &request),
 
+        // -- Local: settings snapshot (011-plugin-ui-contributions, R4) -----
+        RequestKind::GetSettings => self::ui::get_settings_local(shared),
+
         // -- Fixture-only: handled entirely inside bindings::log's sibling --
         RequestKind::DebugProbe => Err(Refusal::invalid_state(
             "invalid_argument",
@@ -432,6 +437,7 @@ pub fn install(lua: &Lua, shared: SharedHandle) -> mlua::Result<()> {
     self::effects::install(lua, &api, Arc::clone(&shared))?;
     self::state::install(lua, &api, Arc::clone(&shared))?;
     self::timers::install(lua, &api, Arc::clone(&shared))?;
+    self::ui::install(lua, &api, Arc::clone(&shared))?;
     self::log::install(lua, &api, shared)?;
 
     lua.globals().set("api", api)?;

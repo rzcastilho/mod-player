@@ -7,6 +7,11 @@
 
 use std::collections::{BTreeSet, HashSet};
 
+use modplayer_capability_gateway::manifest::PluginIdentifier;
+use modplayer_core::actions::{
+    ActionId, ActionLimit, OwnerTier, PluginActionDef, PluginActionId, RowCategory,
+};
+use modplayer_core::plugins::PluginId;
 use modplayer_core::{
     ActionKind, ActionRegistry, BindingError, CATALOG, Chord, ChordParseError, HostAction,
     KEY_NAMES, KeyName, KeymapOverrides, Mods, Platform, Scope, ScopeState, def,
@@ -604,7 +609,7 @@ fn disabled_action_never_conflicts_or_blocks() {
     };
     assert_eq!(
         registry.resolve(equals, &state),
-        Some(HostAction::AddPointMarker)
+        Some(HostAction::AddPointMarker.into())
     );
 }
 
@@ -724,7 +729,7 @@ fn disabled_action_never_resolves() {
     registry.set_enabled(HostAction::TempoStepUp, true);
     assert_eq!(
         registry.resolve(plus, &state),
-        Some(HostAction::TempoStepUp)
+        Some(HostAction::TempoStepUp.into())
     );
 }
 
@@ -833,6 +838,377 @@ proptest! {
         prop_assert!(dropped.is_empty());
         prop_assert_eq!(round_tripped.keybinding_overrides, overrides);
     }
+}
+
+// ---------------------------------------------------------------------
+// T062 (US2, 011-plugin-ui-contributions, contracts/action-registry-
+// plugins.md): plugin actions join the registry, tiered conflicts,
+// dormant persistence, grouped rows.
+// ---------------------------------------------------------------------
+
+fn plugin_identifier(s: &str) -> PluginIdentifier {
+    PluginIdentifier::parse(s).unwrap_or_else(|| unreachable!("{s:?} must be a valid identifier"))
+}
+
+fn plugin_action_id(identifier: &str, name: &str) -> PluginActionId {
+    PluginActionId {
+        plugin: plugin_identifier(identifier),
+        name: name.to_string(),
+    }
+}
+
+/// A minimal, valid `PluginActionDef` for `id`, owned by `owner` at
+/// `tier`, with `default` (a chord literal, or `None` for "ships
+/// unbound").
+fn plugin_def(
+    id: PluginActionId,
+    owner: PluginId,
+    tier: OwnerTier,
+    default: Option<&str>,
+) -> PluginActionDef {
+    PluginActionDef {
+        id,
+        owner,
+        tier,
+        name: "Fixture".to_string(),
+        label: "Take over".to_string(),
+        kind: ActionKind::Trigger,
+        repeats_while_held: false,
+        default_binding: default.map(chord),
+    }
+}
+
+#[test]
+fn plugin_action_id_parse_roundtrip() {
+    let id = plugin_action_id("org.modplayer.fixture.ui-shortcuts", "take_over");
+    let s = id.id();
+    assert_eq!(s, "org.modplayer.fixture.ui-shortcuts.take_over");
+    assert_eq!(PluginActionId::parse(&s), Some(id));
+}
+
+#[test]
+fn plugin_action_id_rejects_bad_name() {
+    assert_eq!(
+        PluginActionId::parse("org.modplayer.fixture.ui-shortcuts.Take"),
+        None,
+        "uppercase name"
+    );
+    assert_eq!(
+        PluginActionId::parse("org.modplayer.fixture.ui-shortcuts.1take"),
+        None,
+        "name starting with a digit"
+    );
+    assert_eq!(
+        PluginActionId::parse("host.markers.add_point"),
+        None,
+        "host. namespace is reserved for HostAction"
+    );
+    assert_eq!(PluginActionId::parse("host.thing"), None);
+    assert_eq!(PluginActionId::parse("noplugin"), None, "no '.' at all");
+}
+
+#[test]
+fn host_beats_bundled_on_same_chord() {
+    // host.loop.toggle ships bound to "L" (defaults_match_spec_table);
+    // a bundled plugin action also defaulting to "L" must be flagged,
+    // never the host's (SC-002).
+    let mut registry = ActionRegistry::new(KeymapOverrides::default());
+    let id = plugin_action_id("org.modplayer.fixture.ui-shortcuts", "take_over");
+    registry
+        .register_plugin_action(plugin_def(
+            id.clone(),
+            PluginId(0),
+            OwnerTier::Bundled,
+            Some("L"),
+        ))
+        .unwrap_or_else(|_| unreachable!());
+
+    let l = chord("L");
+    assert!(
+        !registry.is_conflicting(HostAction::ToggleLoop, l),
+        "the host binding must never be flagged"
+    );
+    assert!(registry.is_conflicting(ActionId::Plugin(id.clone()), l));
+
+    let state = ScopeState {
+        now_playing_shown: true,
+        marker_focused: false,
+    };
+    assert_eq!(
+        registry.resolve(l, &state),
+        Some(HostAction::ToggleLoop.into())
+    );
+}
+
+#[test]
+fn two_bundled_both_flagged() {
+    // EC-6.8: two same-tier (bundled) plugin actions colliding flags
+    // both, exactly like two host actions colliding.
+    let mut registry = ActionRegistry::new(KeymapOverrides::default());
+    let a = plugin_action_id("org.modplayer.fixture.ui-panel", "focus_me");
+    let b = plugin_action_id("org.modplayer.fixture.ui-shortcuts", "nudge");
+    registry
+        .register_plugin_action(plugin_def(
+            a.clone(),
+            PluginId(0),
+            OwnerTier::Bundled,
+            Some("Shift+K"),
+        ))
+        .unwrap_or_else(|_| unreachable!());
+    registry
+        .register_plugin_action(plugin_def(
+            b.clone(),
+            PluginId(1),
+            OwnerTier::Bundled,
+            Some("Shift+K"),
+        ))
+        .unwrap_or_else(|_| unreachable!());
+
+    let shift_k = chord("Shift+K");
+    assert!(registry.is_conflicting(ActionId::Plugin(a), shift_k));
+    assert!(registry.is_conflicting(ActionId::Plugin(b), shift_k));
+    let state = ScopeState {
+        now_playing_shown: true,
+        marker_focused: false,
+    };
+    assert_eq!(registry.resolve(shift_k, &state), None);
+}
+
+#[test]
+fn host_vs_host_unchanged() {
+    // 007's own same-tier tie is untouched by the tiered rule (both host
+    // actions are OwnerTier::Host, so `top_count == 2` flags both).
+    let mut registry = ActionRegistry::new(KeymapOverrides::default());
+    let space = chord("Space");
+    registry
+        .add_binding(HostAction::SetCue(cue(1)), space)
+        .unwrap_or_else(|_| unreachable!());
+    assert!(registry.is_conflicting(HostAction::TogglePlayPause, space));
+    assert!(registry.is_conflicting(HostAction::SetCue(cue(1)), space));
+    let state = ScopeState {
+        now_playing_shown: true,
+        marker_focused: false,
+    };
+    assert_eq!(registry.resolve(space, &state), None);
+}
+
+#[test]
+fn disabled_plugin_action_excluded_from_conflicts() {
+    let mut registry = ActionRegistry::new(KeymapOverrides::default());
+    let id = plugin_action_id("org.modplayer.fixture.ui-shortcuts", "take_over");
+    registry
+        .register_plugin_action(plugin_def(
+            id.clone(),
+            PluginId(0),
+            OwnerTier::Bundled,
+            Some("L"),
+        ))
+        .unwrap_or_else(|_| unreachable!());
+    registry.set_plugin_enabled(PluginId(0), false);
+
+    let l = chord("L");
+    assert!(!registry.is_conflicting(HostAction::ToggleLoop, l));
+    assert!(!registry.is_conflicting(ActionId::Plugin(id), l));
+    let state = ScopeState {
+        now_playing_shown: true,
+        marker_focused: false,
+    };
+    assert_eq!(
+        registry.resolve(l, &state),
+        Some(HostAction::ToggleLoop.into())
+    );
+}
+
+#[test]
+fn reenable_reevaluates_conflicts() {
+    let mut registry = ActionRegistry::new(KeymapOverrides::default());
+    let id = plugin_action_id("org.modplayer.fixture.ui-shortcuts", "take_over");
+    registry
+        .register_plugin_action(plugin_def(
+            id.clone(),
+            PluginId(0),
+            OwnerTier::Bundled,
+            Some("L"),
+        ))
+        .unwrap_or_else(|_| unreachable!());
+    registry.set_plugin_enabled(PluginId(0), false);
+    registry.set_plugin_enabled(PluginId(0), true);
+
+    let l = chord("L");
+    assert!(!registry.is_conflicting(HostAction::ToggleLoop, l));
+    assert!(registry.is_conflicting(ActionId::Plugin(id), l));
+}
+
+#[test]
+fn sixty_fifth_action_refused() {
+    let mut registry = ActionRegistry::new(KeymapOverrides::default());
+    for i in 0..64 {
+        let id = plugin_action_id("org.modplayer.fixture.ui-shortcuts", &format!("a{i}"));
+        registry
+            .register_plugin_action(plugin_def(id, PluginId(0), OwnerTier::Bundled, None))
+            .unwrap_or_else(|_| unreachable!());
+    }
+    let id65 = plugin_action_id("org.modplayer.fixture.ui-shortcuts", "a64");
+    let err =
+        registry.register_plugin_action(plugin_def(id65, PluginId(0), OwnerTier::Bundled, None));
+    assert_eq!(err, Err(ActionLimit));
+}
+
+#[test]
+fn reregister_keeps_override() {
+    let mut registry = ActionRegistry::new(KeymapOverrides::default());
+    let id = plugin_action_id("org.modplayer.fixture.ui-shortcuts", "take_over");
+    registry
+        .register_plugin_action(plugin_def(
+            id.clone(),
+            PluginId(0),
+            OwnerTier::Bundled,
+            Some("L"),
+        ))
+        .unwrap_or_else(|_| unreachable!());
+    registry
+        .add_binding(ActionId::Plugin(id.clone()), chord("K"))
+        .unwrap_or_else(|_| unreachable!());
+    assert_eq!(registry.bindings(ActionId::Plugin(id.clone())).len(), 2);
+
+    let mut redef = plugin_def(id.clone(), PluginId(0), OwnerTier::Bundled, Some("M"));
+    redef.label = "Take Over v2".to_string();
+    registry
+        .register_plugin_action(redef)
+        .unwrap_or_else(|_| unreachable!());
+
+    let bindings = registry.bindings(ActionId::Plugin(id));
+    assert!(
+        bindings.contains(&chord("L")) && bindings.contains(&chord("K")),
+        "user override must survive re-register: {bindings:?}"
+    );
+}
+
+#[test]
+fn rejected_default_registers_unbound() {
+    use modplayer_core::actions::capture_would_reject;
+    assert!(capture_would_reject(&chord("Tab")));
+    assert!(capture_would_reject(&chord("Shift+Tab")));
+    assert!(capture_would_reject(&chord("Escape")));
+    assert!(capture_would_reject(&chord("ShiftLeft")));
+    assert!(!capture_would_reject(&chord("L")));
+
+    // The rejected-default -> `None` conversion is `plugins::apply`'s own
+    // job (G10); proven here at the registry's own level: a `None`
+    // default registers successfully, just unbound.
+    let mut registry = ActionRegistry::new(KeymapOverrides::default());
+    let id = plugin_action_id("org.modplayer.fixture.ui-shortcuts", "tab_bound");
+    registry
+        .register_plugin_action(plugin_def(
+            id.clone(),
+            PluginId(0),
+            OwnerTier::Bundled,
+            None,
+        ))
+        .unwrap_or_else(|_| unreachable!());
+    assert!(registry.bindings(ActionId::Plugin(id)).is_empty());
+}
+
+#[test]
+fn dormant_override_adopted_on_register() {
+    let mut overrides = KeymapOverrides::default();
+    let id = plugin_action_id("org.modplayer.fixture.ui-shortcuts", "take_over");
+    overrides.set_dormant(id.id(), vec![chord("K")]);
+
+    let mut registry = ActionRegistry::new(overrides);
+    registry
+        .register_plugin_action(plugin_def(
+            id.clone(),
+            PluginId(0),
+            OwnerTier::Bundled,
+            Some("L"),
+        ))
+        .unwrap_or_else(|_| unreachable!());
+
+    assert_eq!(registry.bindings(ActionId::Plugin(id)), &[chord("K")]);
+}
+
+#[test]
+fn dormant_parked_on_unregister() {
+    let mut registry = ActionRegistry::new(KeymapOverrides::default());
+    let id = plugin_action_id("org.modplayer.fixture.ui-shortcuts", "take_over");
+    registry
+        .register_plugin_action(plugin_def(
+            id.clone(),
+            PluginId(0),
+            OwnerTier::Bundled,
+            Some("L"),
+        ))
+        .unwrap_or_else(|_| unreachable!());
+    registry
+        .add_binding(ActionId::Plugin(id.clone()), chord("K"))
+        .unwrap_or_else(|_| unreachable!());
+
+    registry.unregister_plugin_actions(PluginId(0));
+    assert!(registry.bindings(ActionId::Plugin(id.clone())).is_empty());
+
+    registry
+        .register_plugin_action(plugin_def(
+            id.clone(),
+            PluginId(0),
+            OwnerTier::Bundled,
+            Some("L"),
+        ))
+        .unwrap_or_else(|_| unreachable!());
+    let bindings = registry.bindings(ActionId::Plugin(id));
+    assert!(bindings.contains(&chord("L")) && bindings.contains(&chord("K")));
+}
+
+#[test]
+fn rows_group_plugins_after_host() {
+    let mut registry = ActionRegistry::new(KeymapOverrides::default());
+    let id = plugin_action_id("org.modplayer.fixture.ui-shortcuts", "take_over");
+    registry
+        .register_plugin_action(plugin_def(
+            id.clone(),
+            PluginId(0),
+            OwnerTier::Bundled,
+            Some("Primary+Shift+Z"),
+        ))
+        .unwrap_or_else(|_| unreachable!());
+
+    let rows: Vec<_> = registry.rows().collect();
+    assert_eq!(rows.len(), 47, "46 host rows + 1 plugin row");
+    for (i, row) in rows.iter().take(46).enumerate() {
+        assert_eq!(row.id, ActionId::Host(HostAction::ALL[i]));
+    }
+    assert_eq!(rows[46].id, ActionId::Plugin(id));
+    assert!(matches!(rows[46].category, RowCategory::Plugin { .. }));
+}
+
+#[test]
+fn is_invocable_gate() {
+    let mut registry = ActionRegistry::new(KeymapOverrides::default());
+    let id = plugin_action_id("org.modplayer.fixture.ui-shortcuts", "take_over");
+    registry
+        .register_plugin_action(plugin_def(
+            id.clone(),
+            PluginId(0),
+            OwnerTier::Bundled,
+            Some("L"),
+        ))
+        .unwrap_or_else(|_| unreachable!());
+    let action = ActionId::Plugin(id);
+
+    // Flagged (collides with host's L) -> not invocable.
+    assert!(!registry.is_invocable(&action));
+    assert!(registry.is_invocable(&ActionId::Host(HostAction::ToggleLoop)));
+
+    // Rebind away from the conflict -> invocable.
+    registry.remove_binding(action.clone(), chord("L"));
+    registry
+        .add_binding(action.clone(), chord("K"))
+        .unwrap_or_else(|_| unreachable!());
+    assert!(registry.is_invocable(&action));
+
+    // Owning plugin disabled -> not invocable, regardless of bindings.
+    registry.set_plugin_enabled(PluginId(0), false);
+    assert!(!registry.is_invocable(&action));
 }
 
 #[test]

@@ -64,6 +64,15 @@ impl PluginStatePaths {
             .join("plugin.json")
     }
 
+    /// `<root>/<hex(identifier)>/settings.json` (011-plugin-ui-
+    /// contributions, R5): the host-written `Scope::Settings` file.
+    #[must_use]
+    pub fn settings_file(&self, identifier: &str) -> PathBuf {
+        self.root
+            .join(encode_identifier(identifier))
+            .join("settings.json")
+    }
+
     /// `<root>/<hex(identifier)>/tracks/<hex(track)>.json`.
     #[must_use]
     pub fn track_file(&self, identifier: &str, track_id: &str) -> PathBuf {

@@ -28,6 +28,11 @@ pub enum Scope {
     /// Scoped to the current track; cleared on sign-out and absent with
     /// no current track (`no_track`).
     Track,
+    /// 011-plugin-ui-contributions (R5, FR-018): a plugin's settings
+    /// page values. Host-written only (`Control::SettingsWrite`) —
+    /// never installed as a Lua `state.*` scope, so it is unreachable
+    /// from script.
+    Settings,
 }
 
 /// A failure loading a persisted state file — distinct from [`Refusal`]
@@ -67,9 +72,14 @@ pub struct PluginStateEntry {
 pub struct PluginStateStore {
     plugin: BTreeMap<String, serde_json::Value>,
     track: Option<(String, BTreeMap<String, serde_json::Value>)>,
+    /// 011-plugin-ui-contributions (R5): the plugin's settings page
+    /// values, host-written only — counted toward [`STORAGE_CAP`] like
+    /// every other scope.
+    settings: BTreeMap<String, serde_json::Value>,
     used_bytes: usize,
     plugin_dirty: bool,
     track_dirty: bool,
+    settings_dirty: bool,
 }
 
 impl PluginStateStore {
@@ -90,6 +100,9 @@ impl PluginStateStore {
                 total += entry_size(k, v);
             }
         }
+        for (k, v) in &self.settings {
+            total += entry_size(k, v);
+        }
         self.used_bytes = total;
     }
 
@@ -97,6 +110,7 @@ impl PluginStateStore {
         match scope {
             Scope::Plugin => Some(&self.plugin),
             Scope::Track => self.track.as_ref().map(|(_, m)| m),
+            Scope::Settings => Some(&self.settings),
         }
     }
 
@@ -104,6 +118,7 @@ impl PluginStateStore {
         match scope {
             Scope::Plugin => Some(&mut self.plugin),
             Scope::Track => self.track.as_mut().map(|(_, m)| m),
+            Scope::Settings => Some(&mut self.settings),
         }
     }
 
@@ -119,7 +134,7 @@ impl PluginStateStore {
     #[must_use]
     pub fn scope_available(&self, scope: Scope) -> bool {
         match scope {
-            Scope::Plugin => true,
+            Scope::Plugin | Scope::Settings => true,
             Scope::Track => self.track.is_some(),
         }
     }
@@ -185,6 +200,7 @@ impl PluginStateStore {
         match scope {
             Scope::Plugin => self.plugin_dirty = true,
             Scope::Track => self.track_dirty = true,
+            Scope::Settings => self.settings_dirty = true,
         }
         Ok(())
     }
@@ -203,6 +219,7 @@ impl PluginStateStore {
             match scope {
                 Scope::Plugin => self.plugin_dirty = true,
                 Scope::Track => self.track_dirty = true,
+                Scope::Settings => self.settings_dirty = true,
             }
         }
     }
@@ -212,6 +229,7 @@ impl PluginStateStore {
         match scope {
             Scope::Plugin => self.plugin_dirty,
             Scope::Track => self.track_dirty,
+            Scope::Settings => self.settings_dirty,
         }
     }
 
@@ -219,6 +237,7 @@ impl PluginStateStore {
         match scope {
             Scope::Plugin => self.plugin_dirty = false,
             Scope::Track => self.track_dirty = false,
+            Scope::Settings => self.settings_dirty = false,
         }
     }
 
@@ -231,6 +250,25 @@ impl PluginStateStore {
         self.plugin_dirty = false;
         self.recompute_used_bytes();
         Ok(())
+    }
+
+    /// R5: load the `Settings` scope from a persisted `settings.json`'s
+    /// bytes (bad bytes are treated as an empty scope, mirroring
+    /// [`Self::load_plugin`]).
+    pub fn load_settings(&mut self, bytes: &[u8]) -> Result<(), StoreError> {
+        let file: ScopeFile = serde_json::from_slice(bytes).map_err(|_| StoreError::Unreadable)?;
+        self.settings = file.entries;
+        self.settings_dirty = false;
+        self.recompute_used_bytes();
+        Ok(())
+    }
+
+    /// The `Settings` scope's current values (research R5: handed back to
+    /// core inside the `register_settings` RPC so it can render the page
+    /// without a second round trip).
+    #[must_use]
+    pub fn settings_snapshot(&self) -> BTreeMap<String, serde_json::Value> {
+        self.settings.clone()
     }
 
     /// RT11: load `track_id`'s per-track scope from `bytes`, replacing

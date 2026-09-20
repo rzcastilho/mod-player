@@ -27,9 +27,9 @@ base64 = "0.22"
 getrandom = "0.3"
 time = "0.3"
 # modplayer-ui only (004-search-and-library-browse, research R13): decode
-# artwork fetched from the public CDN. No default features; JPEG only,
-# matching the CDN's actual artwork format.
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+# artwork fetched from the public CDN. JPEG for CDN artwork; PNG for
+# plugin-provided icons/glyphs (011-plugin-ui-contributions, research R11).
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 # Dev-only: Constitution VIII state-serialization proptests (modplayer-account).
 proptest = "1"
 # Receiver crate only (modplayer-audio-source-connect): Connect protocol

@@ -15,11 +15,12 @@ use mlua::{LuaSerdeExt, Table, Value};
 use modplayer_capability_gateway::api::Permission;
 use modplayer_capability_gateway::budgets::Budgets;
 use modplayer_capability_gateway::event::{
-    HostEvent, LevelInfo, PlayState, TrackInfo, UnloadReason,
+    ActionSource, HostEvent, LevelInfo, PlayState, TrackInfo, UnloadReason,
 };
 use modplayer_capability_gateway::focus::PluginId;
 use modplayer_capability_gateway::gateway::Gateway;
 use modplayer_capability_gateway::state::{PluginStateStore, Scope, WriteJob};
+use modplayer_capability_gateway::ui::WidgetValue;
 
 use crate::bindings::{self, SharedHandle, lock};
 use crate::budget::BudgetState;
@@ -89,6 +90,14 @@ fn run_inner(
     {
         let _ = store.load_plugin(&bytes);
     }
+    // 011-plugin-ui-contributions (R5): `settings.json` loads the same way
+    // as `plugin.json` — a plugin without a settings page yet, or with no
+    // file on disk, just starts with an empty `Scope::Settings`.
+    if let Some(paths) = &deps.paths
+        && let Ok(bytes) = std::fs::read(paths.settings_file(&identifier))
+    {
+        let _ = store.load_settings(&bytes);
+    }
 
     let gateway = Gateway::new(plugin, grants, focus);
     let observes_playback = gateway.grants().holds(Permission::PlaybackObserve);
@@ -114,6 +123,8 @@ fn run_inner(
         ready: false,
         last_seen_generation: initial_generation,
         last_seen_position_epoch: initial_position_epoch,
+        settings_schema: None,
+        in_interaction_handler: false,
     }));
 
     let created_at = Instant::now();
@@ -170,6 +181,45 @@ fn run_inner(
             Ok(Inbound::Control(Control::Unloading { reason })) => {
                 run_unloading(&ctx, &shared, &budget, &budgets, &events, plugin, reason);
                 break 'scheduler;
+            }
+            Ok(Inbound::Control(Control::SettingsWrite { changes })) => {
+                // R5: the store write always applies (host-initiated, not
+                // gated on readiness); `settings_changed` only fires once
+                // the plugin is ready to run a handler at all — the same
+                // rule every other `Inbound::Event` already follows.
+                {
+                    let mut guard = lock(&shared);
+                    for (key, value) in &changes {
+                        let _ = guard.store.set(Scope::Settings, key, value.clone());
+                    }
+                    guard
+                        .budget
+                        .gauges
+                        .set_storage_used_bytes(guard.store.used_bytes());
+                }
+                if is_ready
+                    && let Some(cause) = handle_event(
+                        &ctx,
+                        &shared,
+                        &budget,
+                        &budgets,
+                        &events,
+                        plugin,
+                        HostEvent::SettingsChanged { changes },
+                    )
+                {
+                    let _ = events.send((plugin, RuntimeEvent::Suspended { cause }));
+                    run_unloading(
+                        &ctx,
+                        &shared,
+                        &budget,
+                        &budgets,
+                        &events,
+                        plugin,
+                        UnloadReason::Suspend,
+                    );
+                    break 'scheduler;
+                }
             }
             Ok(Inbound::Control(Control::Probe { name, reply })) => {
                 let value = bindings::call_probe_handler(&ctx.lua, &name)
@@ -437,6 +487,44 @@ fn track_info_to_lua(lua: &mlua::Lua, track: &Option<TrackInfo>) -> mlua::Result
     }
 }
 
+/// A [`WidgetValue`] as the Lua-facing `panel_interaction`/`update_widget`
+/// value shape (contracts/plugin-api-v1.2.md §3.1/§4): a plain
+/// bool/number/string for the scalar kinds, a `{items, selected}` table
+/// for a bulk list replace.
+fn widget_value_to_lua(lua: &mlua::Lua, value: &WidgetValue) -> mlua::Result<Value> {
+    Ok(match value {
+        WidgetValue::Bool(b) => Value::Boolean(*b),
+        WidgetValue::Number(n) => Value::Number(*n),
+        WidgetValue::Text(s) => Value::String(lua.create_string(s)?),
+        WidgetValue::Item(id) => Value::String(lua.create_string(id.as_str())?),
+        WidgetValue::Items { items, selected } => {
+            let table = lua.create_table()?;
+            let list = lua.create_table()?;
+            for (i, item) in items.iter().enumerate() {
+                let row = lua.create_table()?;
+                row.set("id", item.id.as_str())?;
+                row.set("label", item.label.as_str())?;
+                list.set(i + 1, row)?;
+            }
+            table.set("items", list)?;
+            table.set(
+                "selected",
+                selected
+                    .as_ref()
+                    .map(modplayer_capability_gateway::ui::UiId::as_str),
+            )?;
+            Value::Table(table)
+        }
+    })
+}
+
+fn action_source_str(source: ActionSource) -> &'static str {
+    match source {
+        ActionSource::Keyboard => "keyboard",
+        ActionSource::Ui => "ui",
+    }
+}
+
 fn unloading_reason_str(reason: UnloadReason) -> &'static str {
     match reason {
         UnloadReason::Disable => "disable",
@@ -549,6 +637,33 @@ fn event_to_lua(lua: &mlua::Lua, event: &HostEvent) -> mlua::Result<(&'static st
             table.set("holder", bindings::owner_to_string(holder))?;
             Value::Table(table)
         }
+        HostEvent::PanelInteraction {
+            panel,
+            widget,
+            value,
+        } => {
+            let table = lua.create_table()?;
+            table.set("panel", panel.as_str())?;
+            table.set("widget", widget.as_str())?;
+            table.set("value", widget_value_to_lua(lua, value)?)?;
+            Value::Table(table)
+        }
+        HostEvent::ActionInvoked {
+            action,
+            source,
+            value,
+        } => {
+            let table = lua.create_table()?;
+            table.set("action", action.as_str())?;
+            table.set("source", action_source_str(*source))?;
+            table.set("value", *value)?;
+            Value::Table(table)
+        }
+        HostEvent::SettingsChanged { changes } => {
+            let table = lua.create_table()?;
+            table.set("changes", lua.to_value(changes)?)?;
+            Value::Table(table)
+        }
     };
     Ok((name, payload))
 }
@@ -620,6 +735,7 @@ fn flush_scope(guard: &mut MutexGuard<'_, Shared>, scope: Scope, ack: Option<Syn
     };
     let path = match scope {
         Scope::Plugin => paths.plugin_file(&guard.identifier),
+        Scope::Settings => paths.settings_file(&guard.identifier),
         Scope::Track => match guard.store.current_track() {
             Some(track_id) => paths.track_file(&guard.identifier, track_id),
             None => {
@@ -648,8 +764,19 @@ fn handle_event(
         restore_track_state(shared, track, budgets, events, plugin);
         lock(shared).subscriptions.reset_position_edge();
     }
+    // R16/FR-026: `request_focus()` called synchronously from inside one
+    // of these two handlers counts as a user interaction — the flag is a
+    // plain bool on this plugin's own thread, set only for the duration
+    // of the handler call and reset whether it returns or aborts.
+    let is_interaction = matches!(
+        event,
+        HostEvent::PanelInteraction { .. } | HostEvent::ActionInvoked { .. }
+    );
     let (name, payload) = event_to_lua(&ctx.lua, &event).ok()?;
-    run_and_account(
+    if is_interaction {
+        lock(shared).in_interaction_handler = true;
+    }
+    let result = run_and_account(
         ctx,
         budget,
         budgets.handler,
@@ -659,7 +786,11 @@ fn handle_event(
         plugin,
         name,
         payload,
-    )
+    );
+    if is_interaction {
+        lock(shared).in_interaction_handler = false;
+    }
+    result
 }
 
 /// RT8: run the `unloading` handler (fire-and-forget — the plugin is
@@ -693,7 +824,7 @@ fn run_unloading(
     let mut waiters = Vec::new();
     {
         let mut guard = lock(shared);
-        for scope in [Scope::Plugin, Scope::Track] {
+        for scope in [Scope::Plugin, Scope::Track, Scope::Settings] {
             if guard.store.is_dirty(scope) {
                 let (tx, rx) = std::sync::mpsc::sync_channel(1);
                 flush_scope(&mut guard, scope, Some(tx));

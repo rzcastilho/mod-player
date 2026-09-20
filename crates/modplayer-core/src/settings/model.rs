@@ -21,6 +21,50 @@ use time::format_description::well_known::Rfc3339;
 use crate::actions::{Chord, HostAction, KeymapOverrides};
 use crate::plugins::FocusPolicy;
 
+/// 011-plugin-ui-contributions (FR-005): a panel's chosen placement.
+/// `Docked` is the default a panel opens in every session (the persisted
+/// value is only ever written once the user floats/re-docks it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PanelPlacement {
+    #[default]
+    Docked,
+    Floated,
+}
+
+impl PanelPlacement {
+    #[must_use]
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            PanelPlacement::Docked => "docked",
+            PanelPlacement::Floated => "floated",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "docked" => Some(PanelPlacement::Docked),
+            "floated" => Some(PanelPlacement::Floated),
+            _ => None,
+        }
+    }
+}
+
+/// 011-plugin-ui-contributions (FR-005/FR-006, data-model.md §5.1): one
+/// `[plugin_panels."<identifier>/<panel-id>"]` entry — placement, a
+/// floated geometry (only meaningful while `Floated`; `None` before the
+/// user has ever moved/resized it), and the persisted `disabled` flag
+/// (FR-006, independent of the session-only `closed` state).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct PanelPersisted {
+    pub placement: PanelPlacement,
+    pub x: Option<f32>,
+    pub y: Option<f32>,
+    pub w: Option<f32>,
+    pub h: Option<f32>,
+    pub disabled: bool,
+}
+
 /// Current on-disk schema version (contracts/settings-file.md).
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -83,6 +127,11 @@ pub struct AudioSettings {
     /// policy. The holder and pending queue are session-only and never
     /// persisted (FR-012) — only this enum lives here.
     pub focus_policy: FocusPolicy,
+    /// `[plugin_panels]` (011-plugin-ui-contributions, FR-005/FR-006):
+    /// keyed `"<plugin-identifier>/<panel-id>"`. An entry for a panel not
+    /// currently registered is retained dormant (never dropped on load —
+    /// mirrors 007 FR-013's keybinding-override convention).
+    pub plugin_panels: BTreeMap<String, PanelPersisted>,
     pub schema_version: u32,
 }
 
@@ -102,6 +151,7 @@ impl Default for AudioSettings {
             nudge_step_ms: DEFAULT_NUDGE_STEP_MS,
             keybinding_overrides: KeymapOverrides::default(),
             focus_policy: FocusPolicy::default(),
+            plugin_panels: BTreeMap::new(),
             schema_version: SCHEMA_VERSION,
         }
     }
@@ -120,7 +170,7 @@ fn clamp_nudge_step_ms(raw: i64) -> u16 {
 /// A field that fell back to its default because the file held an
 /// unrecognised enum string (contracts/settings-file.md: "Unknown enum
 /// string").
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InvalidField {
     BufferPreset,
     Theme,
@@ -131,6 +181,10 @@ pub enum InvalidField {
     /// (010-transport-focus, research R5) — falls back to
     /// `FocusPolicy::default()` (`AutoOnInteraction`).
     FocusPolicy,
+    /// 011-plugin-ui-contributions (FR-005): a `[plugin_panels.*]` entry
+    /// held an unrecognised `placement` string — that one entry is
+    /// dropped (never the whole table).
+    PluginPanel(String),
 }
 
 impl InvalidField {
@@ -141,6 +195,7 @@ impl InvalidField {
             InvalidField::Theme => "appearance.theme",
             InvalidField::DeviceName => "playback.device_name",
             InvalidField::FocusPolicy => "transport.focus_policy",
+            InvalidField::PluginPanel(_) => "plugin_panels",
         }
     }
 }
@@ -227,6 +282,12 @@ pub struct RawSettings {
     /// — only that entry is dropped, in `into_settings`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub keybindings: BTreeMap<String, toml::Value>,
+    /// `[plugin_panels]` (011-plugin-ui-contributions, FR-005/FR-006):
+    /// `"<identifier>/<panel-id>"` -> its persisted placement/geometry/
+    /// disabled flag. An unparseable `placement` string drops only that
+    /// one entry (`InvalidField::PluginPanel`), never the whole table.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub plugin_panels: BTreeMap<String, RawPanel>,
 }
 
 fn default_schema_version() -> u32 {
@@ -244,8 +305,31 @@ impl Default for RawSettings {
             markers: RawMarkers::default(),
             transport: RawTransport::default(),
             keybindings: BTreeMap::new(),
+            plugin_panels: BTreeMap::new(),
         }
     }
+}
+
+/// One `[plugin_panels."<key>"]` entry's wire shape (011-plugin-ui-
+/// contributions, data-model.md §5.1).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawPanel {
+    #[serde(default = "default_panel_placement")]
+    pub placement: String,
+    #[serde(default)]
+    pub x: Option<f32>,
+    #[serde(default)]
+    pub y: Option<f32>,
+    #[serde(default)]
+    pub w: Option<f32>,
+    #[serde(default)]
+    pub h: Option<f32>,
+    #[serde(default)]
+    pub disabled: bool,
+}
+
+fn default_panel_placement() -> String {
+    PanelPlacement::default().wire_name().to_string()
 }
 
 /// The `[playback]` section (contracts/transport-and-queue.md §5): an
@@ -452,17 +536,39 @@ impl RawSettings {
             transport: RawTransport {
                 focus_policy: settings.focus_policy.wire_name().to_string(),
             },
-            keybindings: settings
-                .keybinding_overrides
+            keybindings: {
+                // 011-plugin-ui-contributions (contracts/action-registry-
+                // plugins.md K1): plugin overrides and dormant entries
+                // share the same `[keybindings]` table as host overrides,
+                // keyed by their own (non-`host.`) id string.
+                let mut map: BTreeMap<String, toml::Value> = settings
+                    .keybinding_overrides
+                    .iter()
+                    .map(|(action, chords)| (action.id().to_string(), encode_chords(chords)))
+                    .collect();
+                for (id, chords) in settings.keybinding_overrides.plugin_iter() {
+                    map.insert(id.id(), encode_chords(chords));
+                }
+                for (id, chords) in settings.keybinding_overrides.dormant_iter() {
+                    map.insert(id.clone(), encode_chords(chords));
+                }
+                map
+            },
+            plugin_panels: settings
+                .plugin_panels
                 .iter()
-                .map(|(action, chords)| {
-                    let value = toml::Value::Array(
-                        chords
-                            .iter()
-                            .map(|c| toml::Value::String(c.encode()))
-                            .collect(),
-                    );
-                    (action.id().to_string(), value)
+                .map(|(key, panel)| {
+                    (
+                        key.clone(),
+                        RawPanel {
+                            placement: panel.placement.wire_name().to_string(),
+                            x: panel.x,
+                            y: panel.y,
+                            w: panel.w,
+                            h: panel.h,
+                            disabled: panel.disabled,
+                        },
+                    )
                 })
                 .collect(),
         }
@@ -483,12 +589,26 @@ impl RawSettings {
         let mut dropped_keybindings = Vec::new();
         let mut keybinding_overrides = KeymapOverrides::default();
         for (id, value) in &self.keybindings {
-            match decode_keybinding_entry(value) {
-                Some(chords) => match HostAction::parse(id) {
-                    Some(action) => keybinding_overrides.set(action, chords),
+            if id.starts_with("host.") {
+                match decode_keybinding_entry(value) {
+                    Some(chords) => match HostAction::parse(id) {
+                        Some(action) => keybinding_overrides.set(action, chords),
+                        None => dropped_keybindings.push(id.clone()),
+                    },
                     None => dropped_keybindings.push(id.clone()),
-                },
-                None => dropped_keybindings.push(id.clone()),
+                }
+            } else {
+                // 011-plugin-ui-contributions (FR-010a, contracts/
+                // action-registry-plugins.md K1/K2): a non-`host.`-
+                // namespaced id whose value decodes is retained dormant,
+                // re-serialised verbatim, and never raises `keybindings-
+                // invalid-entries` — even when it is not (or not yet) a
+                // real, registered plugin action id. An undecodable value
+                // is silently dropped: only `host.`-namespaced unknowns/
+                // unparseable values are reported (K2).
+                if let Some(chords) = decode_keybinding_entry(value) {
+                    keybinding_overrides.set_dormant(id.clone(), chords);
+                }
             }
         }
 
@@ -562,6 +682,32 @@ impl RawSettings {
             .connect_device_id
             .filter(|id| is_valid_connect_device_id(id));
 
+        // 011-plugin-ui-contributions (FR-005): an entry whose `placement`
+        // fails to parse drops that one entry (with a warning), never the
+        // whole `[plugin_panels]` table — mirrors `[keybindings]`'s own
+        // per-entry isolation above, but reported through `invalid`
+        // (`InvalidField`) rather than a separate dropped-list, since
+        // there is exactly one way a `[plugin_panels]` entry goes wrong.
+        let mut plugin_panels = BTreeMap::new();
+        for (key, raw) in &self.plugin_panels {
+            match PanelPlacement::parse(&raw.placement) {
+                Some(placement) => {
+                    plugin_panels.insert(
+                        key.clone(),
+                        PanelPersisted {
+                            placement,
+                            x: raw.x,
+                            y: raw.y,
+                            w: raw.w,
+                            h: raw.h,
+                            disabled: raw.disabled,
+                        },
+                    );
+                }
+                None => invalid.push(InvalidField::PluginPanel(key.clone())),
+            }
+        }
+
         let settings = AudioSettings {
             output_device,
             device_confirmed: self.audio.device_confirmed,
@@ -579,11 +725,26 @@ impl RawSettings {
             nudge_step_ms: clamp_nudge_step_ms(self.markers.nudge_step_ms),
             keybinding_overrides,
             focus_policy,
+            plugin_panels,
             schema_version: self.schema_version,
         };
 
         (settings, invalid, dropped_keybindings)
     }
+}
+
+/// The wire shape of one `[keybindings]` entry's value: an array of
+/// [`Chord::encode`] strings (007, contracts/keymap-settings.md), shared
+/// by host overrides, plugin overrides and dormant entries alike
+/// (011-plugin-ui-contributions, contracts/action-registry-plugins.md
+/// K1).
+fn encode_chords(chords: &[Chord]) -> toml::Value {
+    toml::Value::Array(
+        chords
+            .iter()
+            .map(|c| toml::Value::String(c.encode()))
+            .collect(),
+    )
 }
 
 /// Decode one `[keybindings]` entry's value into a deduplicated chord
@@ -697,6 +858,52 @@ mod tests {
         raw.disclosure.acknowledged_at = Some("2026-09-15T13:00:00Z".to_string());
         let (settings, _invalid, _dropped) = raw.into_settings();
         assert_eq!(settings.disclosure, None);
+    }
+
+    #[test]
+    fn plugin_panels_round_trip() {
+        let mut settings = AudioSettings::default();
+        settings.plugin_panels.insert(
+            "org.modplayer.fixture.ui-panel/main".to_string(),
+            PanelPersisted {
+                placement: PanelPlacement::Floated,
+                x: Some(12.0),
+                y: Some(34.0),
+                w: Some(320.0),
+                h: Some(240.0),
+                disabled: true,
+            },
+        );
+        let raw = RawSettings::from_settings(&settings);
+        let (round_tripped, invalid, dropped) = raw.into_settings();
+        assert!(invalid.is_empty());
+        assert!(dropped.is_empty());
+        assert_eq!(round_tripped, settings);
+    }
+
+    #[test]
+    fn plugin_panels_bad_placement_dropped() {
+        let mut raw = RawSettings::default();
+        raw.plugin_panels.insert(
+            "org.modplayer.fixture.ui-panel/main".to_string(),
+            RawPanel {
+                placement: "sideways".to_string(),
+                x: None,
+                y: None,
+                w: None,
+                h: None,
+                disabled: false,
+            },
+        );
+        let (settings, invalid, dropped) = raw.into_settings();
+        assert!(dropped.is_empty());
+        assert!(settings.plugin_panels.is_empty());
+        assert_eq!(
+            invalid,
+            vec![InvalidField::PluginPanel(
+                "org.modplayer.fixture.ui-panel/main".to_string()
+            )]
+        );
     }
 
     #[test]

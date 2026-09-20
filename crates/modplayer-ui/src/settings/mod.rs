@@ -14,6 +14,7 @@ pub mod audio;
 pub mod controls;
 pub mod developer;
 pub mod language;
+pub mod plugins;
 
 pub mod playback;
 
@@ -22,7 +23,7 @@ use modplayer_account::{AccountEvent, AccountService};
 use modplayer_audio_io::OutputBackend;
 use modplayer_audio_source::SourceHost;
 use modplayer_core::settings_registry::{self, SettingsCategory};
-use modplayer_core::{AudioSettings, PlaybackController, tr};
+use modplayer_core::{AudioSettings, PlaybackController, PluginId, tr};
 
 use crate::actions::{self, Claim};
 use crate::device_check::DeviceCheckScreen;
@@ -33,19 +34,25 @@ const SEARCH_BOX_ID: &str = "settings-search-box";
 
 /// UI-only state for the whole Settings screen: the selected category, the
 /// live search query, which descriptor id (if any) a search result asked
-/// to focus this frame, and a cache of the settings fields no controller
-/// shadow state exists for yet (safe-volume, theme — `audio.rs`/
-/// `appearance.rs` read/write them straight through
-/// `PlaybackController::settings_store()` rather than through a controller
-/// setter).
+/// to focus this frame, which plugin-settings field (if any) a plugin
+/// search hit asked to open and focus this frame (US4 T103, contracts/
+/// overlays-settings-notify.md S6 — kept separate from `focus_target`
+/// since a plugin field's id is a plugin-declared `String`, not one of
+/// `settings_registry::DESCRIPTORS`' own `&'static str`s), and a cache of
+/// the settings fields no controller shadow state exists for yet
+/// (safe-volume, theme — `audio.rs`/`appearance.rs` read/write them
+/// straight through `PlaybackController::settings_store()` rather than
+/// through a controller setter).
 pub struct SettingsScreen {
     category: SettingsCategory,
     search_query: String,
     focus_target: Option<&'static str>,
+    plugin_focus: Option<(PluginId, String)>,
     cached_settings: AudioSettings,
     about: AboutScreen,
     playback: playback::PlaybackScreen,
     controls: ControlsScreen,
+    plugins: plugins::PluginsScreen,
 }
 
 impl SettingsScreen {
@@ -57,10 +64,12 @@ impl SettingsScreen {
             category: SettingsCategory::ALL[0],
             search_query: String::new(),
             focus_target: None,
+            plugin_focus: None,
             cached_settings: controller.settings_store().load().settings,
             about: AboutScreen::default(),
             playback: playback::PlaybackScreen::new(controller),
             controls: ControlsScreen::default(),
+            plugins: plugins::PluginsScreen::new(),
         }
     }
 }
@@ -104,6 +113,21 @@ pub fn show<B: OutputBackend, H: SourceHost>(
             if response.clicked() || activated_by_enter {
                 screen.category = descriptor.category;
                 screen.focus_target = Some(descriptor.id);
+            }
+        }
+
+        // US4 T103 (contracts/overlays-settings-notify.md S6): every
+        // visible plugin settings field is searchable too, as its own
+        // "Plugins › <plugin> › <label>" hit alongside the fixed
+        // `DESCRIPTORS` results above.
+        let plugin_views = controller.plugin_settings_views();
+        for hit in settings_registry::search_plugin_settings(&screen.search_query, &plugin_views) {
+            let response = ui.selectable_label(false, hit.path.clone());
+            let activated_by_enter =
+                response.has_focus() && ui.input(|input| input.key_pressed(Key::Enter));
+            if response.clicked() || activated_by_enter {
+                screen.category = SettingsCategory::Plugins;
+                screen.plugin_focus = Some((hit.plugin, hit.field_id));
             }
         }
         ui.separator();
@@ -152,9 +176,13 @@ pub fn show<B: OutputBackend, H: SourceHost>(
             controls::show(ui, controller, &mut screen.controls, focus);
             (None, Vec::new())
         }
-        SettingsCategory::Plugins
-        | SettingsCategory::Offline
-        | SettingsCategory::PrivacyDiagnostics => {
+        SettingsCategory::Plugins => {
+            let plugin_focus = screen.plugin_focus.take();
+            let field_focus = plugin_focus.as_ref().map(|(p, f)| (*p, f.as_str()));
+            plugins::show(ui, controller, &mut screen.plugins, field_focus);
+            (None, Vec::new())
+        }
+        SettingsCategory::Offline | SettingsCategory::PrivacyDiagnostics => {
             ui.label(tr("placeholder-settings-category"));
             (None, Vec::new())
         }

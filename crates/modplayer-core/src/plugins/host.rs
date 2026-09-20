@@ -20,6 +20,7 @@ use modplayer_plugin_runtime::handle::{
     Control, PluginHandle, PluginSnapshot, RpcEnvelope, RuntimeDeps, SpawnConfig,
 };
 
+use crate::actions::ActionRegistry;
 use crate::effects::ChainModel;
 use crate::i18n::tr;
 use crate::markers::{Owner, TrackMarkers};
@@ -31,6 +32,7 @@ use crate::notifications::{
 use super::fanout::FanOut;
 use super::focus::{FocusArbiter, FocusChange, FocusHolder, Vacancy};
 use super::log::PluginLog;
+use super::ui::PluginUi;
 use super::{
     BundledPackage, Lifecycle, PluginId, PluginIdTable, PluginRecord, Source, bundled,
     to_gateway_id,
@@ -46,7 +48,7 @@ const WARNING_DURATION: Duration = Duration::from_secs(5 * 60);
 /// The `plugin-suspended`/`plugin-auto-disabled` `$plugin` argument: the
 /// manifest's `name` when it parsed, else the raw identifier (mirrors
 /// [`record_sort_key`]'s own fallback).
-fn plugin_display_name(record: &PluginRecord) -> String {
+pub(crate) fn plugin_display_name(record: &PluginRecord) -> String {
     record
         .manifest
         .as_ref()
@@ -95,13 +97,21 @@ pub struct PluginHost {
     fan_out: FanOut,
     fixtures_enabled: bool,
     waker: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// 011-plugin-ui-contributions (data-model.md §4.1, Constitution
+    /// III): every plugin's panel/overlay/settings-page UI state, owned
+    /// here alongside every other plugin registry.
+    ui: PluginUi,
 }
 
 /// `plugins/bundled/` + (if `fixtures_enabled`) `plugins/fixtures/`,
 /// parsed into a `PluginRecord` per package (L1). Kept out of
 /// `PluginHost::discover` itself only so it stays easy to unit-test
 /// without constructing a whole host.
-fn build_records(fixtures_enabled: bool, ids: &mut PluginIdTable) -> Vec<PluginRecord> {
+fn build_records(
+    fixtures_enabled: bool,
+    ids: &mut PluginIdTable,
+    log: &mut PluginLog,
+) -> Vec<PluginRecord> {
     let mut packages: Vec<BundledPackage> = bundled::packages();
     if fixtures_enabled {
         packages.extend(bundled::fixtures());
@@ -133,6 +143,15 @@ fn build_records(fixtures_enabled: bool, ids: &mut PluginIdTable) -> Vec<PluginR
                 Err(err) => Lifecycle::Invalid(err.clone()),
             };
             let enabled = manifest.is_ok();
+            // 011-plugin-ui-contributions (FR-014a, research R11, T048):
+            // resolve this package's declared icon/glyphs once, here, at
+            // discovery — never again for the life of the record. A
+            // record whose manifest never validated gets no assets (there
+            // is nothing to resolve against).
+            let assets = manifest
+                .as_ref()
+                .map(|m| super::ui::assets::load(&package, m, log))
+                .unwrap_or_default();
             Some(PluginRecord {
                 id,
                 identifier,
@@ -151,6 +170,7 @@ fn build_records(fixtures_enabled: bool, ids: &mut PluginIdTable) -> Vec<PluginR
                 api_range,
                 budgets: modplayer_capability_gateway::budgets::Budgets::DEFAULT,
                 compatibility_mode: false,
+                assets,
             })
         })
         .collect();
@@ -177,7 +197,8 @@ impl PluginHost {
     #[must_use]
     pub fn discover(fixtures_enabled: bool) -> Self {
         let mut ids = PluginIdTable::new();
-        let records = build_records(fixtures_enabled, &mut ids);
+        let mut log = PluginLog::new();
+        let records = build_records(fixtures_enabled, &mut ids, &mut log);
         let (requests_tx, requests_rx) = std::sync::mpsc::sync_channel(256);
         let (events_tx, events_rx) = std::sync::mpsc::sync_channel(1024);
         Self {
@@ -193,10 +214,11 @@ impl PluginHost {
             events_rx,
             playback: Arc::new(PlaybackSnapshot::new()),
             snapshot: Arc::new(Mutex::new(PluginSnapshot::default())),
-            log: PluginLog::new(),
+            log,
             fan_out: FanOut::new(),
             fixtures_enabled,
             waker: None,
+            ui: PluginUi::new(),
         }
     }
 
@@ -311,6 +333,17 @@ impl PluginHost {
         &self.log
     }
 
+    /// 011-plugin-ui-contributions: a console-warning sink for a caller
+    /// outside this module (`plugins::apply`'s `RegisterAction` handler,
+    /// G10's "console warning" for a rejected default binding;
+    /// `PlaybackController::plugin_panel_interaction`'s D3 "unregistered
+    /// ⇒ inert + console entry") — mirrors `plugins/ui/assets.rs::load`'s
+    /// own `&mut PluginLog` parameter convention rather than adding a
+    /// bespoke method per caller.
+    pub fn plugin_log_mut(&mut self) -> &mut PluginLog {
+        &mut self.log
+    }
+
     #[must_use]
     pub fn playback_snapshot(&self) -> &Arc<PlaybackSnapshot> {
         &self.playback
@@ -323,6 +356,17 @@ impl PluginHost {
 
     pub fn fan_out_mut(&mut self) -> &mut FanOut {
         &mut self.fan_out
+    }
+
+    /// 011-plugin-ui-contributions: every plugin's panel/overlay/
+    /// settings-page state (Constitution III, data-model.md §4.1).
+    #[must_use]
+    pub fn ui(&self) -> &PluginUi {
+        &self.ui
+    }
+
+    pub fn ui_mut(&mut self) -> &mut PluginUi {
+        &mut self.ui
     }
 
     /// The UI's `ctx.request_repaint` (or equivalent): called after every
@@ -444,6 +488,7 @@ impl PluginHost {
         notifications: &mut NotificationCenter,
         chain: &mut ChainModel,
         mut markers: Option<&mut TrackMarkers>,
+        actions: &mut ActionRegistry,
         now: Instant,
     ) {
         let mut to_teardown: Vec<PluginId> = Vec::new();
@@ -466,6 +511,17 @@ impl PluginHost {
                     // §41; ids unchanged, bumps `chain.revision` so
                     // `fan_out_revision_events()` republishes it).
                     chain.readopt(id);
+                    // 011-plugin-ui-contributions (R15, contracts/
+                    // ui-panels.md P5): see `PluginUi::on_ready`'s own doc
+                    // for why this is a no-op for panels today — the
+                    // actual reset happens at the plugin's own next
+                    // registration instead, to avoid a same-`tick()`
+                    // ordering race with the request that would carry it.
+                    self.ui.on_ready(id);
+                    // 011-plugin-ui-contributions (contracts/action-
+                    // registry-plugins.md G11, FR-013): this plugin's
+                    // actions (if any are registered yet) resume firing.
+                    actions.set_plugin_enabled(id, true);
                 }
                 RuntimeEvent::Suspended { cause } => {
                     record.lifecycle = Lifecycle::Suspended { cause };
@@ -538,7 +594,13 @@ impl PluginHost {
             // send here is a harmless no-op (the thread is exiting or
             // gone) — only the host-side focus/markers/chain cleanup
             // matters for a suspension.
-            self.stop(id, UnloadReason::Suspend, markers.as_deref_mut(), chain);
+            self.stop(
+                id,
+                UnloadReason::Suspend,
+                markers.as_deref_mut(),
+                chain,
+                actions,
+            );
         }
         self.wake();
     }
@@ -556,6 +618,7 @@ impl PluginHost {
         reason: UnloadReason,
         markers: Option<&mut TrackMarkers>,
         chain: &mut ChainModel,
+        actions: &mut ActionRegistry,
     ) {
         // 010-transport-focus (research R11, C4): the arbiter is the
         // only decision-maker; `Fault` never emits `focus_revoked` (the
@@ -563,6 +626,20 @@ impl PluginHost {
         // vacancy still refills from the queue.
         let changes = self.arbiter.vacate(id, Vacancy::Fault);
         self.apply_focus_changes(changes);
+        // 011-plugin-ui-contributions (R15, contracts/ui-panels.md P5):
+        // `Suspend` keeps this plugin's panels (rendered as a
+        // placeholder); `Disable`/`Shutdown` removes them outright.
+        self.ui.on_stop(id, reason);
+        // 011-plugin-ui-contributions (contracts/action-registry-
+        // plugins.md G11/G12, FR-013): every reason deactivates this
+        // plugin's actions; `Disable`/`Shutdown` (never `Suspend`, which
+        // keeps them registered-but-inactive so a restart's own `Ready`
+        // simply re-enables them) unregisters them outright, parking any
+        // live override to `dormant`.
+        actions.set_plugin_enabled(id, false);
+        if !matches!(reason, UnloadReason::Suspend) {
+            actions.unregister_plugin_actions(id);
+        }
         if let Some(markers) = markers {
             // `loop_disarmed`/`marker_changed` fan-out for this teardown
             // lands with US2 (T087, `fan_out_revision_events`); the model
@@ -617,6 +694,7 @@ impl PluginHost {
         &mut self,
         mut markers: Option<&mut TrackMarkers>,
         chain: &mut ChainModel,
+        actions: &mut ActionRegistry,
     ) {
         let ids: Vec<PluginId> = self
             .records
@@ -625,7 +703,13 @@ impl PluginHost {
             .map(|r| r.id)
             .collect();
         for id in ids {
-            self.stop(id, UnloadReason::Shutdown, markers.as_deref_mut(), chain);
+            self.stop(
+                id,
+                UnloadReason::Shutdown,
+                markers.as_deref_mut(),
+                chain,
+                actions,
+            );
         }
     }
 

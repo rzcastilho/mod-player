@@ -396,7 +396,11 @@ fn bare_controller_with_track() -> (
 /// `PluginHost::apply_focus_changes` immediately, never leaving a call's
 /// changes un-applied.
 fn request(controller: &mut PlaybackController<FakeBackend, ScriptedHost>, id: PluginId) {
-    let changes = controller.plugins_mut().arbiter_mut().request(id, true);
+    let changes = controller.plugins_mut().arbiter_mut().request(
+        id,
+        true,
+        modplayer_core::plugins::RequestOrigin::Api,
+    );
     controller.plugins_mut().apply_focus_changes(changes);
 }
 

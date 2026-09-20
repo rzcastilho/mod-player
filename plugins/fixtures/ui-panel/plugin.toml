@@ -1,0 +1,26 @@
+identifier  = "org.modplayer.fixture.ui-panel"
+name        = "UI Panel fixture"
+description = "Registers a panel with every widget kind and drives the request_focus-in-handler, hang and throw probes (US1 T059)."
+version     = "1.0.0"
+api         = "1.2"
+author      = "ModPlayer project"
+license     = "MIT OR Apache-2.0"
+source      = "fixture"
+entry       = "main.luau"
+icon        = "icon.png"
+
+[[permissions.required]]
+permission    = "ui.panel"
+justification = "Registers the 'Controls' panel with one of every widget kind (US1 T059)."
+
+[[permissions.required]]
+permission    = "transport.control"
+justification = "The 'take_over' action handler and the timer probe both call request_focus() (R16, FR-026)."
+
+[[permissions.required]]
+permission    = "ui.shortcuts"
+justification = "Registers 'take_over' (its own 'Take Over' button's target, D3) and 'focus_me' (Shift+K, collides with ui-shortcuts.nudge for M6) (US2 T078)."
+
+[[permissions.required]]
+permission    = "ui.notify"
+justification = "The 'Notify ×7' button posts 7 notifications in a row for the manual rate-limit scenario (US5 T114, M9)."

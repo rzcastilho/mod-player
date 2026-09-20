@@ -18,8 +18,26 @@
 //! it and asks the search box (`search_view.rs`, US1, T038/T039) to take
 //! focus, via `focus_search_requested`.
 
-use egui::Ui;
+use egui::{Order, Ui};
 use modplayer_core::tr;
+
+/// 011-plugin-ui-contributions, contracts/ui-panels.md L2: a floated
+/// plugin panel is a plain `Order::Middle` window — the same layer the
+/// notification area's own `Area` uses — so it never floats above a
+/// critical notification by construction. `plugin_panels.rs`'s floated
+/// `Window`s are built with this constant rather than a bare
+/// `egui::Order::Middle` literal, so the ordering *policy* (which layer
+/// a plugin surface may use) stays declared in one place, next to the
+/// section it only ever appears in.
+///
+/// Known caveat (2026-09-20 manual walk, recorded in this feature's
+/// Manual Scenario Log): `app.rs` currently draws the notification
+/// `Area` *before* `CentralPanel`/`now_playing::show`, so within-layer
+/// insertion order still lets a freshly (re)drawn floated panel paint
+/// over a notification this same frame. Fixing that requires reordering
+/// `app.rs`'s own draw calls, which is out of this phase's file scope;
+/// tracked for a follow-up rather than silently left undocumented.
+pub const PLUGIN_FLOATED_WINDOW_ORDER: Order = Order::Middle;
 
 /// The five navigable sections (contracts/ui-surface.md §1), in the fixed
 /// left-rail display order.

@@ -10,7 +10,9 @@
 use std::collections::HashSet;
 
 use modplayer_core::PluginId;
-use modplayer_core::plugins::{FocusArbiter, FocusChange, FocusHolder, FocusPolicy, Vacancy};
+use modplayer_core::plugins::{
+    FocusArbiter, FocusChange, FocusHolder, FocusPolicy, RequestOrigin, Vacancy,
+};
 use proptest::prelude::*;
 
 fn pid(n: u16) -> PluginId {
@@ -21,7 +23,7 @@ fn pid(n: u16) -> PluginId {
 fn manual_never_auto_grants() {
     let mut a = FocusArbiter::new();
     a.set_policy(FocusPolicy::Manual);
-    assert_eq!(a.request(pid(0), true), vec![]);
+    assert_eq!(a.request(pid(0), true, RequestOrigin::Api), vec![]);
     assert_eq!(a.holder(), FocusHolder::Host);
     assert_eq!(a.pending(), &[pid(0)]);
 }
@@ -29,7 +31,7 @@ fn manual_never_auto_grants() {
 #[test]
 fn auto_never_grants_on_request() {
     let mut a = FocusArbiter::new(); // default AutoOnInteraction
-    assert_eq!(a.request(pid(0), true), vec![]);
+    assert_eq!(a.request(pid(0), true, RequestOrigin::Api), vec![]);
     assert_eq!(a.holder(), FocusHolder::Host);
     assert_eq!(a.pending(), &[pid(0)]);
 }
@@ -39,10 +41,10 @@ fn first_wins_grants_first_only() {
     let mut a = FocusArbiter::new();
     a.set_policy(FocusPolicy::FirstRequestWins);
     assert_eq!(
-        a.request(pid(0), true),
+        a.request(pid(0), true, RequestOrigin::Api),
         vec![FocusChange::Granted { plugin: pid(0) }]
     );
-    assert_eq!(a.request(pid(1), true), vec![]);
+    assert_eq!(a.request(pid(1), true, RequestOrigin::Api), vec![]);
     assert_eq!(a.holder(), FocusHolder::Plugin(pid(0)));
     assert_eq!(a.pending(), &[pid(1)]);
 }
@@ -51,8 +53,8 @@ fn first_wins_grants_first_only() {
 fn first_wins_later_request_pending() {
     let mut a = FocusArbiter::new();
     a.set_policy(FocusPolicy::FirstRequestWins);
-    let _ = a.request(pid(0), true);
-    let changes = a.request(pid(1), true);
+    let _ = a.request(pid(0), true, RequestOrigin::Api);
+    let changes = a.request(pid(1), true, RequestOrigin::Api);
     assert!(changes.is_empty());
     assert_eq!(a.request_order(pid(1)), Some(1));
 }
@@ -61,8 +63,8 @@ fn first_wins_later_request_pending() {
 fn first_wins_track_change_resets_holder_and_queue() {
     let mut a = FocusArbiter::new();
     a.set_policy(FocusPolicy::FirstRequestWins);
-    let _ = a.request(pid(0), true);
-    let _ = a.request(pid(1), true);
+    let _ = a.request(pid(0), true, RequestOrigin::Api);
+    let _ = a.request(pid(1), true, RequestOrigin::Api);
     let changes = a.on_track_changed();
     assert_eq!(
         changes,
@@ -79,9 +81,9 @@ fn first_wins_track_change_resets_holder_and_queue() {
 fn first_wins_release_refills_earliest() {
     let mut a = FocusArbiter::new();
     a.set_policy(FocusPolicy::FirstRequestWins);
-    let _ = a.request(pid(0), true);
-    let _ = a.request(pid(1), true);
-    let _ = a.request(pid(2), true);
+    let _ = a.request(pid(0), true, RequestOrigin::Api);
+    let _ = a.request(pid(1), true, RequestOrigin::Api);
+    let _ = a.request(pid(2), true, RequestOrigin::Api);
     let changes = a.release(pid(0));
     assert_eq!(
         changes,
@@ -101,8 +103,8 @@ fn first_wins_release_refills_earliest() {
 fn first_wins_fault_refills_earliest() {
     let mut a = FocusArbiter::new();
     a.set_policy(FocusPolicy::FirstRequestWins);
-    let _ = a.request(pid(0), true);
-    let _ = a.request(pid(1), true);
+    let _ = a.request(pid(0), true, RequestOrigin::Api);
+    let _ = a.request(pid(1), true, RequestOrigin::Api);
     let changes = a.vacate(pid(0), Vacancy::Fault);
     // Fault never emits Revoked, but the refill still Grants.
     assert_eq!(changes, vec![FocusChange::Granted { plugin: pid(1) }]);
@@ -113,8 +115,8 @@ fn first_wins_fault_refills_earliest() {
 fn first_wins_take_back_locks_until_track_change() {
     let mut a = FocusArbiter::new();
     a.set_policy(FocusPolicy::FirstRequestWins);
-    let _ = a.request(pid(0), true);
-    let _ = a.request(pid(1), true);
+    let _ = a.request(pid(0), true, RequestOrigin::Api);
+    let _ = a.request(pid(1), true, RequestOrigin::Api);
     let changes = a.take_back();
     assert_eq!(
         changes,
@@ -127,10 +129,10 @@ fn first_wins_take_back_locks_until_track_change() {
     // No refill despite a pending requester.
     assert_eq!(a.pending(), &[pid(1)]);
     // A fresh request still does not grant while locked.
-    assert_eq!(a.request(pid(2), true), vec![]);
+    assert_eq!(a.request(pid(2), true, RequestOrigin::Api), vec![]);
     let _ = a.on_track_changed();
     assert_eq!(
-        a.request(pid(3), true),
+        a.request(pid(3), true, RequestOrigin::Api),
         vec![FocusChange::Granted { plugin: pid(3) }]
     );
 }
@@ -162,17 +164,17 @@ fn give_to_holder_is_noop() {
 #[test]
 fn request_twice_keeps_position() {
     let mut a = FocusArbiter::new();
-    let _ = a.request(pid(0), true);
-    let _ = a.request(pid(1), true);
-    assert_eq!(a.request(pid(0), true), vec![]);
+    let _ = a.request(pid(0), true, RequestOrigin::Api);
+    let _ = a.request(pid(1), true, RequestOrigin::Api);
+    assert_eq!(a.request(pid(0), true, RequestOrigin::Api), vec![]);
     assert_eq!(a.pending(), &[pid(0), pid(1)]);
 }
 
 #[test]
 fn release_while_pending_withdraws() {
     let mut a = FocusArbiter::new();
-    let _ = a.request(pid(0), true);
-    let _ = a.request(pid(1), true);
+    let _ = a.request(pid(0), true, RequestOrigin::Api);
+    let _ = a.request(pid(1), true, RequestOrigin::Api);
     assert_eq!(a.release(pid(0)), vec![]);
     assert_eq!(a.pending(), &[pid(1)]);
 }
@@ -210,7 +212,7 @@ fn policy_switch_keeps_holder_and_queue() {
     let mut a = FocusArbiter::new();
     a.set_policy(FocusPolicy::Manual);
     let _ = a.give(pid(0));
-    let _ = a.request(pid(1), true);
+    let _ = a.request(pid(1), true, RequestOrigin::Api);
     a.set_policy(FocusPolicy::FirstRequestWins);
     assert_eq!(a.holder(), FocusHolder::Plugin(pid(0)));
     assert_eq!(a.pending(), &[pid(1)]);
@@ -235,8 +237,8 @@ fn revoked_precede_granted() {
 fn not_running_request_is_purged_never_granted() {
     let mut a = FocusArbiter::new();
     a.set_policy(FocusPolicy::FirstRequestWins);
-    let _ = a.request(pid(1), true);
-    assert_eq!(a.request(pid(1), false), vec![]);
+    let _ = a.request(pid(1), true, RequestOrigin::Api);
+    assert_eq!(a.request(pid(1), false, RequestOrigin::Api), vec![]);
     assert!(!a.pending().contains(&pid(1)));
 }
 
@@ -253,7 +255,7 @@ proptest! {
         for (i, op) in ops.into_iter().enumerate() {
             let p = pid(u16::from(op % 4));
             match op % 7 {
-                0 => { let _ = a.request(p, true); }
+                0 => { let _ = a.request(p, true, RequestOrigin::Api); }
                 1 => { let _ = a.release(p); }
                 2 => { let _ = a.give(p); }
                 3 => { let _ = a.take_back(); }

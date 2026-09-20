@@ -6,7 +6,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use mlua::{Lua, Result as LuaResult, VmState};
@@ -27,6 +27,11 @@ pub struct PluginGauges {
     cpu_permille_of_share: AtomicU16,
     used_bytes: AtomicU64,
     pending_timers: AtomicU16,
+    /// 011-plugin-ui-contributions (R5): the plugin's whole `PluginStateStore`
+    /// (all three scopes) serialized-size total, updated by the store on
+    /// every `set`/`remove`/load so a `Scope::Settings` cap check never
+    /// needs to lock the store from another thread.
+    storage_used: AtomicUsize,
 }
 
 impl PluginGauges {
@@ -55,6 +60,15 @@ impl PluginGauges {
 
     pub fn set_pending_timers(&self, value: u16) {
         self.pending_timers.store(value, Ordering::Relaxed);
+    }
+
+    #[must_use]
+    pub fn storage_used_bytes(&self) -> usize {
+        self.storage_used.load(Ordering::Relaxed)
+    }
+
+    pub fn set_storage_used_bytes(&self, value: usize) {
+        self.storage_used.store(value, Ordering::Relaxed);
     }
 }
 

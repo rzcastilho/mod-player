@@ -15,7 +15,7 @@ use mlua::{Lua, Table};
 use modplayer_capability_gateway::api::RequestKind;
 use modplayer_capability_gateway::request::{RegionId, Request};
 
-use super::{SharedHandle, call};
+use super::{SharedHandle, call, lock};
 
 macro_rules! simple_call {
     ($lua:expr, $ns:expr, $shared:expr, $name:literal, $kind:expr, $request:expr) => {{
@@ -68,14 +68,22 @@ pub fn install(lua: &Lua, api: &Table, shared: SharedHandle) -> mlua::Result<()>
         RequestKind::TransportSkipPrevious,
         Request::SkipPrevious
     );
-    simple_call!(
-        lua,
-        ns,
-        shared,
-        "request_focus",
-        RequestKind::TransportRequestFocus,
-        Request::RequestFocus
-    );
+    // 011-plugin-ui-contributions (R16, FR-026): unlike every other
+    // `simple_call!` here, this reads `Shared.in_interaction_handler` at
+    // call time rather than sending a fixed `Request` value — the flag is
+    // only ever `true` while this call happens synchronously inside a
+    // `panel_interaction`/`action_invoked` handler.
+    let shared_focus = shared.clone();
+    let request_focus_fn = lua.create_function(move |lua, ()| {
+        let interaction = lock(&shared_focus).in_interaction_handler;
+        call(
+            lua,
+            &shared_focus,
+            RequestKind::TransportRequestFocus,
+            Request::RequestFocus { interaction },
+        )
+    })?;
+    ns.set("request_focus", request_focus_fn)?;
     simple_call!(
         lua,
         ns,

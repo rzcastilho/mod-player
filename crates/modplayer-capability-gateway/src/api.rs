@@ -19,6 +19,11 @@ pub const HOST_CAPABILITIES: &[&str] = &[
     "audio.meter",
     "state.plugin",
     "state.track",
+    "ui.panel",
+    "ui.overlay",
+    "ui.shortcuts",
+    "ui.settings",
+    "ui.notify",
     "timers",
 ];
 
@@ -33,8 +38,10 @@ mod tests {
     }
 
     #[test]
-    fn exactly_nine_permissions_are_operable() {
-        assert_eq!(Permission::ALL.iter().filter(|p| p.operable()).count(), 9);
+    fn exactly_fourteen_permissions_are_operable() {
+        // 011-plugin-ui-contributions: the five `ui.*` permissions join
+        // 009's original nine (contracts/plugin-api-v1.2.md §1).
+        assert_eq!(Permission::ALL.iter().filter(|p| p.operable()).count(), 14);
     }
 
     #[test]
@@ -60,10 +67,10 @@ mod tests {
     }
 
     #[test]
-    fn api_version_is_one_dot_one() {
-        // 010-transport-focus (research R6, Constitution IX): the minor
-        // bump that gates the FocusGranted/FocusRevoked events.
+    fn api_version_is_one_dot_two() {
+        // 011-plugin-ui-contributions (research R1, Constitution IX): the
+        // minor bump that gates the `ui.*` namespace.
         assert_eq!(API_VERSION.major, 1);
-        assert_eq!(API_VERSION.minor, 1);
+        assert_eq!(API_VERSION.minor, 2);
     }
 }

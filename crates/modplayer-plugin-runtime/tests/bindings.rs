@@ -155,7 +155,7 @@ fn drain_logs(rx: &Receiver<(PluginId, RuntimeEvent)>, timeout: Duration) -> Vec
 /// `RequestKind` fails this test loudly rather than silently.
 fn canned_response(request: &Request) -> Response {
     match request {
-        Request::RequestFocus
+        Request::RequestFocus { .. }
         | Request::ReleaseFocus
         | Request::Play
         | Request::Pause
@@ -366,14 +366,15 @@ fn identity_fields_have_the_contract_shape() {
         logs.contains(&"granted:playback.observe,state.plugin".to_string()),
         "logs: {logs:?}"
     );
-    assert!(logs.contains(&"version:1.1".to_string()), "logs: {logs:?}");
+    assert!(logs.contains(&"version:1.2".to_string()), "logs: {logs:?}");
     assert!(
         logs.contains(&"capabilities_has_timers:true".to_string()),
         "logs: {logs:?}"
     );
-    // 9 operable permissions + "timers" (contract §1 `HOST_CAPABILITIES`).
+    // 14 operable permissions (011-plugin-ui-contributions added the five
+    // `ui.*` ones) + "timers" (contract §1 `HOST_CAPABILITIES`).
     assert!(
-        logs.contains(&"capabilities_len:10".to_string()),
+        logs.contains(&"capabilities_len:15".to_string()),
         "logs: {logs:?}"
     );
 }
@@ -398,7 +399,7 @@ fn request_focus_is_rpc_not_local() {
         .recv_timeout(Duration::from_secs(2))
         .unwrap_or_else(|e| unreachable!("request_focus never reached the RPC channel: {e}"));
     assert!(
-        matches!(envelope.request, Request::RequestFocus),
+        matches!(envelope.request, Request::RequestFocus { .. }),
         "expected Request::RequestFocus over the RPC channel, got {:?}",
         envelope.request
     );
@@ -437,6 +438,162 @@ fn release_focus_is_rpc_not_local() {
     let logs = drain_logs(&events, Duration::from_secs(1));
     assert!(
         logs.contains(&"release_focus:true".to_string()),
+        "logs: {logs:?}"
+    );
+}
+
+/// 011-plugin-ui-contributions (T028, research R4): every `api.ui.*`
+/// call except `get_settings` crosses to the RPC channel as its matching
+/// `Request` variant, in call order — mirroring
+/// `every_rpc_request_kind_round_trips` above for the new `ui` namespace.
+#[test]
+fn ui_calls_are_rpcs() {
+    let entry = r#"
+        api.on("ready_ack", function(_event)
+            local function step(name, ok)
+                api.log.info(name .. ":" .. tostring(ok))
+            end
+            step("register_panel", api.ui.register_panel("main", "Panel", {
+                { id = "lbl", kind = "label", label = "Hi" },
+            }))
+            step("update_widget", api.ui.update_widget("main", "lbl", "text"))
+            step("add_overlays", api.ui.add_overlays({
+                { id = "ov1", kind = "line", at = 100 },
+            }))
+            step("remove_overlays", api.ui.remove_overlays({ "ov1" }))
+            step("clear_overlays", api.ui.clear_overlays())
+            step("register_action", api.ui.register_action({ id = "act", label = "Act" }))
+            step("register_settings", api.ui.register_settings({
+                { id = "f1", kind = "boolean", label = "F1", default = true },
+            }))
+            step("notify", api.ui.notify("info", "hello"))
+            api.log.info("done")
+        end)
+        api.ready()
+    "#;
+    let grants = grants_with(&[
+        "ui.panel",
+        "ui.overlay",
+        "ui.shortcuts",
+        "ui.settings",
+        "ui.notify",
+    ]);
+    let (_handle, events, requests) = spawn_test_plugin(entry, grants);
+    wait_for_ready(&events);
+
+    type ReqCheck = (&'static str, fn(&Request) -> bool);
+    let expected: [ReqCheck; 8] = [
+        ("register_panel", |r| {
+            matches!(r, Request::RegisterPanel { .. })
+        }),
+        ("update_widget", |r| {
+            matches!(r, Request::UpdateWidget { .. })
+        }),
+        ("add_overlays", |r| matches!(r, Request::AddOverlays { .. })),
+        ("remove_overlays", |r| {
+            matches!(r, Request::RemoveOverlays { .. })
+        }),
+        ("clear_overlays", |r| matches!(r, Request::ClearOverlays)),
+        ("register_action", |r| {
+            matches!(r, Request::RegisterAction { .. })
+        }),
+        ("register_settings", |r| {
+            matches!(r, Request::RegisterSettings { .. })
+        }),
+        ("notify", |r| matches!(r, Request::Notify { .. })),
+    ];
+    for (name, matches_kind) in expected {
+        let envelope = requests
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or_else(|e| unreachable!("{name} never reached the RPC channel: {e}"));
+        assert!(
+            matches_kind(&envelope.request),
+            "{name}: unexpected request shape {:?}",
+            envelope.request
+        );
+        let _ = envelope.reply.send(Ok(Response::Ok));
+    }
+
+    let logs = drain_logs(&events, Duration::from_secs(1));
+    assert!(logs.contains(&"done".to_string()), "logs: {logs:?}");
+    for (name, _) in expected {
+        let expected_log = format!("{name}:true");
+        assert!(logs.contains(&expected_log), "{name}: logs: {logs:?}");
+    }
+}
+
+/// 011-plugin-ui-contributions (T028, research R4): `get_settings` never
+/// reaches the RPC channel — it is served locally from
+/// `Shared.settings_schema` (set by a successful `register_settings`) and
+/// the plugin's own `Scope::Settings` store, substituting each field's
+/// `default` for a value that was never written.
+#[test]
+fn get_settings_is_local_and_substitutes_defaults() {
+    let entry = r#"
+        api.on("ready_ack", function(_event)
+            local ok = api.ui.register_settings({
+                { id = "f1", kind = "boolean", label = "F1", default = true },
+                { id = "f2", kind = "number", label = "F2", min = 0, max = 10, step = 1, default = 5 },
+            })
+            api.log.info("register:" .. tostring(ok))
+            local settings = api.ui.get_settings()
+            api.log.info("f1=" .. tostring(settings.f1))
+            api.log.info("f2=" .. tostring(settings.f2))
+        end)
+        api.ready()
+    "#;
+    let (_handle, events, requests) = spawn_test_plugin(entry, grants_with(&["ui.settings"]));
+    wait_for_ready(&events);
+
+    let envelope = requests
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap_or_else(|e| unreachable!("register_settings never reached the RPC channel: {e}"));
+    assert!(
+        matches!(envelope.request, Request::RegisterSettings { .. }),
+        "expected Request::RegisterSettings, got {:?}",
+        envelope.request
+    );
+    let _ = envelope.reply.send(Ok(Response::Ok));
+
+    let logs = drain_logs(&events, Duration::from_secs(1));
+    assert!(
+        logs.contains(&"register:true".to_string()),
+        "logs: {logs:?}"
+    );
+    assert!(logs.contains(&"f1=true".to_string()), "logs: {logs:?}");
+    assert!(logs.contains(&"f2=5".to_string()), "logs: {logs:?}");
+
+    // `get_settings` never sent a second envelope over the RPC channel.
+    assert!(
+        requests.try_recv().is_err(),
+        "get_settings must be served locally, not as an RPC"
+    );
+}
+
+/// 011-plugin-ui-contributions (T028, R5/FR-018): `Scope::Settings` is
+/// never installed under `api.state` — only `plugin`/`track` are, so a
+/// plugin's settings-page values stay unreachable through
+/// `state.plugin`/`state.track` get/set (they are host-written only, via
+/// `Control::SettingsWrite`).
+#[test]
+fn settings_scope_unreachable_from_lua() {
+    let entry = r#"
+        api.log.info("settings_is_nil:" .. tostring(api.state.settings == nil))
+        local names = {}
+        for k, _ in pairs(api.state) do
+            table.insert(names, k)
+        end
+        table.sort(names)
+        api.log.info("state_keys:" .. table.concat(names, ","))
+    "#;
+    let (_handle, events, _requests) = spawn_test_plugin(entry, Grants::none());
+    let logs = drain_logs(&events, Duration::from_secs(1));
+    assert!(
+        logs.contains(&"settings_is_nil:true".to_string()),
+        "logs: {logs:?}"
+    );
+    assert!(
+        logs.contains(&"state_keys:plugin,track".to_string()),
         "logs: {logs:?}"
     );
 }

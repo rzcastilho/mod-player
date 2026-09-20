@@ -3270,6 +3270,7 @@ dependencies = [
  "directories",
  "fluent-templates",
  "getrandom 0.3.4",
+ "image",
  "log",
  "modplayer-audio-io",
  "modplayer-audio-source",
@@ -3344,8 +3345,10 @@ dependencies = [
  "modplayer-core",
  "modplayer-effects",
  "modplayer-engine",
+ "modplayer-plugin-runtime",
  "modplayer-secure-store",
  "proptest",
+ "serde_json",
  "time",
  "ureq",
 ]

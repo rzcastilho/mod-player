@@ -15,6 +15,7 @@
 use egui::{Color32, RichText, Ui};
 use modplayer_audio_io::OutputBackend;
 use modplayer_audio_source::SourceHost;
+use modplayer_core::plugins::PanelRowControl;
 use modplayer_core::{Health, PlaybackController, PluginRow, Source, tr, tr_args};
 
 /// Draw the whole Plugins section: heading, either the empty state or one
@@ -92,6 +93,71 @@ fn show_row<B: OutputBackend, H: SourceHost>(
         ui.label(cpu_label(row.cpu_pct_of_share));
         ui.label(memory_label(row.memory_bytes));
     });
+
+    show_panel_controls(ui, controller, row);
+}
+
+/// L6 (011-plugin-ui-contributions, contracts/ui-panels.md): one indented
+/// line per panel this plugin currently has registered, each with its own
+/// session-only Show/Hide toggle and persisted Enable/Disable toggle.
+/// Nothing renders for a plugin with no registered panels — the common
+/// case for every fixture that never calls `register_panel`.
+fn show_panel_controls<B: OutputBackend, H: SourceHost>(
+    ui: &mut Ui,
+    controller: &mut PlaybackController<B, H>,
+    row: &PluginRow,
+) {
+    for panel in &row.panels {
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.label(&panel.title);
+            show_show_hide_toggle(ui, controller, panel);
+            show_enable_disable_toggle(ui, controller, panel);
+        });
+    }
+}
+
+/// **Show/Hide** (L6, session-only): a button whose label flips with
+/// `panel.closed` — the preceding `ui.label(&panel.title)` (see
+/// `show_panel_controls`) is this button's own accessible context, so the
+/// button itself stays the same short `plugin-panel-show`/`-hide` text
+/// contracts/ui-panels.md §4 names. Clicking calls `plugin_panel_show`/
+/// `plugin_panel_close` immediately, never persisted (FR-006).
+fn show_show_hide_toggle<B: OutputBackend, H: SourceHost>(
+    ui: &mut Ui,
+    controller: &mut PlaybackController<B, H>,
+    panel: &PanelRowControl,
+) {
+    let key = if panel.closed {
+        "plugin-panel-show"
+    } else {
+        "plugin-panel-hide"
+    };
+    if ui.button(tr(key)).clicked() {
+        if panel.closed {
+            controller.plugin_panel_show(&panel.key);
+        } else {
+            controller.plugin_panel_close(&panel.key);
+        }
+    }
+}
+
+/// **Enable/Disable** (L6, persisted): a button whose label flips with
+/// `panel.disabled`. Clicking calls `plugin_panel_set_disabled`
+/// immediately, written to `[plugin_panels]` (FR-006).
+fn show_enable_disable_toggle<B: OutputBackend, H: SourceHost>(
+    ui: &mut Ui,
+    controller: &mut PlaybackController<B, H>,
+    panel: &PanelRowControl,
+) {
+    let key = if panel.disabled {
+        "plugin-panel-enable"
+    } else {
+        "plugin-panel-disable"
+    };
+    if ui.button(tr(key)).clicked() {
+        controller.plugin_panel_set_disabled(&panel.key, !panel.disabled);
+    }
 }
 
 /// **Enabled** (contracts/ui-plugins.md §2): a plain `Checkbox` bound to

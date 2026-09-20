@@ -305,8 +305,11 @@ fn rows_show_every_column_sorted_by_name() {
         find_one(&nodes, Role::Label, &tr(key));
     }
 
-    // Every one of the 10 fixtures (`plugins/bundled/` is empty this
-    // slice; 010-transport-focus adds `focus-a`/`focus-b`), sorted
+    // Every one of the 16 fixtures (`plugins/bundled/` is empty this
+    // slice; 010-transport-focus adds `focus-a`/`focus-b`;
+    // 011-plugin-ui-contributions US1 adds `ui-panel` (T060), US2 adds
+    // `ui-shortcuts` (T079), US3 adds `ui-overlay` and `ui-icons` (T092),
+    // US4 adds `ui-settings` (T106), US5 adds `ui-notify` (T115)), sorted
     // case-insensitively by name — already alphabetical for this fixture
     // set. The invalid fixture's manifest never parses into a `Manifest`
     // (only a `ManifestError`), so its row falls back to its raw
@@ -323,6 +326,12 @@ fn rows_show_every_column_sorted_by_name() {
         "Observer fixture",
         "org.modplayer.fixture.invalid",
         "Throw fixture",
+        "UI Icons fixture",
+        "UI notify fixture",
+        "UI Overlay fixture",
+        "UI Panel fixture",
+        "UI settings fixture",
+        "UI Shortcuts fixture",
         "Well-behaved fixture",
     ];
     let mut ys: Vec<(f32, &str)> = expected_order
@@ -374,8 +383,8 @@ fn rows_show_every_column_sorted_by_name() {
     // `Ok` and its CPU/memory are both the dash (not yet `Active`).
     assert_eq!(
         find_all(&nodes, Role::Label, &tr("plugins-health-ok")).len(),
-        9,
-        "9 valid fixtures must all read `ok` before any is launched: {nodes:?}"
+        15,
+        "15 valid fixtures must all read `ok` before any is launched: {nodes:?}"
     );
 }
 
@@ -532,6 +541,79 @@ fn suspended_row_shows_dash_gauges() {
             .is_some_and(|name| name.contains('%') || name.contains("MB /"))),
         "no row may show a real CPU/memory figure while nothing is Active: {nodes:?}"
     );
+}
+
+/// T043 (US1, 011-plugin-ui-contributions, contracts/ui-panels.md L6):
+/// once the `ui-panel` fixture's "Controls" panel registers, the Plugins
+/// list grows a per-panel control line — the panel's own title, a
+/// session-only Show/Hide button and a persisted Enable/Disable button —
+/// and both buttons round-trip through the controller exactly as
+/// `plugin_panels_view()`/`plugin_panel_close`/`show`/`set_disabled`
+/// (T051) promise: Hide removes the panel from the dock without
+/// persisting anything, Show restores it, and Disable removes it from the
+/// dock and survives being read back (persisted).
+#[test]
+fn panel_controls_listed() {
+    let (mut controller, _dir, _psd, _tsd) = fixture_controller("panel-controls-listed");
+    let id = fixture_id(&mut controller, "org.modplayer.fixture.ui-panel");
+    let shared = Arc::clone(controller.shared());
+    controller.plugins_mut().spawn(id, &shared);
+    assert!(
+        pump_until(&mut controller, Duration::from_secs(2), |c| is_active(
+            c, id
+        )),
+        "the ui-panel fixture must reach Active on its own"
+    );
+    assert!(
+        pump_until(&mut controller, Duration::from_secs(2), |c| {
+            !c.plugin_panels_view().docked.is_empty()
+        }),
+        "the fixture's ready_ack handler must have registered its panel"
+    );
+
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+
+    // Baseline: title label, `Hide` (not yet closed) and `Disable` (not
+    // yet persisted-disabled) — contracts/ui-panels.md L6.
+    let nodes = render_plugins(&ctx, &mut controller);
+    find_one(&nodes, Role::Label, "Controls");
+    let hide = find_one(&nodes, Role::Button, &tr("plugin-panel-hide"));
+    let hide_pos = hide.bounds.expect("Hide button must have bounds").center();
+
+    // Click Hide: session-only, calls `plugin_panel_close`, no event to
+    // the plugin, and the panel drops out of the dock immediately.
+    click_at(&ctx, &mut controller, hide_pos);
+    assert!(
+        controller.plugin_panels_view().docked.is_empty(),
+        "a closed panel must not render in the dock"
+    );
+    let nodes = render_plugins(&ctx, &mut controller);
+    let show = find_one(&nodes, Role::Button, &tr("plugin-panel-show"));
+    let show_pos = show.bounds.expect("Show button must have bounds").center();
+
+    // Click Show: reopens it.
+    click_at(&ctx, &mut controller, show_pos);
+    assert!(
+        !controller.plugin_panels_view().docked.is_empty(),
+        "Show must restore the panel to the dock"
+    );
+    let nodes = render_plugins(&ctx, &mut controller);
+    let disable = find_one(&nodes, Role::Button, &tr("plugin-panel-disable"));
+    let disable_pos = disable
+        .bounds
+        .expect("Disable button must have bounds")
+        .center();
+
+    // Click Disable: persisted (`[plugin_panels]`), also drops it from the
+    // dock; the Plugins-list control line flips to `Enable`.
+    click_at(&ctx, &mut controller, disable_pos);
+    assert!(
+        controller.plugin_panels_view().docked.is_empty(),
+        "a disabled panel must not render in the dock"
+    );
+    let nodes = render_plugins(&ctx, &mut controller);
+    find_one(&nodes, Role::Button, &tr("plugin-panel-enable"));
 }
 
 #[test]

@@ -410,11 +410,19 @@ fn request_focus_is_recorded_never_refused() {
     let second = controller_plugin_id(&mut controller, "org.modplayer.fixture.flood");
 
     assert_eq!(
-        call(&mut controller, first, Request::RequestFocus),
+        call(
+            &mut controller,
+            first,
+            Request::RequestFocus { interaction: false }
+        ),
         Ok(Response::Ok)
     );
     assert_eq!(
-        call(&mut controller, second, Request::RequestFocus),
+        call(
+            &mut controller,
+            second,
+            Request::RequestFocus { interaction: false }
+        ),
         Ok(Response::Ok),
         "a second plugin's request_focus() is recorded, never refused"
     );

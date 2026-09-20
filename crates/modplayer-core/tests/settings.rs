@@ -20,8 +20,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use modplayer_audio_io::FakeBackend;
 use modplayer_audio_source_synthetic::SyntheticHost;
 use modplayer_core::settings::{
-    AudioSettings, DeviceName, DisclosureAcknowledgement, InvalidField, SettingsStore,
-    SettingsWarning, generate_connect_device_id,
+    AudioSettings, DeviceName, DisclosureAcknowledgement, InvalidField, PanelPersisted,
+    PanelPlacement, RawPanel, RawSettings, SettingsStore, SettingsWarning,
+    generate_connect_device_id,
 };
 use modplayer_core::{Chord, FocusPolicy, HostAction, PlaybackController};
 use modplayer_engine::{BufferPreset, VolumePercent};
@@ -405,6 +406,96 @@ fn keybindings_invalid_entries_dropped_in_isolation() {
     }
 }
 
+// ---------------------------------------------------------------------
+// T063 (US2, 011-plugin-ui-contributions, contracts/action-registry-
+// plugins.md K1/K2, FR-010a)
+// ---------------------------------------------------------------------
+
+/// A `[keybindings]` id outside the `host.` namespace, with a decodable
+/// value, is retained dormant — never dropped, never warned about — and
+/// re-serialised verbatim on the next save (K1).
+#[test]
+fn non_host_keybinding_retained_dormant() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let content = r#"schema_version = 1
+
+[keybindings]
+"host.loop.toggle" = ["K"]
+"org.modplayer.fixture.ui-shortcuts.take_over" = ["Shift+K"]
+"#;
+    let _ = fs::write(store.path(), content);
+
+    let outcome = store.load();
+    assert!(
+        outcome.warnings.is_empty(),
+        "a non-host id must never raise a warning: {:?}",
+        outcome.warnings
+    );
+
+    let dormant: Vec<(String, Vec<Chord>)> = outcome
+        .settings
+        .keybinding_overrides
+        .dormant_iter()
+        .map(|(id, chords)| (id.clone(), chords.to_vec()))
+        .collect();
+    assert_eq!(
+        dormant,
+        vec![(
+            "org.modplayer.fixture.ui-shortcuts.take_over".to_string(),
+            vec![chord("Shift+K")]
+        )]
+    );
+
+    // Round-trips verbatim: still there, unchanged, after a save/reload.
+    assert!(store.save(&outcome.settings).is_ok());
+    let reloaded = store.load();
+    assert!(reloaded.warnings.is_empty());
+    assert_eq!(
+        reloaded
+            .settings
+            .keybinding_overrides
+            .dormant_iter()
+            .map(|(id, chords)| (id.clone(), chords.to_vec()))
+            .collect::<Vec<_>>(),
+        dormant
+    );
+    let on_disk = fs::read_to_string(store.path()).unwrap_or_default();
+    assert!(
+        on_disk.contains("org.modplayer.fixture.ui-shortcuts.take_over"),
+        "the dormant entry must be re-serialised verbatim, got:\n{on_disk}"
+    );
+}
+
+/// K2 unchanged: only a `host.`-namespaced unknown id (or one whose
+/// value fails to decode) is dropped and warned about — the dormant path
+/// above (T063's other half) never raises this warning.
+#[test]
+fn host_unknown_still_warned() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let content = r#"schema_version = 1
+
+[keybindings]
+"host.nope.x" = ["A"]
+"org.modplayer.fixture.ui-shortcuts.take_over" = ["Shift+K"]
+"#;
+    let _ = fs::write(store.path(), content);
+
+    let outcome = store.load();
+    match &outcome.warnings[..] {
+        [SettingsWarning::InvalidKeybindings(ids)] => {
+            assert_eq!(ids, &vec!["host.nope.x".to_string()]);
+        }
+        other => panic!("expected exactly one InvalidKeybindings warning, got {other:?}"),
+    }
+    assert_eq!(
+        outcome.settings.keybinding_overrides.dormant_iter().count(),
+        1,
+        "the non-host id must still land in dormant, unaffected by the host warning"
+    );
+}
+
 #[test]
 fn keybindings_bad_entries_rewritten_clean_on_next_save() {
     let dir = TempDir::new();
@@ -583,4 +674,67 @@ proptest! {
         prop_assert_eq!(outcome.settings.focus_policy, policy);
         prop_assert!(outcome.warnings.is_empty());
     }
+
+    // 011-plugin-ui-contributions (US1 T040, contracts/ui-panels.md L3):
+    // an arbitrary `[plugin_panels]` entry — any placement, any (finite)
+    // geometry, disabled or not — round-trips through a real save/load
+    // with no warning.
+    #[test]
+    fn plugin_panels_round_trip_proptest(
+        floated in any::<bool>(),
+        x in -1_000.0f32..3_000.0,
+        y in -1_000.0f32..3_000.0,
+        w in 50.0f32..2_000.0,
+        h in 50.0f32..2_000.0,
+        disabled in any::<bool>(),
+    ) {
+        let dir = TempDir::new();
+        let store = store_in(&dir);
+        let mut settings = AudioSettings::default();
+        settings.plugin_panels.insert(
+            "org.modplayer.fixture.ui-panel/main".to_string(),
+            PanelPersisted {
+                placement: if floated { PanelPlacement::Floated } else { PanelPlacement::Docked },
+                x: Some(x),
+                y: Some(y),
+                w: Some(w),
+                h: Some(h),
+                disabled,
+            },
+        );
+        prop_assert!(store.save(&settings).is_ok());
+
+        let outcome = store.load();
+        prop_assert_eq!(outcome.settings.plugin_panels, settings.plugin_panels);
+        prop_assert!(outcome.warnings.is_empty());
+    }
+}
+
+/// 011-plugin-ui-contributions (US1 T040, contracts/ui-panels.md L3): an
+/// unrecognised `placement` string drops only that `[plugin_panels]`
+/// entry, with a warning — never the whole table, and never a load
+/// failure.
+#[test]
+fn plugin_panels_bad_placement_dropped() {
+    let mut raw = RawSettings::default();
+    raw.plugin_panels.insert(
+        "org.modplayer.fixture.ui-panel/main".to_string(),
+        RawPanel {
+            placement: "sideways".to_string(),
+            x: None,
+            y: None,
+            w: None,
+            h: None,
+            disabled: false,
+        },
+    );
+    let (settings, invalid, dropped) = raw.into_settings();
+    assert!(dropped.is_empty());
+    assert!(settings.plugin_panels.is_empty());
+    assert_eq!(
+        invalid,
+        vec![InvalidField::PluginPanel(
+            "org.modplayer.fixture.ui-panel/main".to_string()
+        )]
+    );
 }

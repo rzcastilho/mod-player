@@ -10,13 +10,19 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use egui::accesskit::{Role, TreeUpdate};
 use egui::{Context, Event, Key as EguiKey, Modifiers, PointerButton, Pos2, RawInput, Rect};
 use modplayer_audio_io::{FakeBackend, OutputBackend};
 use modplayer_audio_source::SourceHost;
 use modplayer_audio_source_synthetic::SyntheticHost;
-use modplayer_core::actions::{ActionCategory, Chord, HostAction, KeyName, Platform, ScopeState};
+use modplayer_capability_gateway::ui::WidgetValue;
+use modplayer_core::actions::{
+    ActionCategory, ActionId, Chord, HostAction, KeyName, Platform, PluginActionId, ScopeState,
+};
+use modplayer_core::plugins::{Lifecycle, PluginId};
 use modplayer_core::settings::SettingsStore;
 use modplayer_core::{PlaybackController, tr, tr_args};
 use modplayer_ui::settings::controls::{self, CaptureReject, CaptureRule, ControlsScreen};
@@ -365,7 +371,7 @@ fn capture_accepts_chord_and_adds_chip() {
     click_at(&ctx, &mut controller, &mut screen, bounds.center());
     assert_eq!(
         screen.capture,
-        Some(action),
+        Some(ActionId::Host(action)),
         "clicking a row's Add binding must open capture for that action"
     );
 
@@ -486,7 +492,7 @@ fn capture_esc_and_focus_loss_cancel() {
         index,
     );
     click_at(&ctx, &mut controller, &mut screen, bounds.center());
-    assert_eq!(screen.capture, Some(action));
+    assert_eq!(screen.capture, Some(ActionId::Host(action)));
     let before = controller.actions().bindings(action).to_vec();
 
     press_key(
@@ -516,7 +522,7 @@ fn capture_esc_and_focus_loss_cancel() {
         index,
     );
     click_at(&ctx2, &mut controller2, &mut screen2, bounds2.center());
-    assert_eq!(screen2.capture, Some(action));
+    assert_eq!(screen2.capture, Some(ActionId::Host(action)));
 
     // A neutral frame lets the capture control's own `request_focus()`
     // actually take effect, so the *next* frame's `has_focus()` reflects
@@ -527,7 +533,7 @@ fn capture_esc_and_focus_loss_cancel() {
     output.drop_without_applying_deltas();
     assert_eq!(
         screen2.capture,
-        Some(action),
+        Some(ActionId::Host(action)),
         "sanity: still open after the settle frame"
     );
 
@@ -789,14 +795,14 @@ fn conflict_flag_shows_on_both_rows() {
     let flag_on_toggle = format!(
         "⚠ {}",
         tr_args(
-            "controls-conflict-with",
+            "controls-conflict-with-host",
             &[("other", tr(HostAction::ToggleLoop.label_key()))]
         )
     );
     let flag_on_loop = format!(
         "⚠ {}",
         tr_args(
-            "controls-conflict-with",
+            "controls-conflict-with-host",
             &[("other", tr(HostAction::TogglePlayPause.label_key()))]
         )
     );
@@ -834,7 +840,7 @@ fn capture_of_conflicting_chord_flags_both_and_names_partner() {
         index,
     );
     click_at(&ctx, &mut controller, &mut screen, bounds.center());
-    assert_eq!(screen.capture, Some(action));
+    assert_eq!(screen.capture, Some(ActionId::Host(action)));
 
     // Space: TogglePlayPause's default binding, not one `ToggleLoop`
     // already holds — CaptureRule accepts it (only a *duplicate on this
@@ -862,7 +868,7 @@ fn capture_of_conflicting_chord_flags_both_and_names_partner() {
     );
     assert_eq!(
         controller.actions().conflict_partner(action, space),
-        Some(HostAction::TogglePlayPause)
+        Some(ActionId::Host(HostAction::TogglePlayPause))
     );
 
     let texts: Vec<String> = update
@@ -875,12 +881,272 @@ fn capture_of_conflicting_chord_flags_both_and_names_partner() {
     let expected = format!(
         "⚠ {}",
         tr_args(
-            "controls-conflict-with",
+            "controls-conflict-with-host",
             &[("other", tr(HostAction::TogglePlayPause.label_key()))]
         )
     );
     assert!(
         texts.iter().any(|t| t.contains(&expected)),
         "the conflict partner's name must appear inline the same frame capture closes"
+    );
+}
+
+// -- T066 (011-plugin-ui-contributions US2, contracts/action-registry-
+// plugins.md G15): a plugin's own action group, tier-aware conflict text,
+// and a suspended plugin's greyed row — driven through the real
+// `org.modplayer.fixture.ui-shortcuts`/`ui-panel` fixtures (mirrors
+// `plugin_panels.rs`'s own fixture harness). ---------------------------
+
+const UI_SHORTCUTS: &str = "org.modplayer.fixture.ui-shortcuts";
+const UI_PANEL: &str = "org.modplayer.fixture.ui-panel";
+
+/// `MODPLAYER_PLUGIN_FIXTURES`/`MODPLAYER_PLUGIN_STATE_DIR`/
+/// `MODPLAYER_TRACK_STATE_DIR` are process-global (mirrors `plugin_panels.
+/// rs`'s own `PLUGIN_ENV_LOCK`).
+static PLUGIN_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+fn fixture_controller(
+    label: &str,
+) -> (
+    PlaybackController<FakeBackend, SyntheticHost>,
+    TempDir,
+    TempDir,
+    TempDir,
+) {
+    let (store, dir) = fresh_store(label);
+    let plugin_state_dir = TempDir::new(&format!("{label}-plugin-state"));
+    let track_state_dir = TempDir::new(&format!("{label}-track-state"));
+    let controller = {
+        let _guard = PLUGIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // Safety: narrowly scopes each mutation to the one synchronous
+        // read `PlaybackController::new` makes of it, serialized against
+        // every other test in this binary via the lock above.
+        unsafe {
+            std::env::set_var("MODPLAYER_PLUGIN_FIXTURES", "1");
+            std::env::set_var("MODPLAYER_PLUGIN_STATE_DIR", plugin_state_dir.path());
+            std::env::set_var("MODPLAYER_TRACK_STATE_DIR", track_state_dir.path());
+        }
+        let controller =
+            PlaybackController::new(FakeBackend::new(vec![]), SyntheticHost::new(44_100), store);
+        unsafe {
+            std::env::remove_var("MODPLAYER_PLUGIN_FIXTURES");
+            std::env::remove_var("MODPLAYER_PLUGIN_STATE_DIR");
+            std::env::remove_var("MODPLAYER_TRACK_STATE_DIR");
+        }
+        controller
+    };
+    (controller, dir, plugin_state_dir, track_state_dir)
+}
+
+fn fixture_id(
+    controller: &mut PlaybackController<FakeBackend, SyntheticHost>,
+    identifier: &str,
+) -> PluginId {
+    controller
+        .plugins_mut()
+        .records()
+        .iter()
+        .find(|r| r.identifier.as_str() == identifier)
+        .map(|r| r.id)
+        .unwrap_or_else(|| unreachable!("fixture '{identifier}' must be discovered"))
+}
+
+fn pump_until(
+    controller: &mut PlaybackController<FakeBackend, SyntheticHost>,
+    timeout: Duration,
+    mut done: impl FnMut(&mut PlaybackController<FakeBackend, SyntheticHost>) -> bool,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        controller.tick();
+        if done(controller) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn wait_active(
+    controller: &mut PlaybackController<FakeBackend, SyntheticHost>,
+    id: PluginId,
+) -> bool {
+    pump_until(controller, Duration::from_secs(2), |c| {
+        matches!(
+            c.plugins_mut().record(id).map(|r| &r.lifecycle),
+            Some(Lifecycle::Active)
+        )
+    })
+}
+
+fn wait_suspended(
+    controller: &mut PlaybackController<FakeBackend, SyntheticHost>,
+    id: PluginId,
+) -> bool {
+    pump_until(controller, Duration::from_secs(2), |c| {
+        matches!(
+            c.plugins_mut().record(id).map(|r| &r.lifecycle),
+            Some(Lifecycle::Suspended { .. })
+        )
+    })
+}
+
+/// `fixture_controller` only discovers records — every plugin must be
+/// `spawn`ed individually (mirrors `plugin_panels.rs::launch_ui_panel`).
+fn spawn_and_wait_active(
+    controller: &mut PlaybackController<FakeBackend, SyntheticHost>,
+    id: PluginId,
+) -> bool {
+    let shared = Arc::clone(controller.shared());
+    controller.plugins_mut().spawn(id, &shared);
+    wait_active(controller, id)
+}
+
+fn identifier_of(
+    controller: &mut PlaybackController<FakeBackend, SyntheticHost>,
+    id: PluginId,
+) -> String {
+    controller
+        .plugins_mut()
+        .record(id)
+        .unwrap_or_else(|| unreachable!())
+        .identifier
+        .to_string()
+}
+
+/// A plugin's own group heading renders (its resolved display name) and
+/// its actions render under it with their own literal labels — never
+/// translated through Fluent, unlike a host row (contracts/
+/// action-registry-plugins.md G15 "a plugin row carries `label:
+/// RowLabel::Literal(resolved string)`").
+#[test]
+fn plugin_group_rendered() {
+    let (mut controller, _dir, _psd, _tsd) = fixture_controller("plugin-group");
+    let id = fixture_id(&mut controller, UI_SHORTCUTS);
+    assert!(spawn_and_wait_active(&mut controller, id));
+    let identifier = identifier_of(&mut controller, id);
+    let action_id =
+        PluginActionId::parse(&format!("{identifier}.take_over")).unwrap_or_else(|| unreachable!());
+    assert!(pump_until(&mut controller, Duration::from_secs(2), |c| {
+        c.actions().plugin_action_registered(&action_id)
+    }));
+
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+    let mut screen = ControlsScreen::default();
+    let texts = rendered_texts(&ctx, &mut controller, &mut screen);
+
+    let heading = tr_args(
+        "controls-plugin-group",
+        &[("plugin", "UI Shortcuts fixture".to_string())],
+    );
+    assert!(
+        texts.iter().any(|t| t == &heading),
+        "the owning plugin's own display name must head its action group"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|t| t == "Take over (collides with host L)"),
+        "a plugin action's own literal label must render, not a Fluent lookup"
+    );
+}
+
+/// The host-vs-plugin conflict baked into the `ui-shortcuts` fixture
+/// itself (`take_over`'s default `L`, colliding with the host's own
+/// `ToggleLoop`, M5) renders the tier-aware `controls-conflict-with-host`
+/// message on the plugin's own chip (contracts/action-registry-plugins.md
+/// G15 "conflict text names the partner's tier").
+#[test]
+fn tier_conflict_text() {
+    let (mut controller, _dir, _psd, _tsd) = fixture_controller("tier-conflict");
+    let id = fixture_id(&mut controller, UI_SHORTCUTS);
+    assert!(spawn_and_wait_active(&mut controller, id));
+    let identifier = identifier_of(&mut controller, id);
+    let action_id =
+        PluginActionId::parse(&format!("{identifier}.take_over")).unwrap_or_else(|| unreachable!());
+    let l = Chord::parse("L").unwrap_or_else(|_| unreachable!());
+    assert!(pump_until(&mut controller, Duration::from_secs(2), |c| {
+        c.actions()
+            .is_conflicting(ActionId::Plugin(action_id.clone()), l)
+    }));
+
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+    let mut screen = ControlsScreen::default();
+    let texts = rendered_texts(&ctx, &mut controller, &mut screen);
+
+    let expected = format!(
+        "⚠ {}",
+        tr_args(
+            "controls-conflict-with-host",
+            &[("other", tr(HostAction::ToggleLoop.label_key()))]
+        )
+    );
+    assert!(
+        texts.iter().any(|t| t == &expected),
+        "the plugin action's flagged `L` chip must name the host's tier, got: {texts:?}"
+    );
+}
+
+/// A row whose owning plugin is `Suspended` (not `Active`) renders greyed
+/// with the same `(inactive)` suffix a disabled host row uses (contracts/
+/// action-registry-plugins.md G15 "a row whose plugin is not Active
+/// renders greyed").
+#[test]
+fn greyed_when_suspended() {
+    use modplayer_capability_gateway::budgets::Budgets;
+
+    // Not the plain `fixture_controller` + auto-spawn: the running
+    // plugin thread captures its `Budgets` once, at spawn (mirrors
+    // `plugin_panels.rs::placeholder_on_suspend`), so the 1 ms share
+    // override must land *before* `spawn`.
+    let (mut controller, _dir, _psd, _tsd) = fixture_controller("greyed-suspended");
+    let id = fixture_id(&mut controller, UI_PANEL);
+    if let Some(record) = controller.plugins_mut().record_mut(id) {
+        record.budgets = Budgets {
+            share: Duration::from_millis(1),
+            ..Budgets::DEFAULT
+        };
+    }
+    let shared = Arc::clone(controller.shared());
+    controller.plugins_mut().spawn(id, &shared);
+    assert!(
+        wait_active(&mut controller, id),
+        "the ui-panel fixture must reach Active on its own"
+    );
+
+    let identifier = identifier_of(&mut controller, id);
+    let action_id =
+        PluginActionId::parse(&format!("{identifier}.take_over")).unwrap_or_else(|| unreachable!());
+    assert!(pump_until(&mut controller, Duration::from_secs(2), |c| {
+        c.actions().plugin_action_registered(&action_id)
+    }));
+
+    // A 1 ms share suspends the fixture's own "hang" busy-loop probe the
+    // moment it runs.
+    let panel =
+        modplayer_capability_gateway::ui::UiId::parse("main").unwrap_or_else(|| unreachable!());
+    let widget =
+        modplayer_capability_gateway::ui::UiId::parse("hang").unwrap_or_else(|| unreachable!());
+    controller.plugin_panel_interaction(id, &panel, &widget, WidgetValue::Bool(true));
+    assert!(
+        wait_suspended(&mut controller, id),
+        "the hang probe must suspend the fixture under a 1ms share"
+    );
+
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+    let mut screen = ControlsScreen::default();
+    let texts = rendered_texts(&ctx, &mut controller, &mut screen);
+
+    let expected = format!("Take over transport {}", tr("controls-inactive"));
+    assert!(
+        texts.iter().any(|t| t == &expected),
+        "a suspended plugin's own action row must render the `(inactive)` suffix, got: {texts:?}"
     );
 }

@@ -37,6 +37,11 @@ sha2.workspace = true
 # Plugin console: `log` façade entries tagged `plugin:<identifier>`
 # (009-plugin-runtime-and-permissions, research R19).
 log.workspace = true
+# Plugin icon/glyph assets: PNG-only, decoded once at discovery
+# (011-plugin-ui-contributions, research R11; Constitution X — no new
+# crate, `image` is already a workspace dependency for `modplayer-ui`'s
+# artwork cache, gains the `png` feature beside `jpeg`, T002).
+image.workspace = true
 
 [dev-dependencies]
 # SC-011: queue operation-sequence proptests (research: Dependency additions).

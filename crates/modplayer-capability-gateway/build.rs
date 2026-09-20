@@ -79,7 +79,15 @@ fn pascal_case(dotted: &str) -> String {
         .collect()
 }
 
-const RATE_CATEGORIES: &[&str] = &["transport", "markers", "effects", "state", "timers"];
+const RATE_CATEGORIES: &[&str] = &[
+    "transport",
+    "markers",
+    "effects",
+    "state",
+    "timers",
+    "ui",
+    "notify",
+];
 
 fn rate_category_variant(name: &str) -> &'static str {
     match name {
@@ -88,6 +96,8 @@ fn rate_category_variant(name: &str) -> &'static str {
         "effects" => "Effects",
         "state" => "State",
         "timers" => "Timers",
+        "ui" => "Ui",
+        "notify" => "Notify",
         other => panic!("api/v1.toml: unknown rate category '{other}' (G8)"),
     }
 }

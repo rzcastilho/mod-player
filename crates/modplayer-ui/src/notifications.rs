@@ -11,8 +11,10 @@
 //! Colour never carries meaning alone (Constitution/FR-022): each item's
 //! severity is also spelled out as text, not just an icon/colour.
 
-use egui::{Frame, Ui};
+use egui::{Frame, Ui, WidgetInfo, WidgetType};
 use modplayer_core::{Notification, NotificationAction, NotificationCenter, Severity, tr, tr_args};
+
+use crate::plugin_assets;
 
 /// What the user did with the notification stack this frame, if anything
 /// (002-first-launch-and-sign-in contracts/ui-surface.md "notifications
@@ -44,7 +46,27 @@ pub fn show(ui: &mut Ui, center: &NotificationCenter) -> NotificationInteraction
         Frame::popup(ui.style()).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(severity_label(notification.severity));
-                ui.label(message(notification));
+                // US5 N3: attribution icon + name before the text; the
+                // AccessKit name on the text label is the whole resolved
+                // Fluent string ("<plugin>: <text>"), not just the raw
+                // text, so a screen reader still gets the full sentence
+                // even though it is split into three widgets visually.
+                if let Some(attribution) = &notification.attribution {
+                    plugin_assets::show_cached_icon_or_generic(ui, attribution.id, 16.0);
+                    ui.label(&attribution.name);
+                    let resolved = message(notification);
+                    let text = notification
+                        .args
+                        .iter()
+                        .find(|(key, _)| *key == "text")
+                        .map_or(resolved.as_str(), |(_, value)| value.as_str());
+                    let response = ui.label(text);
+                    response.widget_info(|| {
+                        WidgetInfo::labeled(WidgetType::Label, true, resolved.clone())
+                    });
+                } else {
+                    ui.label(message(notification));
+                }
                 for action in &notification.actions {
                     if ui.button(tr(action_label_key(*action))).clicked() {
                         interaction.action_clicked = Some((notification.id, *action));
@@ -124,6 +146,7 @@ mod tests {
             created_at: std::time::Instant::now(),
             dismissed: false,
             dedupe_key: None,
+            attribution: None,
         };
         assert_eq!(message(&notification), tr("no-output-devices"));
     }

@@ -9,7 +9,13 @@
 //! crate can hand them to `mlua`'s `LuaSerdeExt::to_value` and get a Lua
 //! table for free, rather than hand-writing a table builder per DTO.
 
+use std::collections::BTreeMap;
+
 use serde::Serialize;
+
+use crate::ui::{
+    ActionSpec, NotifyLevel, OverlayPrimitive, SettingsField, UiId, WidgetSpec, WidgetValue,
+};
 
 /// A marker's cross-boundary identity (mirrors `modplayer_core::markers::
 /// MarkerId`; the core crate converts at the boundary).
@@ -107,7 +113,14 @@ pub enum Request {
     },
     SkipNext,
     SkipPrevious,
-    RequestFocus,
+    /// 011-plugin-ui-contributions (R16, FR-026): `interaction` is `true`
+    /// when this call was made synchronously inside a `panel_interaction`/
+    /// `action_invoked` handler — the plugin-thread-only flag `transport.
+    /// request_focus`'s binding reads (was a unit variant before this
+    /// slice).
+    RequestFocus {
+        interaction: bool,
+    },
     ReleaseFocus,
     ArmLoop {
         region: RegionId,
@@ -220,6 +233,46 @@ pub enum Request {
     DebugProbe {
         name: String,
     },
+
+    // -- ui.panel / ui.overlay / ui.shortcuts / ui.settings / ui.notify -------
+    // (011-plugin-ui-contributions, contracts/plugin-api-v1.2.md §3): every
+    // one of these is an RPC except `GetSettings`, which the runtime crate
+    // serves locally and never sends across (research R4).
+    RegisterPanel {
+        panel: UiId,
+        title: String,
+        widgets: Vec<WidgetSpec>,
+    },
+    UpdateWidget {
+        panel: UiId,
+        widget: UiId,
+        value: WidgetValue,
+    },
+    AddOverlays {
+        primitives: Vec<OverlayPrimitive>,
+    },
+    RemoveOverlays {
+        ids: Vec<UiId>,
+    },
+    ClearOverlays,
+    RegisterAction {
+        action: ActionSpec,
+    },
+    /// `stored` is the runtime's `Scope::Settings` snapshot at
+    /// registration time (R5), so core can render the page without a
+    /// second round trip.
+    RegisterSettings {
+        fields: Vec<SettingsField>,
+        stored: BTreeMap<String, serde_json::Value>,
+    },
+    /// Never sent as an RPC (R4) — kept in [`Request`] only so
+    /// [`crate::api::RequestKind::GetSettings`] has a matching variant for
+    /// the exhaustive dispatch tables that key off it.
+    GetSettings,
+    Notify {
+        level: NotifyLevel,
+        text: String,
+    },
 }
 
 /// What a [`Request`] returns on success (data-model.md §1.4).
@@ -241,4 +294,7 @@ pub enum Response {
     /// A newly allocated (or referenced) timer handle.
     TimerHandle(u32),
     Probe(serde_json::Value),
+    /// `get_settings()`'s result (contract §3.5): field id -> current (or
+    /// default-substituted) value.
+    Settings(BTreeMap<String, serde_json::Value>),
 }

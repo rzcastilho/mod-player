@@ -12,6 +12,7 @@ use modplayer_capability_gateway::gateway::Gateway;
 use modplayer_capability_gateway::grants::Grants;
 use modplayer_capability_gateway::limiter::LIMIT;
 use modplayer_capability_gateway::manifest;
+use modplayer_capability_gateway::ui::limits::{NOTIFY_LIMIT, UI_LIMIT};
 
 /// Build a `Gateway` for `PluginId(0)` granting `permission` (if any),
 /// sharing `focus` with the caller so tests can acquire/release it.
@@ -102,4 +103,51 @@ fn rate_limit_window_slides() {
     }
     let later = now + Duration::from_millis(1_001);
     assert!(gw.admit(RequestKind::TransportSeek, later).is_ok());
+}
+
+// -- 011-plugin-ui-contributions: `ui`/`notify` rate buckets (R2, FR-020,
+// FR-020a) ---------------------------------------------------------------
+
+#[test]
+fn notify_window_six_per_minute() {
+    let gw_focus = FocusToken::new();
+    let mut gw = gateway_with(Some(Permission::UiNotify), gw_focus);
+    let now = Instant::now();
+    for _ in 0..NOTIFY_LIMIT {
+        gw.admit(RequestKind::Notify, now).expect("ok");
+    }
+    let err = gw.admit(RequestKind::Notify, now).unwrap_err();
+    assert_eq!(err.reason, "rate_limited");
+}
+
+#[test]
+fn notify_refused_at_validation_still_counts() {
+    // FR-020: admission consumes the notify window's slot the moment the
+    // call is admitted — whether core's own `validate_notify` later
+    // refuses this exact call's level/text makes no difference, since
+    // that check runs only *after* the slot is already gone. Only a
+    // `permission_denied`/`rate_limited` call (refused here, at
+    // admission) consumes nothing.
+    let gw_focus = FocusToken::new();
+    let mut gw = gateway_with(Some(Permission::UiNotify), gw_focus);
+    let now = Instant::now();
+    for _ in 0..NOTIFY_LIMIT {
+        // Every one of these is admitted regardless of payload shape —
+        // the gateway crate never inspects `level`/`text` itself.
+        gw.admit(RequestKind::Notify, now).expect("admitted");
+    }
+    let err = gw.admit(RequestKind::Notify, now).unwrap_err();
+    assert_eq!(err.reason, "rate_limited");
+}
+
+#[test]
+fn ui_category_101st_in_window() {
+    let gw_focus = FocusToken::new();
+    let mut gw = gateway_with(Some(Permission::UiPanel), gw_focus);
+    let now = Instant::now();
+    for _ in 0..UI_LIMIT {
+        gw.admit(RequestKind::RegisterPanel, now).expect("ok");
+    }
+    let err = gw.admit(RequestKind::RegisterPanel, now).unwrap_err();
+    assert_eq!(err.reason, "rate_limited");
 }
