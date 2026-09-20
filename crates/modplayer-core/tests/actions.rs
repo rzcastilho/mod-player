@@ -25,10 +25,12 @@ fn chord(s: &str) -> Chord {
 // ---------------------------------------------------------------------
 
 /// 008, contracts/effects-service.md §4: `ToggleEffectChain` appended
-/// (45 entries), enabled by default, category Navigation.
+/// (45 entries); 010-transport-focus (data-model.md §2.3) appends
+/// `ToggleTransportPanel` (46 entries), enabled by default, category
+/// Navigation.
 #[test]
-fn catalog_has_45_entries_and_effects_enabled() {
-    assert_eq!(CATALOG.len(), 45);
+fn catalog_has_46_entries_and_effects_enabled() {
+    assert_eq!(CATALOG.len(), 46);
     for (i, def) in CATALOG.iter().enumerate() {
         assert_eq!(
             def.action,
@@ -37,7 +39,7 @@ fn catalog_has_45_entries_and_effects_enabled() {
         );
     }
     let ids: HashSet<&str> = HostAction::ALL.iter().map(|a| a.id()).collect();
-    assert_eq!(ids.len(), 45, "every action id must be unique");
+    assert_eq!(ids.len(), 46, "every action id must be unique");
 
     assert!(def(HostAction::ToggleEffectChain).enabled_by_default);
     assert_eq!(
@@ -56,6 +58,36 @@ fn toggle_effect_chain_defaults_to_e_in_now_playing() {
     assert_eq!(row.default_bindings, &["E"]);
     assert_eq!(row.scope, Scope::NowPlaying);
     assert!(!row.repeats_while_held);
+}
+
+/// 010-transport-focus (data-model.md §2.3, contracts/ui-transport-panel.md
+/// §1): `ToggleTransportPanel`'s catalog row — id, label key, Navigation
+/// category, `NowPlaying` scope, sole shipped default `T`, non-repeating,
+/// and (explicitly, alongside the generic `shipped_defaults_never_
+/// conflict` sweep above) that `T` does not conflict with any other
+/// shipped default.
+#[test]
+fn toggle_transport_panel_action_in_catalog() {
+    let row = def(HostAction::ToggleTransportPanel);
+    assert_eq!(
+        HostAction::ToggleTransportPanel.id(),
+        "host.nav.toggle_transport_panel"
+    );
+    assert_eq!(row.label_key, "action-nav-toggle-transport-panel");
+    assert!(row.enabled_by_default);
+    assert_eq!(
+        row.category,
+        modplayer_core::actions::ActionCategory::Navigation
+    );
+    assert_eq!(row.scope, Scope::NowPlaying);
+    assert_eq!(row.default_bindings, &["T"]);
+    assert!(!row.repeats_while_held);
+
+    let registry = ActionRegistry::new(KeymapOverrides::default());
+    assert!(
+        !registry.is_conflicting(HostAction::ToggleTransportPanel, chord("T")),
+        "T must not conflict with any other shipped default"
+    );
 }
 
 #[test]

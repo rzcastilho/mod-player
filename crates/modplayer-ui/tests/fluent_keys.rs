@@ -252,6 +252,8 @@ const CONTROLS_KEYS: &[&str] = &[
     "action-effects-tempo-step-down",
     // 008, contracts/effects-service.md §4.
     "action-nav-toggle-effect-chain",
+    // 010-transport-focus, contracts/ui-transport-panel.md §3.
+    "action-nav-toggle-transport-panel",
     "action-cat-transport",
     "action-cat-markers",
     "action-cat-loop",
@@ -365,6 +367,34 @@ const EFFECTS_NODE_ARG_KEYS: &[&str] = &["effect-chain-auto-bypassed"];
 const EFFECTS_NODE_OWNER_ARG_KEYS: &[&str] = &["effect-chain-over-budget"];
 /// `effects-no-time-stretch` (008, Phase 3) takes no Fluent placeholder.
 const EFFECTS_NO_ARG_NOTIFICATION_KEYS: &[&str] = &["effects-no-time-stretch"];
+
+/// `transport.ftl` keys (010-transport-focus, Phase 5 (US3), contracts/
+/// ui-transport-panel.md §3) with no Fluent placeholder — resolved via
+/// plain `tr`.
+const TRANSPORT_KEYS: &[&str] = &[
+    "transport-toggle",
+    "transport-panel-title",
+    "transport-holder-host",
+    "transport-policy",
+    "transport-policy-manual",
+    "transport-policy-auto",
+    "transport-policy-first",
+    "transport-take-back",
+    "transport-holds",
+    "transport-empty",
+];
+
+/// `transport-holder`: templated with `{ $holder }`.
+const TRANSPORT_HOLDER_ARG_KEYS: &[&str] = &["transport-holder"];
+
+/// `transport-give-focus`: templated with `{ $plugin }`.
+const TRANSPORT_GIVE_ARG_KEYS: &[&str] = &["transport-give-focus"];
+
+/// `transport-requesting`: templated with `{ $order }`.
+const TRANSPORT_REQUESTING_ARG_KEYS: &[&str] = &["transport-requesting"];
+
+/// `transport-row-a11y`: templated with `{ $plugin }`/`{ $state }`.
+const TRANSPORT_ROW_A11Y_ARG_KEYS: &[&str] = &["transport-row-a11y"];
 
 /// `plugins.ftl` keys with no Fluent placeholder (009-plugin-runtime-and-
 /// permissions US4, T111; contracts/ui-plugins.md §2/§3): the section's own
@@ -923,6 +953,52 @@ fn every_shell_nav_and_notification_key_resolves() {
             "Fluent key `{key}` is missing from locales/en-US/effects.ftl (tr() fell back to the raw key)"
         );
     }
+
+    for key in TRANSPORT_KEYS {
+        let resolved = tr(key);
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/transport.ftl (tr() fell back to the raw key)"
+        );
+    }
+
+    for key in TRANSPORT_HOLDER_ARG_KEYS {
+        let resolved = tr_args(key, &[("holder", "Focus fixture A".to_string())]);
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/transport.ftl (tr_args() fell back to the raw key)"
+        );
+    }
+
+    for key in TRANSPORT_GIVE_ARG_KEYS {
+        let resolved = tr_args(key, &[("plugin", "Focus fixture A".to_string())]);
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/transport.ftl (tr_args() fell back to the raw key)"
+        );
+    }
+
+    for key in TRANSPORT_REQUESTING_ARG_KEYS {
+        let resolved = tr_args(key, &[("order", "1".to_string())]);
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/transport.ftl (tr_args() fell back to the raw key)"
+        );
+    }
+
+    for key in TRANSPORT_ROW_A11Y_ARG_KEYS {
+        let resolved = tr_args(
+            key,
+            &[
+                ("plugin", "Focus fixture A".to_string()),
+                ("state", "holds focus".to_string()),
+            ],
+        );
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/transport.ftl (tr_args() fell back to the raw key)"
+        );
+    }
 }
 
 /// Every message identifier a Fluent (`.ftl`) resource defines: lines of
@@ -983,6 +1059,7 @@ fn no_unused_keys_in_playback_and_settings_ftl() {
     let settings_ftl = include_str!("../../../locales/en-US/settings.ftl");
     let controls_ftl = include_str!("../../../locales/en-US/controls.ftl");
     let effects_ftl = include_str!("../../../locales/en-US/effects.ftl");
+    let transport_ftl = include_str!("../../../locales/en-US/transport.ftl");
 
     let tested: HashSet<&str> = SHELL_AND_NOTIFICATION_KEYS
         .iter()
@@ -1007,6 +1084,11 @@ fn no_unused_keys_in_playback_and_settings_ftl() {
         .chain(EFFECTS_NODE_ARG_KEYS)
         .chain(EFFECTS_NODE_OWNER_ARG_KEYS)
         .chain(EFFECTS_NO_ARG_NOTIFICATION_KEYS)
+        .chain(TRANSPORT_KEYS)
+        .chain(TRANSPORT_HOLDER_ARG_KEYS)
+        .chain(TRANSPORT_GIVE_ARG_KEYS)
+        .chain(TRANSPORT_REQUESTING_ARG_KEYS)
+        .chain(TRANSPORT_ROW_A11Y_ARG_KEYS)
         .copied()
         .collect();
 
@@ -1032,6 +1114,12 @@ fn no_unused_keys_in_playback_and_settings_ftl() {
         assert!(
             tested.contains(key),
             "locales/en-US/effects.ftl defines `{key}`, which no UI code path (and so no test in this file) uses — remove it or wire it up"
+        );
+    }
+    for key in defined_keys(transport_ftl) {
+        assert!(
+            tested.contains(key),
+            "locales/en-US/transport.ftl defines `{key}`, which no UI code path (and so no test in this file) uses — remove it or wire it up"
         );
     }
 }

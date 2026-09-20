@@ -42,7 +42,7 @@ pub fn packages() -> Vec<BundledPackage> {
 /// Every fixture package (research R8/R18) — loaded only when
 /// [`fixtures_enabled`]. US1's four fault-isolation fixtures land first;
 /// US2 adds the three least-privilege fixtures; US3's own task adds the
-/// last (well-behaved) one.
+/// well-behaved one; 010-transport-focus adds the last two (contention).
 #[must_use]
 pub fn fixtures() -> Vec<BundledPackage> {
     vec![
@@ -54,6 +54,8 @@ pub fn fixtures() -> Vec<BundledPackage> {
         fixture_invalid(),
         fixture_flood(),
         fixture_wellbehaved(),
+        fixture_focus_a(),
+        fixture_focus_b(),
     ]
 }
 
@@ -138,6 +140,33 @@ fn fixture_wellbehaved() -> BundledPackage {
         manifest_toml: include_str!("../../../../plugins/fixtures/wellbehaved/plugin.toml"),
         entry: include_str!("../../../../plugins/fixtures/wellbehaved/main.luau"),
         readme: include_str!("../../../../plugins/fixtures/wellbehaved/README.md"),
+        fixture: true,
+    }
+}
+
+/// 010-transport-focus (data-model.md §5): requests focus, seeks and
+/// arms a transient loop region on every grant, hangs on its third
+/// `play_state_changed` (the manual/test-driven suspension trigger).
+fn fixture_focus_a() -> BundledPackage {
+    BundledPackage {
+        identifier: "org.modplayer.fixture.focus-a",
+        manifest_toml: include_str!("../../../../plugins/fixtures/focus-a/plugin.toml"),
+        entry: include_str!("../../../../plugins/fixtures/focus-a/main.luau"),
+        readme: include_str!("../../../../plugins/fixtures/focus-a/README.md"),
+        fixture: true,
+    }
+}
+
+/// 010-transport-focus (data-model.md §5): requests focus and seeks on
+/// every grant; while not the holder, attempts a seek on every
+/// `play_state_changed` and logs the resulting `no_focus` — the
+/// single-holder contention proof paired with [`fixture_focus_a`].
+fn fixture_focus_b() -> BundledPackage {
+    BundledPackage {
+        identifier: "org.modplayer.fixture.focus-b",
+        manifest_toml: include_str!("../../../../plugins/fixtures/focus-b/plugin.toml"),
+        entry: include_str!("../../../../plugins/fixtures/focus-b/main.luau"),
+        readme: include_str!("../../../../plugins/fixtures/focus-b/README.md"),
         fixture: true,
     }
 }

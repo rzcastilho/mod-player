@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! `HostAction`, `ActionDef` and the 45-entry default catalog (007,
+//! `HostAction`, `ActionDef` and the 46-entry default catalog (007,
 //! data-model.md §1.1-1.2, spec § Default Action Catalog; 008 appends
-//! `ToggleEffectChain`, contracts/effects-service.md §4).
+//! `ToggleEffectChain`, contracts/effects-service.md §4; 010-transport-
+//! focus appends `ToggleTransportPanel`, data-model.md §2.3).
 
 use super::{ActionCategory, ActionKind, ActionOwner, Scope};
 use crate::markers::CueSlot;
 
-/// A named, dispatchable host operation (DM-14). Exactly 45 variants,
+/// A named, dispatchable host operation (DM-14). Exactly 46 variants,
 /// in the catalog's display order; ids are append-only across slices
 /// (never renumbered or removed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -52,6 +53,9 @@ pub enum HostAction {
     // ids) even though its category is Navigation, so no earlier
     // variant's id/position shifts.
     ToggleEffectChain,
+    // 010-transport-focus, data-model.md §2.3: appended last for the same
+    // reason.
+    ToggleTransportPanel,
 }
 
 /// `n = 1..=8`, in that order, via [`CueSlot::new_const`] (no `Option`
@@ -69,7 +73,7 @@ const CUE_SLOTS: [CueSlot; 8] = [
 
 impl HostAction {
     /// Every action, in catalog order (data-model.md §1.1).
-    pub const ALL: [HostAction; 45] = [
+    pub const ALL: [HostAction; 46] = [
         HostAction::Play,
         HostAction::Pause,
         HostAction::TogglePlayPause,
@@ -115,6 +119,7 @@ impl HostAction {
         HostAction::TempoStepUp,
         HostAction::TempoStepDown,
         HostAction::ToggleEffectChain,
+        HostAction::ToggleTransportPanel,
     ];
 
     /// The stable, namespaced identifier persisted to `settings.toml`
@@ -171,6 +176,7 @@ impl HostAction {
             HostAction::TempoStepUp => "host.effects.tempo_step_up",
             HostAction::TempoStepDown => "host.effects.tempo_step_down",
             HostAction::ToggleEffectChain => "host.nav.toggle_effect_chain",
+            HostAction::ToggleTransportPanel => "host.nav.toggle_transport_panel",
         }
     }
 
@@ -233,6 +239,7 @@ impl HostAction {
             HostAction::TempoStepUp => "action-effects-tempo-step-up",
             HostAction::TempoStepDown => "action-effects-tempo-step-down",
             HostAction::ToggleEffectChain => "action-nav-toggle-effect-chain",
+            HostAction::ToggleTransportPanel => "action-nav-toggle-transport-panel",
         }
     }
 
@@ -266,7 +273,8 @@ impl HostAction {
             | HostAction::NavSettings
             | HostAction::ToggleQueue
             | HostAction::FocusSearch
-            | HostAction::ToggleEffectChain => ActionCategory::Navigation,
+            | HostAction::ToggleEffectChain
+            | HostAction::ToggleTransportPanel => ActionCategory::Navigation,
             HostAction::TempoStepUp | HostAction::TempoStepDown => ActionCategory::Effects,
         }
     }
@@ -306,7 +314,7 @@ macro_rules! def {
 
 /// The shipped default catalog (spec § Default Action Catalog),
 /// verbatim: one entry per [`HostAction::ALL`], in the same order.
-pub const CATALOG: [ActionDef; 45] = [
+pub const CATALOG: [ActionDef; 46] = [
     def!(HostAction::Play, Scope::App, false, true, &[]),
     def!(HostAction::Pause, Scope::App, false, true, &[]),
     def!(
@@ -591,6 +599,13 @@ pub const CATALOG: [ActionDef; 45] = [
         false,
         true,
         &["E"]
+    ),
+    def!(
+        HostAction::ToggleTransportPanel,
+        Scope::NowPlaying,
+        false,
+        true,
+        &["T"]
     ),
 ];
 

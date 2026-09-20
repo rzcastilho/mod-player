@@ -1580,3 +1580,89 @@ fn partial_peaks_stay_when_failed_with_peaks() {
         "partial peaks must render as waveform columns, not the unavailable label: {texts:?}"
     );
 }
+
+// -- 010-transport-focus, Phase 5 (US3): the Transport panel toggle --------
+
+/// The header's "Transport" toggle renders alongside "Queue"/"Effects"
+/// (contracts/ui-transport-panel.md §1) — closed by default, opening the
+/// panel's own title text once toggled.
+#[test]
+fn transport_toggle_beside_queue_and_effects() {
+    let (mut controller, _handle, _dir) = active_controller("transport-toggle-beside");
+    controller.queue_replace(vec![track("a", 200_000)]);
+    let mut artwork = ArtworkCache::new();
+    let mut waveform = WaveformState::default();
+
+    let texts = rendered_texts(&mut controller, &mut artwork, &mut waveform);
+    assert!(
+        texts.contains(&tr("queue-toggle")),
+        "sanity: the Queue toggle must render, got {texts:?}"
+    );
+    assert!(
+        texts.contains(&tr("effects-toggle")),
+        "sanity: the Effects toggle must render, got {texts:?}"
+    );
+    assert!(
+        texts.contains(&tr("transport-toggle")),
+        "the Transport toggle must render beside Queue/Effects, got {texts:?}"
+    );
+    assert!(
+        !texts.contains(&tr("transport-panel-title")),
+        "the panel must start closed"
+    );
+}
+
+/// Toggling the Transport panel open survives a track change (mirrors
+/// 008's `e_and_header_toggle_panel_and_it_survives_track_change`) — its
+/// open/closed state lives in egui temp memory (keyed on one `Context`
+/// kept across every render below), not per-track state.
+#[test]
+fn transport_panel_survives_track_change() {
+    let (mut controller, _handle, _dir) = active_controller("transport-panel-survives");
+    controller.queue_replace(vec![track("a", 200_000), track("b", 200_000)]);
+    let mut artwork = ArtworkCache::new();
+    let mut waveform = WaveformState::default();
+
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+    let texts = |controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+                 artwork: &mut ArtworkCache,
+                 waveform: &mut WaveformState| {
+        let mut output = ctx.run_ui(default_input(), |ui| {
+            modplayer_ui::now_playing::show(ui, controller, artwork, waveform);
+        });
+        let update = output
+            .platform_output
+            .accesskit_update
+            .take()
+            .expect("accesskit_update should be populated once enabled");
+        output.drop_without_applying_deltas();
+        update
+            .nodes
+            .iter()
+            .flat_map(|(_, node)| [node.value(), node.label()])
+            .filter_map(|text| text.map(str::to_string))
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+    };
+
+    let initial = texts(&mut controller, &mut artwork, &mut waveform);
+    assert!(
+        !initial.contains(&tr("transport-panel-title")),
+        "the panel starts closed"
+    );
+
+    modplayer_ui::transport_view::toggle_transport_panel(&ctx);
+    let opened = texts(&mut controller, &mut artwork, &mut waveform);
+    assert!(
+        opened.contains(&tr("transport-panel-title")),
+        "toggling must open the panel, got {opened:?}"
+    );
+
+    controller.skip_forward();
+    let after_track_change = texts(&mut controller, &mut artwork, &mut waveform);
+    assert!(
+        after_track_change.contains(&tr("transport-panel-title")),
+        "the panel must survive a track change, got {after_track_change:?}"
+    );
+}

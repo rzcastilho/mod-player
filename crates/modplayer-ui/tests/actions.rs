@@ -1925,3 +1925,130 @@ fn plus_without_time_stretch_notifies_once_while_held() {
         "must raise the no-time-stretch notification exactly once across the held run"
     );
 }
+
+// -- 010-transport-focus, Phase 5 (US3): `T` toggles the Transport panel ----
+
+/// `T` toggles the Transport panel only while Now Playing is shown
+/// (010-transport-focus, contracts/ui-transport-panel.md §1).
+#[test]
+fn t_toggles_transport_panel_in_now_playing_scope() {
+    let (mut controller, _handle, _dirs) = active_controller("t-transport-toggle");
+    controller.queue_replace(vec![track("a", 200_000)]);
+    controller.play();
+    controller.tick();
+
+    let mut shell = Shell::default();
+    let mut waveform = WaveformState::default();
+    let ctx = Context::default();
+    let claims = FocusClaims::default();
+    let transport_panel_id = modplayer_ui::transport_view::panel_open_id();
+    let transport_open = || {
+        ctx.memory(|m| m.data.get_temp::<bool>(transport_panel_id))
+            .unwrap_or(false)
+    };
+
+    assert!(
+        !transport_open(),
+        "sanity: the Transport panel starts closed"
+    );
+
+    // In Now Playing: opens, then closes.
+    press(
+        &ctx,
+        key(EguiKey::T, Modifiers::NONE),
+        &claims,
+        &now_playing_scope(),
+        &mut controller,
+        &mut shell,
+        &mut waveform,
+    );
+    assert!(
+        transport_open(),
+        "T must open the Transport panel in Now Playing"
+    );
+
+    press(
+        &ctx,
+        key(EguiKey::T, Modifiers::NONE),
+        &claims,
+        &now_playing_scope(),
+        &mut controller,
+        &mut shell,
+        &mut waveform,
+    );
+    assert!(!transport_open(), "a second T must close it again");
+}
+
+/// `T` inside a focused text-like field types the character and never
+/// toggles the panel (FR-017's general precedence rule, mirrors `slash_
+/// in_focused_text_field_types_and_does_not_focus_search`).
+#[test]
+fn t_ignored_while_text_field_focused() {
+    let (mut controller, _handle, _dirs) = active_controller("t-text-field-focused");
+    controller.queue_replace(vec![track("a", 200_000)]);
+
+    let mut shell = Shell::default();
+    let mut waveform = WaveformState::default();
+    let ctx = Context::default();
+    let text_field_id = Id::new("test-text-field");
+    ctx.memory_mut(|m| m.request_focus(text_field_id));
+    let mut claims = FocusClaims::default();
+    claims.register(text_field_id, Claim::TextLike);
+    let transport_panel_id = modplayer_ui::transport_view::panel_open_id();
+
+    let invocations = press(
+        &ctx,
+        key(EguiKey::T, Modifiers::NONE),
+        &claims,
+        &now_playing_scope(),
+        &mut controller,
+        &mut shell,
+        &mut waveform,
+    );
+
+    assert!(
+        invocations.is_empty(),
+        "a focused text-like field must silence T, like every other action"
+    );
+    assert!(
+        !ctx.memory(|m| m.data.get_temp::<bool>(transport_panel_id))
+            .unwrap_or(false),
+        "the Transport panel must stay closed"
+    );
+}
+
+/// `T` (`Scope::NowPlaying`) falls through untouched while Now Playing is
+/// not shown — mirrors `i_outside_now_playing_falls_through`.
+#[test]
+fn t_ignored_outside_now_playing() {
+    let (mut controller, _handle, _dirs) = active_controller("t-outside-now-playing");
+    controller.queue_replace(vec![track("a", 200_000)]);
+    controller.play();
+    controller.tick();
+
+    let mut shell = Shell::default();
+    let mut waveform = WaveformState::default();
+    let ctx = Context::default();
+    let claims = FocusClaims::default();
+
+    let invocations = press(
+        &ctx,
+        key(EguiKey::T, Modifiers::NONE),
+        &claims,
+        &app_scope(),
+        &mut controller,
+        &mut shell,
+        &mut waveform,
+    );
+    assert!(
+        invocations.is_empty(),
+        "T must not fire outside Now Playing"
+    );
+    assert!(
+        !ctx.memory(|m| m
+            .data
+            .get_temp::<bool>(modplayer_ui::transport_view::panel_open_id()))
+            .unwrap_or(false),
+        "the Transport panel must stay closed"
+    );
+}

@@ -19,6 +19,7 @@ use crate::artwork::{ArtworkCache, ArtworkState};
 use crate::effects_view;
 use crate::markers;
 use crate::queue_view;
+use crate::transport_view;
 use crate::waveform::{
     self, DetailWindow, DragOrigin, DragPreview, WaveformEvent, WaveformPaint, WaveformState,
 };
@@ -87,6 +88,10 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     let mut effects_open = ui
         .memory(|memory| memory.data.get_temp::<bool>(effects_id))
         .unwrap_or(false);
+    let transport_id = transport_view::panel_open_id();
+    let mut transport_open = ui
+        .memory(|memory| memory.data.get_temp::<bool>(transport_id))
+        .unwrap_or(false);
 
     ui.horizontal(|ui| {
         let playing = controller.transport_state().intent == Intent::Playing;
@@ -140,9 +145,17 @@ pub fn show<B: OutputBackend, H: SourceHost>(
         {
             effects_open = !effects_open;
         }
+
+        if ui
+            .selectable_label(transport_open, tr("transport-toggle"))
+            .clicked()
+        {
+            transport_open = !transport_open;
+        }
     });
     ui.memory_mut(|memory| memory.data.insert_temp(queue_id, queue_open));
     ui.memory_mut(|memory| memory.data.insert_temp(effects_id, effects_open));
+    ui.memory_mut(|memory| memory.data.insert_temp(transport_id, transport_open));
 
     if controller.current_track().is_some() {
         show_waveform(ui, controller, waveform, available, track_changed);
@@ -169,6 +182,13 @@ pub fn show<B: OutputBackend, H: SourceHost>(
                 effects_view::show(ui, controller);
                 effects_view::handle_focused_handle_keys(ui, controller);
             });
+    }
+
+    // 010-transport-focus, contracts/ui-transport-panel.md §1: drawn after
+    // the Effect Chain panel (if open) and before the Queue panel.
+    if transport_open {
+        ui.separator();
+        transport_view::show(ui, controller);
     }
 
     if let Some(new_volume) = volume::master_volume(ui, controller.master_volume()) {

@@ -60,8 +60,10 @@ mod tests {
     }
 
     #[test]
-    fn api_version_is_one_dot_zero() {
+    fn api_version_is_one_dot_one() {
+        // 010-transport-focus (research R6, Constitution IX): the minor
+        // bump that gates the FocusGranted/FocusRevoked events.
         assert_eq!(API_VERSION.major, 1);
-        assert_eq!(API_VERSION.minor, 0);
+        assert_eq!(API_VERSION.minor, 1);
     }
 }

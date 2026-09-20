@@ -12,6 +12,7 @@ use modplayer_capability_gateway::event::{HostEvent, UnloadReason};
 use modplayer_capability_gateway::focus::FocusToken;
 use modplayer_capability_gateway::grants::Grants;
 use modplayer_capability_gateway::manifest::{self, PluginIdentifier};
+use modplayer_capability_gateway::request::OwnerInfo;
 use modplayer_capability_gateway::state::{PluginStatePaths, StateWriter};
 use modplayer_engine::RtShared;
 use modplayer_plugin_runtime::events::{PlaybackSnapshot, RuntimeEvent, SuspendCause};
@@ -28,6 +29,7 @@ use crate::notifications::{
 };
 
 use super::fanout::FanOut;
+use super::focus::{FocusArbiter, FocusChange, FocusHolder, Vacancy};
 use super::log::PluginLog;
 use super::{
     BundledPackage, Lifecycle, PluginId, PluginIdTable, PluginRecord, Source, bundled,
@@ -75,6 +77,12 @@ pub struct PluginHost {
     records: Vec<PluginRecord>,
     ids: PluginIdTable,
     focus: FocusToken,
+    /// 010-transport-focus (research R1): the transport-focus state
+    /// machine. `focus` (above) is the read-side `FocusToken` cell every
+    /// plugin thread's `Gateway::admit` checks; this arbiter is the only
+    /// decision-maker, and `apply_focus_changes` is the only writer of
+    /// `focus` (design note 2).
+    arbiter: FocusArbiter,
     paths: Option<PluginStatePaths>,
     writer: Option<StateWriter>,
     requests_tx: SyncSender<RpcEnvelope>,
@@ -176,6 +184,7 @@ impl PluginHost {
             records,
             ids,
             focus: FocusToken::new(),
+            arbiter: FocusArbiter::new(),
             paths: PluginStatePaths::resolve(),
             writer: Some(StateWriter::spawn()),
             requests_tx,
@@ -223,6 +232,68 @@ impl PluginHost {
     #[must_use]
     pub fn focus(&self) -> &FocusToken {
         &self.focus
+    }
+
+    /// 010-transport-focus: the read-only view the controller's own
+    /// `transport_focus_view()`/focus-gated request re-check use.
+    #[must_use]
+    pub fn arbiter(&self) -> &FocusArbiter {
+        &self.arbiter
+    }
+
+    /// The state-mutating half (`request`/`release`/`give`/`take_back`/
+    /// `local_host_action`/`vacate`/`on_track_changed`/`set_policy`) —
+    /// every caller must follow up with [`PluginHost::apply_focus_
+    /// changes`] on the returned `Vec<FocusChange>` (design note 4: token
+    /// first, then `Revoked` before `Granted`).
+    pub fn arbiter_mut(&mut self) -> &mut FocusArbiter {
+        &mut self.arbiter
+    }
+
+    /// 010-transport-focus (design note 2, C3): apply every `FocusChange`
+    /// an arbiter call returned — set the shared `FocusToken` once, to
+    /// the final holder, then deliver each event to its plugin's handle
+    /// in order (a missing handle, the `Fault`/suspended case, is skipped
+    /// silently). `changes` already lists every `Revoked` before any
+    /// `Granted` (A11); this never reorders them. Always writes the
+    /// token, even when `changes` is empty (A8: a `Fault` vacate under a
+    /// non-`FirstRequestWins` policy moves the holder to `Host` without
+    /// emitting any `FocusChange` at all — an empty-`changes` early
+    /// return would silently leave the token stale).
+    pub fn apply_focus_changes(&mut self, changes: Vec<FocusChange>) {
+        let final_holder = match self.arbiter.holder() {
+            FocusHolder::Host => None,
+            FocusHolder::Plugin(id) => Some(to_gateway_id(id)),
+        };
+        self.focus.set_holder(final_holder);
+        for change in changes {
+            let (plugin, event) = match change {
+                FocusChange::Revoked { plugin, new_holder } => {
+                    let holder = match new_holder {
+                        FocusHolder::Host => OwnerInfo::Host,
+                        FocusHolder::Plugin(id) => OwnerInfo::Plugin(
+                            self.ids
+                                .identifier_of(id)
+                                .map(ToString::to_string)
+                                .unwrap_or_default(),
+                        ),
+                    };
+                    (plugin, HostEvent::FocusRevoked { holder })
+                }
+                FocusChange::Granted { plugin } => {
+                    let holder = OwnerInfo::Plugin(
+                        self.ids
+                            .identifier_of(plugin)
+                            .map(ToString::to_string)
+                            .unwrap_or_default(),
+                    );
+                    (plugin, HostEvent::FocusGranted { holder })
+                }
+            };
+            if let Some(handle) = self.record(plugin).and_then(|r| r.handle.as_ref()) {
+                handle.send_event(event);
+            }
+        }
     }
 
     #[must_use]
@@ -486,7 +557,12 @@ impl PluginHost {
         markers: Option<&mut TrackMarkers>,
         chain: &mut ChainModel,
     ) {
-        self.focus.release_if(to_gateway_id(id));
+        // 010-transport-focus (research R11, C4): the arbiter is the
+        // only decision-maker; `Fault` never emits `focus_revoked` (the
+        // plugin's thread is exiting or gone) but a `FirstRequestWins`
+        // vacancy still refills from the queue.
+        let changes = self.arbiter.vacate(id, Vacancy::Fault);
+        self.apply_focus_changes(changes);
         if let Some(markers) = markers {
             // `loop_disarmed`/`marker_changed` fan-out for this teardown
             // lands with US2 (T087, `fan_out_revision_events`); the model

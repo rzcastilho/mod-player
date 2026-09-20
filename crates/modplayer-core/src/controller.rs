@@ -62,7 +62,9 @@ use crate::notifications::{
     KEY_NO_OUTPUT_DEVICES, KEY_QUEUE_ITEM_SKIPPED_UNAVAILABLE, KEY_TRACK_STATE_NEWER_VERSION,
     KEY_TRACK_STATE_SAVE_FAILED, KEY_TRACK_STATE_UNREADABLE, NotificationCenter, Severity,
 };
-use crate::plugins::{Lifecycle, PluginLog, PluginsView};
+use crate::plugins::{
+    FocusPolicy, Lifecycle, PluginLog, PluginsView, TransportActor, TransportFocusView,
+};
 use crate::queue::{
     AdvanceReason, Origin, PlaybackChange, Queue, QueueChange, QueueItem, QueueItemId, QueueMode,
     XorShiftRng,
@@ -571,6 +573,14 @@ pub struct PlaybackController<B: OutputBackend, H: SourceHost> {
     /// snapshot()` — compared by value (the model carries no revision
     /// counter of its own).
     plugin_snapshot_queue: Vec<QueueItemInfo>,
+
+    /// 010-transport-focus (research R3, data-model.md §1.5): who is
+    /// driving the transport method calls currently in flight — the
+    /// user's own local input by default, a plugin's own RPC while
+    /// `plugins::apply::drain_plugin_requests` handles it, or a remote
+    /// controller/transfer command. Set by [`Self::with_transport_actor`];
+    /// [`Self::note_local_transport_action`] is the only reader.
+    transport_actor: TransportActor,
 }
 
 /// `transport.seek_forward_step`/`seek_backward_step`'s step size
@@ -726,6 +736,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
             plugin_snapshot_marker_revision: 0,
             plugin_snapshot_chain_revision: 0,
             plugin_snapshot_queue: Vec::new(),
+            transport_actor: TransportActor::default(),
         };
         // 006, contracts/marker-service.md §4: resolved unconditionally at
         // construction, like `AnalysisPaths::resolve()` just above —
@@ -1311,7 +1322,12 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
     /// deregister — called by `App` *before* it processes 002's
     /// `SignedOut`/`SessionRevoked` report.
     pub fn clear_for_sign_out(&mut self) {
-        self.stop();
+        // 010-transport-focus (design note 5): teardown's own `stop()` is
+        // neither the local user nor a plugin — `Remote` keeps it from
+        // firing the auto-policy revoke hook (the arbiter itself is reset
+        // to `Host`/empty by each `PluginHost::stop` this sign-out already
+        // runs, via `clear_track_state_for_sign_out`).
+        self.with_transport_actor(TransportActor::Remote, Self::stop);
         self.queue = Queue::new();
         // `queue` is reset directly above rather than through `dispatch`,
         // so `sync_analysis_attachment`'s post-`dispatch` hook never runs
@@ -1390,7 +1406,9 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         // gets `stop(id, Shutdown)` first, with a bounded (≤ 250 ms) wait
         // for its thread to actually exit, before anything else below.
         self.shutdown_plugins();
-        self.stop();
+        // 010-transport-focus (design note 5): see `clear_for_sign_out`'s
+        // own note above.
+        self.with_transport_actor(TransportActor::Remote, Self::stop);
         self.source_host.command(SourceCommand::Shutdown);
         // Contracts/transport-delta.md §2: after the source `Shutdown`.
         self.analysis.shutdown();
@@ -1529,6 +1547,13 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         // above.
         let shared = Arc::clone(&self.shared);
         self.plugins.load_all_enabled(&shared);
+
+        // 010-transport-focus (C7): seed the arbiter's policy from the
+        // persisted setting; the holder and pending queue always start
+        // empty (session-scoped, FR-012) regardless of what a previous
+        // session's holder was.
+        let focus_policy = self.settings_store.load().settings.focus_policy;
+        self.plugins.arbiter_mut().set_policy(focus_policy);
     }
 
     /// Preview a specific device: reopens the stream on it and restarts the
@@ -2252,6 +2277,99 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         self.last_marker_actor = actor;
     }
 
+    // -- transport focus (010-transport-focus, data-model.md §2.5) ------
+
+    /// Run `f` with [`TransportActor`] set to `actor` for its duration,
+    /// restoring the previous value on exit (research R3, data-model.md
+    /// §1.5) — nested calls are safe. The two non-default call sites are
+    /// `plugins::apply::drain_plugin_requests` (`Plugin(id)`) and
+    /// `Effect::ApplyPendingTransferCommand`/sign-out's and shutdown's
+    /// internal `stop()` (`Remote`, design note 5); every other call
+    /// leaves the default `LocalUser` in place.
+    pub(crate) fn with_transport_actor<R>(
+        &mut self,
+        actor: TransportActor,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let previous = self.transport_actor;
+        self.transport_actor = actor;
+        let result = f(self);
+        self.transport_actor = previous;
+        result
+    }
+
+    /// FR-002/FR-002a, research R3/R4: the auto-policy revoke hook.
+    /// Fires `FocusArbiter::local_host_action()` only when the call
+    /// driving this is a genuine local user action (`self.transport_actor
+    /// == TransportActor::LocalUser`) — a plugin's own RPC or a remote/
+    /// transfer command never revokes (contracts/focus-arbitration.md
+    /// C2). Called at the entry of `dispatch()` for the six transport
+    /// `Input`s and after a successful `arm_loop`/`disarm_loop`.
+    fn note_local_transport_action(&mut self) {
+        if self.transport_actor != TransportActor::LocalUser {
+            return;
+        }
+        let changes = self.plugins.arbiter_mut().local_host_action();
+        self.plugins.apply_focus_changes(changes);
+    }
+
+    /// The Transport panel's whole read model (FR-008, contracts/focus-
+    /// arbitration.md C9).
+    #[must_use]
+    pub fn transport_focus_view(&self) -> TransportFocusView {
+        TransportFocusView::from_records_and_arbiter(self.plugins.records(), self.plugins.arbiter())
+    }
+
+    /// The user's current transport-focus policy (FR-005, FR-012).
+    #[must_use]
+    pub fn focus_policy(&self) -> FocusPolicy {
+        self.plugins.arbiter().policy()
+    }
+
+    /// Change the policy and persist it (C7, A10): the holder and pending
+    /// queue are untouched — only judged by the new policy from the next
+    /// event on.
+    pub fn set_focus_policy(&mut self, policy: FocusPolicy) {
+        self.plugins.arbiter_mut().set_policy(policy);
+        self.persist_settings(|settings| settings.focus_policy = policy);
+    }
+
+    /// The user's "Give focus" (FR-008, C8): a no-op unless `id` is a
+    /// current [`TransportFocusView`] row.
+    pub fn focus_give(&mut self, id: crate::plugins::PluginId) {
+        if !self
+            .transport_focus_view()
+            .rows
+            .iter()
+            .any(|row| row.id == id)
+        {
+            return;
+        }
+        let changes = self.plugins.arbiter_mut().give(id);
+        self.plugins.apply_focus_changes(changes);
+    }
+
+    /// The user's "Take back" (FR-008, C8): a no-op while the host already
+    /// holds focus.
+    pub fn focus_take_back(&mut self) {
+        let changes = self.plugins.arbiter_mut().take_back();
+        self.plugins.apply_focus_changes(changes);
+    }
+
+    /// `plugins::apply`'s own `RequestFocus` handler (C1): always
+    /// recorded, never refused.
+    pub(crate) fn focus_request(&mut self, id: crate::plugins::PluginId) {
+        let changes = self.plugins.arbiter_mut().request(id, true);
+        self.plugins.apply_focus_changes(changes);
+    }
+
+    /// `plugins::apply`'s own `ReleaseFocus` handler (C1): always
+    /// succeeds.
+    pub(crate) fn focus_release(&mut self, id: crate::plugins::PluginId) {
+        let changes = self.plugins.arbiter_mut().release(id);
+        self.plugins.apply_focus_changes(changes);
+    }
+
     /// `plugins::apply`'s own `SetCue` handler (US2 T085): unlike the
     /// host's own [`Self::set_cue`] (always `Owner::Host`, at the
     /// playhead), a plugin's cue carries its own owner and an explicit
@@ -2413,6 +2531,11 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         self.source_host.command(SourceCommand::PrefetchHint {
             frame: a.saturating_sub(x),
         });
+        // 010-transport-focus (C2): only after a successful arm — a
+        // plugin's own `ArmLoop` RPC runs this under `Plugin(id)`, so the
+        // hook no-ops for it (only a `LocalUser` arm, e.g. the panel's
+        // header shortcut, revokes).
+        self.note_local_transport_action();
         Ok(())
     }
 
@@ -2422,6 +2545,8 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
     pub fn disarm_loop(&mut self) -> Result<(), MarkerError> {
         self.current_markers_mut()?.disarm();
         self.push_command_retrying(Command::LoopDisarm);
+        // 010-transport-focus (C2): see `arm_loop`'s own note above.
+        self.note_local_transport_action();
         Ok(())
     }
 
@@ -3338,6 +3463,24 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
     /// is derived from which kind of input this was, *before* it is moved
     /// into `reduce`.
     fn dispatch(&mut self, input: Input) {
+        // 010-transport-focus (C2, FR-002a): the auto-policy revoke hook
+        // fires for exactly the six transport commands — a plugin's own
+        // RPC or a remote/transfer command runs this same `dispatch()`
+        // under a non-`LocalUser` actor (`with_transport_actor`), so
+        // `note_local_transport_action` itself is the no-op guard for
+        // those; `Input::RemoteCommand` is not one of the six and so
+        // never reaches this branch regardless of actor.
+        if matches!(
+            input,
+            Input::Play { .. }
+                | Input::Pause
+                | Input::Stop
+                | Input::Seek { .. }
+                | Input::SkipForward
+                | Input::SkipBack { .. }
+        ) {
+            self.note_local_transport_action();
+        }
         let queue_origin = match &input {
             Input::SkipForward => QueueChangeOrigin::UserSkipForward,
             Input::SkipBack { .. } => QueueChangeOrigin::UserSkipBack,
@@ -3430,6 +3573,12 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
             // events()` doesn't spuriously re-fire `marker_changed` for a
             // track it never actually mutated.
             self.plugin_last_marker_revision = 0;
+            // 010-transport-focus (C6, R7): `FirstRequestWins`'s own
+            // per-track reset shares this exact trigger — no second
+            // definition of "track change" — and applies before
+            // `TrackChanged` itself fans out.
+            let changes = self.plugins.arbiter_mut().on_track_changed();
+            self.plugins.apply_focus_changes(changes);
             let track = self.queue.current().map(|item| TrackInfo {
                 id: item.track.id.to_string(),
                 title: item.track.title.clone(),
@@ -3546,14 +3695,21 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
                 Effect::Timer(TimerCommand::Cancel(TimerKind::Reconnect)) => {
                     self.reconnect_timer_deadline = None;
                 }
-                Effect::ApplyPendingTransferCommand(pending) => match pending {
-                    PendingTransferCommand::Play | PendingTransferCommand::PlayHere => self.play(),
-                    PendingTransferCommand::SkipForward => self.skip_forward(),
-                    PendingTransferCommand::SkipBack => self.skip_back(),
-                    PendingTransferCommand::Seek(ms) => {
-                        self.seek(Duration::from_millis(u64::from(ms)));
-                    }
-                },
+                // 010-transport-focus (design note 5, C2): a Connect
+                // transfer command is neither the local user nor a plugin
+                // — it never fires the auto-policy revoke hook.
+                Effect::ApplyPendingTransferCommand(pending) => {
+                    self.with_transport_actor(TransportActor::Remote, |ctrl| match pending {
+                        PendingTransferCommand::Play | PendingTransferCommand::PlayHere => {
+                            ctrl.play();
+                        }
+                        PendingTransferCommand::SkipForward => ctrl.skip_forward(),
+                        PendingTransferCommand::SkipBack => ctrl.skip_back(),
+                        PendingTransferCommand::Seek(ms) => {
+                            ctrl.seek(Duration::from_millis(u64::from(ms)));
+                        }
+                    });
+                }
                 Effect::MirrorVolume(pct) => {
                     // T15: update the shadow/engine volume like
                     // `set_master_volume`, but do not echo

@@ -19,6 +19,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::actions::{Chord, HostAction, KeymapOverrides};
+use crate::plugins::FocusPolicy;
 
 /// Current on-disk schema version (contracts/settings-file.md).
 pub const SCHEMA_VERSION: u32 = 1;
@@ -77,6 +78,11 @@ pub struct AudioSettings {
     /// default. Compared in `PartialEq` like every other field, so a
     /// round-trip test catches a regression here too.
     pub keybinding_overrides: KeymapOverrides,
+    /// `[transport] focus_policy` (010-transport-focus, FR-012,
+    /// data-model.md §2.2): the user's global transport-focus assignment
+    /// policy. The holder and pending queue are session-only and never
+    /// persisted (FR-012) — only this enum lives here.
+    pub focus_policy: FocusPolicy,
     pub schema_version: u32,
 }
 
@@ -95,6 +101,7 @@ impl Default for AudioSettings {
             connect_device_id: None,
             nudge_step_ms: DEFAULT_NUDGE_STEP_MS,
             keybinding_overrides: KeymapOverrides::default(),
+            focus_policy: FocusPolicy::default(),
             schema_version: SCHEMA_VERSION,
         }
     }
@@ -120,6 +127,10 @@ pub enum InvalidField {
     /// `[playback] device_name` was longer than 64 characters after trim
     /// (contracts/transport-and-queue.md §5).
     DeviceName,
+    /// `[transport] focus_policy` held an unrecognised string
+    /// (010-transport-focus, research R5) — falls back to
+    /// `FocusPolicy::default()` (`AutoOnInteraction`).
+    FocusPolicy,
 }
 
 impl InvalidField {
@@ -129,6 +140,7 @@ impl InvalidField {
             InvalidField::BufferPreset => "audio.buffer_preset",
             InvalidField::Theme => "appearance.theme",
             InvalidField::DeviceName => "playback.device_name",
+            InvalidField::FocusPolicy => "transport.focus_policy",
         }
     }
 }
@@ -204,6 +216,11 @@ pub struct RawSettings {
     pub playback: RawPlayback,
     #[serde(default)]
     pub markers: RawMarkers,
+    /// `[transport]` (010-transport-focus, research R5): an optional
+    /// table so older files (with no such section) load the default
+    /// policy.
+    #[serde(default)]
+    pub transport: RawTransport,
     /// `[keybindings]` (007, contracts/keymap-settings.md): action id ->
     /// arbitrary TOML value, so one malformed entry's *shape* (not an
     /// array, or an array with a non-string) never fails the whole file
@@ -225,6 +242,7 @@ impl Default for RawSettings {
             disclosure: RawDisclosure::default(),
             playback: RawPlayback::default(),
             markers: RawMarkers::default(),
+            transport: RawTransport::default(),
             keybindings: BTreeMap::new(),
         }
     }
@@ -258,6 +276,27 @@ impl Default for RawMarkers {
 
 fn default_nudge_step_ms() -> i64 {
     i64::from(DEFAULT_NUDGE_STEP_MS)
+}
+
+/// The `[transport]` section (010-transport-focus, research R5,
+/// data-model.md §2.2): the user's global focus policy. The holder and
+/// pending queue are session-only and never written here (FR-012).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawTransport {
+    #[serde(default = "default_focus_policy")]
+    pub focus_policy: String,
+}
+
+impl Default for RawTransport {
+    fn default() -> Self {
+        Self {
+            focus_policy: default_focus_policy(),
+        }
+    }
+}
+
+fn default_focus_policy() -> String {
+    FocusPolicy::default().wire_name().to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -410,6 +449,9 @@ impl RawSettings {
             markers: RawMarkers {
                 nudge_step_ms: i64::from(settings.nudge_step_ms),
             },
+            transport: RawTransport {
+                focus_policy: settings.focus_policy.wire_name().to_string(),
+            },
             keybindings: settings
                 .keybinding_overrides
                 .iter()
@@ -467,6 +509,14 @@ impl RawSettings {
             _ => {
                 invalid.push(InvalidField::Theme);
                 Theme::default()
+            }
+        };
+
+        let focus_policy = match FocusPolicy::parse(&self.transport.focus_policy) {
+            Some(policy) => policy,
+            None => {
+                invalid.push(InvalidField::FocusPolicy);
+                FocusPolicy::default()
             }
         };
 
@@ -528,6 +578,7 @@ impl RawSettings {
             connect_device_id,
             nudge_step_ms: clamp_nudge_step_ms(self.markers.nudge_step_ms),
             keybinding_overrides,
+            focus_policy,
             schema_version: self.schema_version,
         };
 

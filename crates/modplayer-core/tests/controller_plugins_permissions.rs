@@ -396,11 +396,15 @@ fn arm_loop_permission_before_focus() {
     );
 }
 
-/// R12/T084: focus is a single, contended holder — a second plugin's
-/// `RequestFocus` is refused `invalid_state`/`focus_held` while the
-/// first still holds it, and freed again by `ReleaseFocus`.
+/// 010-transport-focus (C1, FR-003/FR-011, research R10 supersedes 009's
+/// `request_focus_contention_invalid_state`): `request_focus()` is a
+/// plain RPC to core — always `Ok`, recorded whether or not another
+/// plugin already holds or is pending; the arbiter, not this dispatch
+/// layer, decides who is actually granted. Under the default
+/// `AutoOnInteraction` policy neither request auto-grants (A4);
+/// `release_focus()` withdraws a pending request just as unconditionally.
 #[test]
-fn request_focus_contention_invalid_state() {
+fn request_focus_is_recorded_never_refused() {
     let (mut controller, _dir, _psd, _tsd) = fixture_controller();
     let first = controller_plugin_id(&mut controller, "org.modplayer.fixture.observer");
     let second = controller_plugin_id(&mut controller, "org.modplayer.fixture.flood");
@@ -409,20 +413,40 @@ fn request_focus_contention_invalid_state() {
         call(&mut controller, first, Request::RequestFocus),
         Ok(Response::Ok)
     );
+    assert_eq!(
+        call(&mut controller, second, Request::RequestFocus),
+        Ok(Response::Ok),
+        "a second plugin's request_focus() is recorded, never refused"
+    );
 
-    let refusal = call(&mut controller, second, Request::RequestFocus)
-        .expect_err("focus must be single-holder");
-    assert_eq!(refusal.code, RefusalCode::InvalidState);
-    assert_eq!(refusal.reason, "focus_held");
+    // This harness never `launch()`es (no fixture thread is spawned, so
+    // `transport_focus_view()`'s own `Loading|Active` filter would show
+    // neither row) — read the arbiter's raw pending queue directly
+    // instead, which is exactly what `apply.rs`'s `RequestFocus`/
+    // `ReleaseFocus` arms drove above.
+    let arbiter = controller.plugins_mut().arbiter();
+    assert_eq!(
+        arbiter.holder(),
+        modplayer_core::plugins::FocusHolder::Host,
+        "AutoOnInteraction never auto-grants on request (A4)"
+    );
+    assert_eq!(arbiter.request_order(first), Some(1));
+    assert_eq!(arbiter.request_order(second), Some(2));
 
     assert_eq!(
         call(&mut controller, first, Request::ReleaseFocus),
         Ok(Response::Ok)
     );
+    let arbiter = controller.plugins_mut().arbiter();
     assert_eq!(
-        call(&mut controller, second, Request::RequestFocus),
-        Ok(Response::Ok),
-        "focus must be free once the holder releases it"
+        arbiter.request_order(first),
+        None,
+        "release_focus() withdraws a pending request"
+    );
+    assert_eq!(
+        arbiter.request_order(second),
+        Some(1),
+        "the remaining pending request keeps its own relative order"
     );
 }
 
@@ -502,27 +526,20 @@ fn rate_limit_1000_seeks() {
         "the flood fixture must reach Active before it can be triggered"
     );
 
-    // Every bundled fixture loads together here (`MODPLAYER_PLUGIN_
-    // FIXTURES=1`), and the `wellbehaved` fixture (US3, T091) now also
-    // requests focus on its own `ready_ack` — it can win the race and
-    // hold focus by the time this test's trigger below fires, which
-    // would refuse every one of flood's 1 000 seeks on `focus_held`
-    // before any of them ever reach the rate limiter (G2's fixed
-    // permission → focus → rate-limit order) and make the assertion
-    // below flake at `got 0`. This test's own subject is the rate
-    // limiter, not focus contention (that is `request_focus_contention_
-    // invalid_state`'s job) — clear every fixture's focus claim via a
-    // synthetic `ReleaseFocus` (a no-op for whichever ids do not hold
-    // it) so `flood`'s own `request_focus()` below is uncontested.
-    let all_ids: Vec<PluginId> = controller
-        .plugins_mut()
-        .records()
-        .iter()
-        .map(|r| r.id)
-        .collect();
-    for other in all_ids {
-        let _ = call(&mut controller, other, Request::ReleaseFocus);
-    }
+    // 010-transport-focus (research R10): under the default
+    // `AutoOnInteraction` policy nobody auto-grants on `request_focus()`
+    // any more (A4), so `flood`'s own in-script request would otherwise
+    // leave it un-granted and every one of its 1 000 seeks would be
+    // refused `no_focus` before ever reaching the rate limiter — this
+    // test's subject is the rate limiter, not arbitration (that is
+    // `request_focus_is_recorded_never_refused`'s job). Switch to
+    // `FirstRequestWins` and deterministically hand `flood` the holder
+    // via the host's own "Give focus" (`focus_give`, C8) *before* the
+    // trigger below, so it is uncontested regardless of whether any other
+    // eagerly-requesting fixture (e.g. `wellbehaved`'s own `ready_ack`
+    // cycle) got there first.
+    controller.set_focus_policy(modplayer_core::plugins::FocusPolicy::FirstRequestWins);
+    controller.focus_give(id);
 
     // `controller.play()` alone can be a no-op transition here — `launch()`
     // may already have auto-played the test tone before any fixture
@@ -612,16 +629,31 @@ fn queue_write_ignores_focus() {
     let holder_candidate = controller_plugin_id(&mut controller, "org.modplayer.fixture.flood");
     let mover = controller_plugin_id(&mut controller, "org.modplayer.fixture.observer");
 
-    // Make sure *someone* holds transport focus for this test to be
-    // meaningful: either `holder_candidate` grabs it here, or the
-    // well-behaved fixture's own ready_ack cycle already has (both are
-    // real threads once `controller_with_track()` launched every
-    // enabled fixture) — either way, `mover` below never is the holder.
-    let _ = call(&mut controller, holder_candidate, Request::RequestFocus);
-    let holder = controller.plugins_mut().focus().holder();
+    // 010-transport-focus (research R10): `request_focus()` alone no
+    // longer grants anything under the default `AutoOnInteraction`
+    // policy (A4) — deterministically hand `holder_candidate` the holder
+    // via the host's own "Give focus" (`focus_give`, C8) instead of
+    // racing a plain `RequestFocus` CAS, so this test's actual holder is
+    // never `mover` regardless of any other fixture's own request.
+    // `focus_give` is a no-op for a row that isn't yet `Loading`/`Active`
+    // (C8, `transport_focus_view()`'s own filter), so wait for it first.
     assert!(
-        holder.is_some(),
-        "some plugin must hold transport focus for this test to be meaningful"
+        pump_controller_until(&mut controller, Duration::from_secs(2), |c| {
+            matches!(
+                c.plugins_mut()
+                    .record(holder_candidate)
+                    .map(|r| &r.lifecycle),
+                Some(Lifecycle::Active)
+            )
+        }),
+        "the flood fixture must reach Active before it can be given focus"
+    );
+    controller.focus_give(holder_candidate);
+    let holder = controller.plugins_mut().focus().holder();
+    assert_eq!(
+        holder,
+        Some(to_gateway_id(holder_candidate)),
+        "focus_give must grant the requested holder"
     );
     assert_ne!(
         holder,

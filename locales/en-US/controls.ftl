@@ -50,6 +50,7 @@ action-nav-settings = Go to Settings
 action-nav-toggle-queue = Toggle queue panel
 action-nav-focus-search = Focus search box
 action-nav-toggle-effect-chain = Toggle effect chain panel
+action-nav-toggle-transport-panel = Toggle Transport panel
 
 action-effects-tempo-step-up = Tempo step up
 action-effects-tempo-step-down = Tempo step down

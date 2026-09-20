@@ -16,7 +16,7 @@ use modplayer_capability_gateway::event::{HostEvent, TrackInfo, UnloadReason};
 use modplayer_capability_gateway::focus::{FocusToken, PluginId};
 use modplayer_capability_gateway::grants::Grants;
 use modplayer_capability_gateway::manifest::{self, ApiRange};
-use modplayer_capability_gateway::request::Response;
+use modplayer_capability_gateway::request::{OwnerInfo, Response};
 use modplayer_capability_gateway::state::PluginStatePaths;
 use modplayer_engine::RtShared;
 use modplayer_plugin_runtime::events::{AbortCause, PlaybackSnapshot, RuntimeEvent};
@@ -60,7 +60,7 @@ fn spawn_test_plugin(
     Receiver<(PluginId, RuntimeEvent)>,
     Receiver<RpcEnvelope>,
 ) {
-    let (handle, events, requests, _shared, _playback) =
+    let (handle, events, requests, _shared, _playback, _focus) =
         spawn_test_plugin_ex(entry_source, grants, budgets, writer, paths);
     (handle, events, requests)
 }
@@ -81,11 +81,13 @@ fn spawn_test_plugin_ex(
     Receiver<RpcEnvelope>,
     Arc<RtShared>,
     Arc<PlaybackSnapshot>,
+    FocusToken,
 ) {
     let (requests_tx, requests_rx) = std::sync::mpsc::sync_channel::<RpcEnvelope>(16);
     let (events_tx, events_rx) = std::sync::mpsc::sync_channel(256);
     let shared = Arc::new(RtShared::new());
     let playback = Arc::new(PlaybackSnapshot::new());
+    let focus = FocusToken::new();
     let config = SpawnConfig {
         id: PluginId(1),
         identifier: "org.modplayer.test.scheduler".to_string(),
@@ -96,7 +98,7 @@ fn spawn_test_plugin_ex(
         },
         grants,
         budgets,
-        focus: FocusToken::new(),
+        focus: focus.clone(),
         fixtures_enabled: false,
     };
     let deps = RuntimeDeps {
@@ -114,6 +116,7 @@ fn spawn_test_plugin_ex(
         requests_rx,
         shared,
         playback,
+        focus,
     )
 }
 
@@ -179,6 +182,38 @@ fn events_in_order() {
     assert_eq!(seen, vec!["10", "20", "30"]);
 }
 
+/// 010-transport-focus (contracts/plugin-api-v1.1.md RT-F3): `holder` on
+/// both new events renders with `owner_to_string` — `"host"` or the
+/// identifier, never `"me"` (these are delivered straight to a handle,
+/// bypassing the fan-out's self-substitution).
+#[test]
+fn focus_events_render_holder() {
+    let entry = r#"
+        api.on("focus_granted", function(event)
+            api.log.info("granted:" .. event.holder)
+        end)
+        api.on("focus_revoked", function(event)
+            api.log.info("revoked:" .. event.holder)
+        end)
+        api.ready()
+    "#;
+    let (handle, events, _requests) =
+        spawn_test_plugin(entry, Grants::none(), Budgets::DEFAULT, None, None);
+    wait_for_ready(&events);
+
+    handle.send_event(HostEvent::FocusGranted {
+        holder: OwnerInfo::Plugin("org.modplayer.test.scheduler".to_string()),
+    });
+    handle.send_event(HostEvent::FocusRevoked {
+        holder: OwnerInfo::Host,
+    });
+
+    let first = wait_for_log(&events, Duration::from_secs(1)).unwrap_or_default();
+    let second = wait_for_log(&events, Duration::from_secs(1)).unwrap_or_default();
+    assert_eq!(first, "granted:org.modplayer.test.scheduler");
+    assert_eq!(second, "revoked:host");
+}
+
 /// Blocks on `requests_rx` for the next `RpcEnvelope`, waits `delay`, then
 /// replies `Ok(Response::Ok)` — simulates a slow (or, with a long delay
 /// against a short `rpc_timeout` budget, unresponsive) host answering the
@@ -202,18 +237,22 @@ fn answer_next_rpc_after(requests: &Receiver<RpcEnvelope>, delay: Duration) -> I
 fn rpc_wait_excluded_from_cpu() {
     let entry = r#"
         api.on("play_state_changed", function(_event)
-            api.transport.request_focus()
             api.transport.play()
         end)
         api.ready()
     "#;
-    let (handle, events, requests) = spawn_test_plugin(
+    let (handle, events, requests, _shared, _playback, focus) = spawn_test_plugin_ex(
         entry,
         grants_with(&["transport.control"]),
         Budgets::DEFAULT,
         None,
         None,
     );
+    // Grant this plugin focus directly (010-transport-focus, research R2):
+    // `request_focus()` is now an RPC to core whose grant depends on the
+    // user's policy, so a bare binding-level harness with no controller
+    // sets the token itself rather than exercising that RPC.
+    focus.set_holder(Some(PluginId(1)));
     wait_for_ready(&events);
 
     handle.send_event(HostEvent::PlayStateChanged {
@@ -249,7 +288,6 @@ fn rpc_wait_excluded_from_cpu() {
 fn slow_handler_delays_only_own_events() {
     let entry = r#"
         api.on("play_state_changed", function(_event)
-            api.transport.request_focus()
             api.transport.play()
             api.log.info("slow-done")
         end)
@@ -258,13 +296,14 @@ fn slow_handler_delays_only_own_events() {
         end)
         api.ready()
     "#;
-    let (handle, events, requests) = spawn_test_plugin(
+    let (handle, events, requests, _shared, _playback, focus) = spawn_test_plugin_ex(
         entry,
         grants_with(&["transport.control", "playback.observe"]),
         Budgets::DEFAULT,
         None,
         None,
     );
+    focus.set_holder(Some(PluginId(1)));
     wait_for_ready(&events);
 
     handle.send_event(HostEvent::PlayStateChanged {
@@ -297,7 +336,6 @@ fn slow_handler_delays_only_own_events() {
 fn rpc_timeout_is_host_busy() {
     let entry = r#"
         api.on("play_state_changed", function(_event)
-            api.transport.request_focus()
             local ok, err = api.transport.play()
             if not ok then
                 api.log.info("refusal:" .. err.reason)
@@ -309,13 +347,14 @@ fn rpc_timeout_is_host_busy() {
         rpc_timeout: Duration::from_millis(30),
         ..Budgets::DEFAULT
     };
-    let (handle, events, _requests) = spawn_test_plugin(
+    let (handle, events, _requests, _shared, _playback, focus) = spawn_test_plugin_ex(
         entry,
         grants_with(&["transport.control"]),
         budgets,
         None,
         None,
     );
+    focus.set_holder(Some(PluginId(1)));
     wait_for_ready(&events);
 
     handle.send_event(HostEvent::PlayStateChanged {
@@ -414,7 +453,7 @@ fn position_rate_clamped_and_coalesced() {
         end)
         api.ready()
     "#;
-    let (_handle, events, _requests, shared, _playback) = spawn_test_plugin_ex(
+    let (_handle, events, _requests, shared, _playback, _focus) = spawn_test_plugin_ex(
         entry,
         grants_with(&["playback.observe"]),
         Budgets::DEFAULT,
@@ -447,7 +486,7 @@ fn position_silent_while_paused() {
         end)
         api.ready()
     "#;
-    let (_handle, events, _requests, shared, _playback) = spawn_test_plugin_ex(
+    let (_handle, events, _requests, shared, _playback, _focus) = spawn_test_plugin_ex(
         entry,
         grants_with(&["playback.observe"]),
         Budgets::DEFAULT,
@@ -489,7 +528,7 @@ fn position_jitter_under_5ms() {
         end)
         api.ready()
     "#;
-    let (_handle, events, _requests, shared, playback) = spawn_test_plugin_ex(
+    let (_handle, events, _requests, shared, playback, _focus) = spawn_test_plugin_ex(
         entry,
         grants_with(&["playback.observe"]),
         Budgets::DEFAULT,
@@ -547,7 +586,7 @@ fn schedule_at_position_fires_once_with_actual_position() {
         end)
         api.ready()
     "#;
-    let (_handle, events, _requests, shared, playback) = spawn_test_plugin_ex(
+    let (_handle, events, _requests, shared, playback, _focus) = spawn_test_plugin_ex(
         entry,
         grants_with(&["playback.observe"]),
         Budgets::DEFAULT,
@@ -595,7 +634,7 @@ fn track_change_cancels_position_timers() {
         end)
         api.ready()
     "#;
-    let (handle, events, _requests, shared, playback) = spawn_test_plugin_ex(
+    let (handle, events, _requests, shared, playback, _focus) = spawn_test_plugin_ex(
         entry,
         grants_with(&["playback.observe"]),
         Budgets::DEFAULT,
@@ -641,7 +680,7 @@ fn timer_limit_257() {
         end)
         api.ready()
     "#;
-    let (handle, events, _requests, _shared, _playback) =
+    let (handle, events, _requests, _shared, _playback, _focus) =
         spawn_test_plugin_ex(entry, Grants::none(), Budgets::DEFAULT, None, None);
     wait_for_ready(&events);
 
@@ -673,7 +712,7 @@ fn clear_unknown_timer_not_found() {
         end)
         api.ready()
     "#;
-    let (_handle, events, _requests, _shared, _playback) =
+    let (_handle, events, _requests, _shared, _playback, _focus) =
         spawn_test_plugin_ex(entry, Grants::none(), Budgets::DEFAULT, None, None);
     wait_for_ready(&events);
     let message = wait_for_log(&events, Duration::from_secs(1));
@@ -702,7 +741,7 @@ fn track_state_restored_before_track_changed() {
         end)
         api.ready()
     "#;
-    let (handle, events, _requests, _shared, _playback) = spawn_test_plugin_ex(
+    let (handle, events, _requests, _shared, _playback, _focus) = spawn_test_plugin_ex(
         entry,
         grants_with(&["playback.observe", "state.track"]),
         Budgets::DEFAULT,
@@ -766,7 +805,7 @@ fn restore_timeout_delivers_event_anyway() {
         end)
         api.ready()
     "#;
-    let (handle, events, _requests, _shared, _playback) = spawn_test_plugin_ex(
+    let (handle, events, _requests, _shared, _playback, _focus) = spawn_test_plugin_ex(
         entry,
         grants_with(&["playback.observe", "state.track"]),
         Budgets::DEFAULT,

@@ -251,25 +251,6 @@ pub fn dispatch(
             Ok(Response::Probe(serde_json::Value::Object(probe)))
         }
 
-        // -- Local: transport focus (research R12) --------------------------
-        RequestKind::TransportRequestFocus => {
-            let guard = lock(shared);
-            let id = guard.gateway.plugin();
-            if guard.gateway.focus().try_acquire(id) {
-                Ok(Response::Ok)
-            } else {
-                Err(Refusal::invalid_state(
-                    "focus_held",
-                    "Another plugin currently holds transport focus.",
-                ))
-            }
-        }
-        RequestKind::TransportReleaseFocus => {
-            let guard = lock(shared);
-            guard.gateway.focus().release_if(guard.gateway.plugin());
-            Ok(Response::Ok)
-        }
-
         // -- Local: snapshot reads (research R3) -----------------------------
         RequestKind::ListMarkers => {
             let guard = lock(shared);

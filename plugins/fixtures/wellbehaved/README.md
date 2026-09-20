@@ -12,4 +12,15 @@ each step's outcome (`<step>: ok` or `<step>: <code>/<reason>`) so a
 manual run (quickstart.md M8) or a test reading `plugin_log()` can
 confirm every one of them worked exactly as declared.
 
+010-transport-focus: `request_focus()` itself still always succeeds
+(recorded), but the subsequent `arm_loop` call now reports `no_focus`
+under the default `AutoOnInteraction` policy, since a plugin's own
+request is never auto-granted (FR-005) — only the user's "Give focus"
+grants it. The `arm_loop: <code>/<reason>` log line therefore reads
+`arm_loop: no_focus/no_focus`, not `ok`, until the user gives this
+plugin focus (the Transport panel, or the `FirstRequestWins` policy on
+a fresh track). This is expected, not a regression: the single-holder
+guarantee means a plugin's own request is only ever a request, never an
+automatic grant.
+
 Only used when `MODPLAYER_PLUGIN_FIXTURES=1` is set at launch.

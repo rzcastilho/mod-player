@@ -506,6 +506,8 @@ pub fn invoke<B: OutputBackend, H: SourceHost>(
         HostAction::TempoStepDown => controller.tempo_step(-1),
         // 008, contracts/ui-effect-chain.md §5.
         HostAction::ToggleEffectChain => crate::effects_view::toggle_effect_chain_panel(ctx),
+        // 010-transport-focus, contracts/ui-transport-panel.md §1.
+        HostAction::ToggleTransportPanel => crate::transport_view::toggle_transport_panel(ctx),
     }
 }
 

@@ -540,6 +540,15 @@ fn event_to_lua(lua: &mlua::Lua, event: &HostEvent) -> mlua::Result<(&'static st
             table.set("position_ms", *position_ms)?;
             Value::Table(table)
         }
+        HostEvent::FocusGranted { holder } | HostEvent::FocusRevoked { holder } => {
+            // 010-transport-focus (contracts/plugin-api-v1.1.md §3, RT-F3):
+            // delivered straight to a handle (never fanned out), so
+            // `owner_to_string` renders "host" or the identifier — never
+            // "me".
+            let table = lua.create_table()?;
+            table.set("holder", bindings::owner_to_string(holder))?;
+            Value::Table(table)
+        }
     };
     Ok((name, payload))
 }

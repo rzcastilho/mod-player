@@ -2,6 +2,13 @@
 
 //! `api.transport.*` (contract §3): play/pause/toggle/seek/skip, focus,
 //! arm/disarm loop.
+//!
+//! `request_focus`/`release_focus` are ordinary RPCs to core like every
+//! other call here (010-transport-focus research R2, contracts/
+//! plugin-api-v1.1.md RT-F1): `bindings::dispatch` has no local arm for
+//! them, so they fall through to `_ => rpc(..)` and always return
+//! `Ok(Response::Ok)`; whether/when focus is actually granted is reported
+//! only by the `focus_granted`/`focus_revoked` events.
 
 use mlua::{Lua, Table};
 

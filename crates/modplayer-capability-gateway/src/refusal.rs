@@ -80,15 +80,6 @@ impl Refusal {
     }
 
     #[must_use]
-    pub fn focus_held() -> Self {
-        Self::new(
-            RefusalCode::InvalidState,
-            "focus_held",
-            "Another plugin currently holds transport focus.",
-        )
-    }
-
-    #[must_use]
     pub fn rate_limited() -> Self {
         Self::new(
             RefusalCode::RateLimited,

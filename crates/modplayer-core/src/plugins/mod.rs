@@ -11,6 +11,7 @@
 pub mod apply;
 pub mod bundled;
 pub mod fanout;
+pub mod focus;
 pub mod host;
 pub mod log;
 pub mod view;
@@ -26,9 +27,11 @@ use modplayer_plugin_runtime::events::SuspendCause;
 use modplayer_plugin_runtime::handle::PluginHandle;
 
 pub use bundled::BundledPackage;
+pub(crate) use focus::TransportActor;
+pub use focus::{FocusArbiter, FocusChange, FocusHolder, FocusPolicy, Vacancy};
 pub use host::PluginHost;
 pub use log::{LogEntry, PluginLog};
-pub use view::{PluginRow, PluginsView};
+pub use view::{FocusRow, PluginRow, PluginsView, TransportFocusView};
 
 /// A plugin's session-stable identity within `modplayer-core` — the same
 /// numeric space `modplayer-effects`' `NodeOwner::Plugin`/`markers::model::

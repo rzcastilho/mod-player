@@ -305,15 +305,18 @@ fn rows_show_every_column_sorted_by_name() {
         find_one(&nodes, Role::Label, &tr(key));
     }
 
-    // Every one of the 8 fixtures (`plugins/bundled/` is empty this
-    // slice), sorted case-insensitively by name — already alphabetical
-    // for this fixture set. The invalid fixture's manifest never parses
-    // into a `Manifest` (only a `ManifestError`), so its row falls back
-    // to its raw identifier (`plugins/view.rs::row`, mirrors `plugins/
-    // host.rs::record_sort_key`'s own fallback) rather than the `name`
-    // its TOML never validated into.
+    // Every one of the 10 fixtures (`plugins/bundled/` is empty this
+    // slice; 010-transport-focus adds `focus-a`/`focus-b`), sorted
+    // case-insensitively by name — already alphabetical for this fixture
+    // set. The invalid fixture's manifest never parses into a `Manifest`
+    // (only a `ManifestError`), so its row falls back to its raw
+    // identifier (`plugins/view.rs::row`, mirrors `plugins/host.rs::
+    // record_sort_key`'s own fallback) rather than the `name` its TOML
+    // never validated into.
     let expected_order = [
         "Flood fixture",
+        "Focus fixture A",
+        "Focus fixture B",
         "Hang fixture",
         "Leak fixture",
         "Never-ready fixture",
@@ -353,20 +356,26 @@ fn rows_show_every_column_sorted_by_name() {
         4,
         "expected 4 single-permission rows reading just `playback.observe`'s explanation: {nodes:?}"
     );
+    // Flood and focus-b (010-transport-focus) hold the identical two-
+    // permission pair, so this explanation string renders twice.
     let flood_permissions = format!(
         "{}{}{}",
         tr("permission-playback-observe"),
         tr("plugins-list-separator"),
         tr("permission-transport-control")
     );
-    find_one(&nodes, Role::Label, &flood_permissions);
+    assert_eq!(
+        find_all(&nodes, Role::Label, &flood_permissions).len(),
+        2,
+        "expected flood and focus-b to share the same two-permission explanation: {nodes:?}"
+    );
 
     // Every non-invalid fixture is `Disabled` pre-launch, so its health is
     // `Ok` and its CPU/memory are both the dash (not yet `Active`).
     assert_eq!(
         find_all(&nodes, Role::Label, &tr("plugins-health-ok")).len(),
-        7,
-        "7 valid fixtures must all read `ok` before any is launched: {nodes:?}"
+        9,
+        "9 valid fixtures must all read `ok` before any is launched: {nodes:?}"
     );
 }
 

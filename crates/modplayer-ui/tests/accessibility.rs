@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use egui::accesskit::{Role, Toggled};
 use egui::{Context, Event, Key, Modifiers, Pos2, RawInput, Rect};
@@ -26,6 +26,7 @@ use modplayer_audio_source_synthetic::ScriptedHost;
 use modplayer_audio_source_synthetic::scripted::HydratedReply;
 use modplayer_core::actions::{Chord, HostAction, Platform};
 use modplayer_core::markers::CueSlot;
+use modplayer_core::plugins::{Lifecycle, PluginId};
 use modplayer_core::settings::SettingsStore;
 use modplayer_core::{
     ActiveState, NotificationAction, NotificationCenter, PlaybackController, Severity, tr, tr_args,
@@ -1935,10 +1936,11 @@ fn plugins_section_controls_named() {
     let nodes = render_nodes(|ui| modplayer_ui::plugins_view::show(ui, &mut controller));
 
     let checkboxes: Vec<_> = nodes.iter().filter(|n| n.role == Role::CheckBox).collect();
-    // 8 fixtures (`plugins/bundled/` is empty this slice) => 8 toggles.
+    // 10 fixtures (`plugins/bundled/` is empty this slice;
+    // 010-transport-focus adds `focus-a`/`focus-b`) => 10 toggles.
     assert_eq!(
         checkboxes.len(),
-        8,
+        10,
         "expected one toggle per fixture: {nodes:?}"
     );
     for checkbox in &checkboxes {
@@ -1963,12 +1965,258 @@ fn plugins_section_controls_named() {
     assert_eq!(invalid_toggle.toggled, Some(Toggled::False));
 
     // No plugin is `Active` pre-launch, so every health label reads `ok`
-    // (the 7 valid fixtures) — each a real, non-empty accessible name,
+    // (the 9 valid fixtures) — each a real, non-empty accessible name,
     // never a bare colour dot.
     let ok_labels = find_all(&nodes, Role::Label, &tr("plugins-health-ok"));
     assert_eq!(
         ok_labels.len(),
-        7,
-        "expected 7 `ok` health labels: {nodes:?}"
+        9,
+        "expected 9 `ok` health labels: {nodes:?}"
     );
+}
+
+// -- Transport panel (010-transport-focus, Phase 5 (US3), contracts/
+// ui-transport-panel.md §2) --------------------------------------------
+
+/// A controller with every `plugins/fixtures/` package discovered,
+/// `launch()`ed, a confirmed device, and a track playing — enough for
+/// `focus-a`/`focus-b`'s own `ready_ack`-triggered `request_focus()`
+/// (RT5) to have already run by the time each reaches `Active` (mirrors
+/// `controller_transport_focus.rs`'s own `fixture_controller`/
+/// `controller_with_track`).
+fn fixture_controller_with_track(
+    label: &str,
+) -> (
+    PlaybackController<FakeBackend, ScriptedHost>,
+    modplayer_audio_source_synthetic::ScriptedHostHandle,
+    TempDir,
+    TempDir,
+    TempDir,
+) {
+    let (store, dir) = fresh_store(label);
+    let plugin_state_dir = TempDir::new(&format!("{label}-plugin-state"));
+    let track_state_dir = TempDir::new(&format!("{label}-track-state"));
+    let host = ScriptedHost::new();
+    let handle = host.handle();
+    let devices = vec![fake_device()];
+    let mut controller = {
+        let _guard = PLUGIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Safety: narrowly scopes each mutation to the one synchronous
+        // read `PlaybackController::new` makes of it, serialized against
+        // every other test in this binary via the lock above.
+        unsafe {
+            std::env::set_var("MODPLAYER_PLUGIN_FIXTURES", "1");
+            std::env::set_var("MODPLAYER_PLUGIN_STATE_DIR", plugin_state_dir.path());
+            std::env::set_var("MODPLAYER_TRACK_STATE_DIR", track_state_dir.path());
+        }
+        let controller = PlaybackController::new(FakeBackend::new(devices), host, store);
+        unsafe {
+            std::env::remove_var("MODPLAYER_PLUGIN_FIXTURES");
+            std::env::remove_var("MODPLAYER_PLUGIN_STATE_DIR");
+            std::env::remove_var("MODPLAYER_TRACK_STATE_DIR");
+        }
+        controller
+    };
+    controller.launch();
+    controller.confirm_device(
+        DeviceId::new("dev-1").unwrap_or_else(|| unreachable!()),
+        BufferPreset::Balanced,
+    );
+    controller.set_playback_permitted(true, None);
+    controller.queue_replace(vec![track("a")]);
+    controller.play();
+    controller.tick();
+    (controller, handle, dir, plugin_state_dir, track_state_dir)
+}
+
+fn plugin_id_by_identifier(
+    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+    identifier: &str,
+) -> PluginId {
+    controller
+        .plugins_mut()
+        .records()
+        .iter()
+        .find(|r| r.identifier.as_str() == identifier)
+        .map(|r| r.id)
+        .unwrap_or_else(|| panic!("fixture '{identifier}' must be discovered"))
+}
+
+fn wait_plugin_active(
+    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+    id: PluginId,
+) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        controller.tick();
+        if matches!(
+            controller.plugins_mut().record(id).map(|r| &r.lifecycle),
+            Some(Lifecycle::Active)
+        ) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// Every control the Transport panel renders — title, holder label,
+/// policy `ComboBox`, "Take back" button, per-row give buttons and the
+/// row group's own accessible name — exposes a non-empty accessible name
+/// and the correct disabled/enabled state, both while the host holds
+/// focus and once the user gives it to a plugin (contracts/
+/// ui-transport-panel.md §2, U1).
+#[test]
+fn transport_panel_controls_expose_accessible_names_and_states() {
+    let (mut controller, _handle, _dir, _psd, _tsd) =
+        fixture_controller_with_track("transport-panel-a11y");
+    let id_a = plugin_id_by_identifier(&mut controller, "org.modplayer.fixture.focus-a");
+    let id_b = plugin_id_by_identifier(&mut controller, "org.modplayer.fixture.focus-b");
+    assert!(
+        wait_plugin_active(&mut controller, id_a),
+        "focus-a must reach Active"
+    );
+    assert!(
+        wait_plugin_active(&mut controller, id_b),
+        "focus-b must reach Active"
+    );
+
+    // Baseline: the host holds focus (default `AutoOnInteraction` never
+    // auto-grants a plugin's own `request_focus()`), so both fixtures are
+    // merely pending by now (RT5's `ready_ack` -> `request_focus()`).
+    let view = controller.transport_focus_view();
+    let order_a = view
+        .rows
+        .iter()
+        .find(|r| r.id == id_a)
+        .and_then(|r| r.request_order);
+    let order_b = view
+        .rows
+        .iter()
+        .find(|r| r.id == id_b)
+        .and_then(|r| r.request_order);
+    assert!(
+        order_a.is_some() && order_b.is_some(),
+        "both fixtures must already be requesting: {view:?}"
+    );
+
+    let nodes = render_nodes(|ui| modplayer_ui::transport_view::show(ui, &mut controller));
+
+    let title = find_one(&nodes, Role::Label, &tr("transport-panel-title"));
+    assert!(!title.disabled, "{title:?}");
+
+    let holder = find_one(
+        &nodes,
+        Role::Label,
+        &tr_args(
+            "transport-holder",
+            &[("holder", tr("transport-holder-host"))],
+        ),
+    );
+    assert!(!holder.disabled, "{holder:?}");
+
+    find_one(&nodes, Role::ComboBox, &tr("transport-policy-auto"));
+
+    let take_back = find_one(&nodes, Role::Button, &tr("transport-take-back"));
+    assert!(
+        take_back.disabled,
+        "Take back must be disabled while the host holds focus: {take_back:?}"
+    );
+
+    for (name, order) in [
+        ("Focus fixture A", order_a.unwrap_or_else(|| unreachable!())),
+        ("Focus fixture B", order_b.unwrap_or_else(|| unreachable!())),
+    ] {
+        let give = find_one(
+            &nodes,
+            Role::Button,
+            &tr_args("transport-give-focus", &[("plugin", name.to_string())]),
+        );
+        assert!(!give.disabled, "{give:?}");
+
+        let expected_state = tr_args("transport-requesting", &[("order", order.to_string())]);
+        find_one(
+            &nodes,
+            Role::Unknown,
+            &tr_args(
+                "transport-row-a11y",
+                &[("plugin", name.to_string()), ("state", expected_state)],
+            ),
+        );
+    }
+
+    // Give focus to A: the holder label, "Take back" and A's own row/give
+    // button all follow.
+    controller.focus_give(id_a);
+    let nodes = render_nodes(|ui| modplayer_ui::transport_view::show(ui, &mut controller));
+
+    let holder = find_one(
+        &nodes,
+        Role::Label,
+        &tr_args(
+            "transport-holder",
+            &[("holder", "Focus fixture A".to_string())],
+        ),
+    );
+    assert!(!holder.disabled, "{holder:?}");
+
+    let take_back = find_one(&nodes, Role::Button, &tr("transport-take-back"));
+    assert!(
+        !take_back.disabled,
+        "Take back must enable once a plugin holds focus: {take_back:?}"
+    );
+
+    let give_a = find_one(
+        &nodes,
+        Role::Button,
+        &tr_args(
+            "transport-give-focus",
+            &[("plugin", "Focus fixture A".to_string())],
+        ),
+    );
+    assert!(
+        give_a.disabled,
+        "Give focus must disable for the current holder: {give_a:?}"
+    );
+
+    find_one(
+        &nodes,
+        Role::Unknown,
+        &tr_args(
+            "transport-row-a11y",
+            &[
+                ("plugin", "Focus fixture A".to_string()),
+                ("state", tr("transport-holds")),
+            ],
+        ),
+    );
+}
+
+/// The empty state (contracts/ui-transport-panel.md §2: "no plugin can
+/// hold transport focus") when no fixture is discovered at all — its own
+/// non-empty accessible name.
+#[test]
+fn transport_panel_empty_state_exposes_its_accessible_name() {
+    let (store, _dir) = fresh_store("transport-panel-empty");
+    let mut controller = {
+        // `MODPLAYER_PLUGIN_FIXTURES` is process-global: this construction
+        // must serialize against every other's brief mutation of it too,
+        // even though this one never sets it itself (mirrors every other
+        // `PLUGIN_ENV_LOCK` guard in this file), so a concurrently
+        // running fixture test's own set/unset window can never leak a
+        // stray "1" into this one's read of it.
+        let _guard = PLUGIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        PlaybackController::new(FakeBackend::new(vec![]), ScriptedHost::new(), store)
+    };
+    controller.launch();
+
+    let nodes = render_nodes(|ui| modplayer_ui::transport_view::show(ui, &mut controller));
+    let empty = find_one(&nodes, Role::Label, &tr("transport-empty"));
+    assert!(!empty.disabled, "{empty:?}");
 }

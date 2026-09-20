@@ -10,6 +10,7 @@ use modplayer_capability_gateway::manifest::{ManifestError, PluginIdentifier};
 
 use crate::i18n::tr;
 
+use super::focus::{FocusArbiter, FocusHolder, FocusPolicy};
 use super::{Health, Lifecycle, PluginId, PluginRecord, Source};
 
 /// One row of the Plugins list (FR-023).
@@ -94,5 +95,76 @@ fn row(record: &PluginRecord, now: Instant) -> PluginRow {
         cpu_pct_of_share,
         memory_bytes,
         can_uninstall: false,
+    }
+}
+
+/// One row of the Transport panel (010-transport-focus, FR-008,
+/// data-model.md §2.1).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FocusRow {
+    pub id: PluginId,
+    pub name: String,
+    pub holds: bool,
+    /// 1-based among outstanding requests; `None` = not requesting.
+    pub request_order: Option<usize>,
+}
+
+/// The Transport panel's whole read model (FR-008, contracts/focus-
+/// arbitration.md C9): the UI never touches `PluginRecord`s or the
+/// [`FocusArbiter`] directly. `holder` is `None` when the host holds
+/// focus, `Some` otherwise; when `Some`, it is one of `rows` (never a
+/// plugin that has since dropped out of the eligible set, C9).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransportFocusView {
+    pub policy: FocusPolicy,
+    pub holder: Option<FocusRow>,
+    pub rows: Vec<FocusRow>,
+}
+
+impl TransportFocusView {
+    /// Build the view (research R8, contracts/focus-arbitration.md C9):
+    /// `rows` = every record that is `enabled`, whose `lifecycle` is
+    /// `Loading` or `Active`, and that was granted
+    /// `transport.control` — sorted by name, exactly like
+    /// [`PluginsView::from_records`]. `holder`/`request_order` come from
+    /// `arbiter`; a plugin that is currently the holder or pending but no
+    /// longer eligible (suspended, disabled, or lost its grant somehow)
+    /// never appears — the caller's own teardown (`PluginHost::stop`)
+    /// already vacated it from the arbiter by the time this is read.
+    #[must_use]
+    pub fn from_records_and_arbiter(records: &[PluginRecord], arbiter: &FocusArbiter) -> Self {
+        let mut rows: Vec<FocusRow> = records
+            .iter()
+            .filter(|record| {
+                record.enabled
+                    && matches!(record.lifecycle, Lifecycle::Loading | Lifecycle::Active)
+                    && record.grants.holds(Permission::TransportControl)
+            })
+            .map(|record| {
+                let name = record
+                    .manifest
+                    .as_ref()
+                    .map(|m| m.name.clone())
+                    .unwrap_or_else(|_| record.identifier.as_str().to_string());
+                FocusRow {
+                    id: record.id,
+                    holds: arbiter.holder() == FocusHolder::Plugin(record.id),
+                    request_order: arbiter.request_order(record.id),
+                    name,
+                }
+            })
+            .collect();
+        rows.sort_by_key(|row| row.name.to_lowercase());
+
+        let holder = match arbiter.holder() {
+            FocusHolder::Host => None,
+            FocusHolder::Plugin(id) => rows.iter().find(|row| row.id == id).cloned(),
+        };
+
+        Self {
+            policy: arbiter.policy(),
+            holder,
+            rows,
+        }
     }
 }

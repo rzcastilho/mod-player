@@ -70,7 +70,7 @@ fn refused_calls_consume_no_quota() {
         let err = gw.admit(RequestKind::TransportSeek, now).unwrap_err();
         assert_eq!(err.reason, "no_focus");
     }
-    focus.try_acquire(gw.plugin());
+    focus.set_holder(Some(gw.plugin()));
     // If any of the 200 refusals above had consumed quota, fewer than
     // `LIMIT` calls would succeed here.
     for _ in 0..LIMIT {
@@ -82,7 +82,7 @@ fn refused_calls_consume_no_quota() {
 fn rate_limit_101st_in_window() {
     let focus = FocusToken::new();
     let mut gw = gateway_with(Some(Permission::TransportControl), focus.clone());
-    focus.try_acquire(gw.plugin());
+    focus.set_holder(Some(gw.plugin()));
     let now = Instant::now();
     for _ in 0..LIMIT {
         gw.admit(RequestKind::TransportSeek, now).expect("ok");
@@ -95,7 +95,7 @@ fn rate_limit_101st_in_window() {
 fn rate_limit_window_slides() {
     let focus = FocusToken::new();
     let mut gw = gateway_with(Some(Permission::TransportControl), focus.clone());
-    focus.try_acquire(gw.plugin());
+    focus.set_holder(Some(gw.plugin()));
     let now = Instant::now();
     for _ in 0..LIMIT {
         gw.admit(RequestKind::TransportSeek, now).expect("ok");

@@ -103,6 +103,12 @@ pub enum HostEvent {
         handle: TimerHandle,
         position_ms: u64,
     },
+    FocusGranted {
+        holder: OwnerInfo,
+    },
+    FocusRevoked {
+        holder: OwnerInfo,
+    },
 }
 
 impl HostEvent {
@@ -126,6 +132,8 @@ impl HostEvent {
             HostEvent::Meter { .. } => EventKind::Meter,
             HostEvent::Timer { .. } => EventKind::Timer,
             HostEvent::PositionReached { .. } => EventKind::PositionReached,
+            HostEvent::FocusGranted { .. } => EventKind::FocusGranted,
+            HostEvent::FocusRevoked { .. } => EventKind::FocusRevoked,
         }
     }
 }

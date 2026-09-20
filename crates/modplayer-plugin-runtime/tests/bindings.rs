@@ -71,6 +71,13 @@ fn spawn_test_plugin(
 ) {
     let (requests_tx, requests_rx) = std::sync::mpsc::sync_channel::<RpcEnvelope>(64);
     let (events_tx, events_rx) = std::sync::mpsc::sync_channel(256);
+    // 010-transport-focus (research R2): `request_focus()` is now an RPC
+    // whose grant depends on core's `FocusArbiter`, which this bare
+    // binding-level harness (no controller) does not run — so the token
+    // is set directly, granting this plugin focus up front, letting the
+    // eight focus-gated calls this file round-trips reach the RPC stage.
+    let focus = FocusToken::new();
+    focus.set_holder(Some(PluginId(1)));
     let config = SpawnConfig {
         id: PluginId(1),
         identifier: "org.modplayer.test.bindings".to_string(),
@@ -81,7 +88,7 @@ fn spawn_test_plugin(
         },
         grants,
         budgets: Budgets::DEFAULT,
-        focus: FocusToken::new(),
+        focus,
         fixtures_enabled: false,
     };
     let deps = RuntimeDeps {
@@ -148,7 +155,9 @@ fn drain_logs(rx: &Receiver<(PluginId, RuntimeEvent)>, timeout: Duration) -> Vec
 /// `RequestKind` fails this test loudly rather than silently.
 fn canned_response(request: &Request) -> Response {
     match request {
-        Request::Play
+        Request::RequestFocus
+        | Request::ReleaseFocus
+        | Request::Play
         | Request::Pause
         | Request::Toggle
         | Request::Seek { .. }
@@ -197,6 +206,10 @@ fn spawn_responder(requests: Receiver<RpcEnvelope>, count: usize) -> std::thread
 /// with all 9 operable permissions granted — each must come back `ok`
 /// with the shape `response_to_lua` promises for its canned reply
 /// (contract §2's "every request returns `ok, value` or `nil, refusal`").
+/// `request_focus` is included: 010-transport-focus (research R2) removed
+/// its local dispatch arm, so it is now RPC-routed like every other call
+/// here (`bindings::request_focus_is_rpc_not_local` below pins this more
+/// directly).
 #[test]
 fn every_rpc_request_kind_round_trips() {
     let entry = r#"
@@ -241,7 +254,7 @@ fn every_rpc_request_kind_round_trips() {
     let (_handle, events, requests) = spawn_test_plugin(entry, grants_with(ALL_PERMISSIONS));
     wait_for_ready(&events);
 
-    let responder = spawn_responder(requests, 24);
+    let responder = spawn_responder(requests, 25);
     let logs = drain_logs(&events, Duration::from_secs(2));
     responder
         .join()
@@ -353,7 +366,7 @@ fn identity_fields_have_the_contract_shape() {
         logs.contains(&"granted:playback.observe,state.plugin".to_string()),
         "logs: {logs:?}"
     );
-    assert!(logs.contains(&"version:1.0".to_string()), "logs: {logs:?}");
+    assert!(logs.contains(&"version:1.1".to_string()), "logs: {logs:?}");
     assert!(
         logs.contains(&"capabilities_has_timers:true".to_string()),
         "logs: {logs:?}"
@@ -361,6 +374,69 @@ fn identity_fields_have_the_contract_shape() {
     // 9 operable permissions + "timers" (contract §1 `HOST_CAPABILITIES`).
     assert!(
         logs.contains(&"capabilities_len:10".to_string()),
+        "logs: {logs:?}"
+    );
+}
+
+/// 010-transport-focus (research R2, RT-F1): `request_focus()` has no
+/// local dispatch arm — the call must actually cross to the RPC channel
+/// (`requests`) as `Request::RequestFocus`, not be answered synchronously
+/// inside `dispatch` from the plugin thread's own `FocusToken`.
+#[test]
+fn request_focus_is_rpc_not_local() {
+    let entry = r#"
+        api.on("ready_ack", function(_event)
+            local ok = api.transport.request_focus()
+            api.log.info("request_focus:" .. tostring(ok))
+        end)
+        api.ready()
+    "#;
+    let (_handle, events, requests) = spawn_test_plugin(entry, grants_with(&["transport.control"]));
+    wait_for_ready(&events);
+
+    let envelope = requests
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap_or_else(|e| unreachable!("request_focus never reached the RPC channel: {e}"));
+    assert!(
+        matches!(envelope.request, Request::RequestFocus),
+        "expected Request::RequestFocus over the RPC channel, got {:?}",
+        envelope.request
+    );
+    let _ = envelope.reply.send(Ok(Response::Ok));
+
+    let logs = drain_logs(&events, Duration::from_secs(1));
+    assert!(
+        logs.contains(&"request_focus:true".to_string()),
+        "logs: {logs:?}"
+    );
+}
+
+/// Mirror of `request_focus_is_rpc_not_local` for `release_focus()`.
+#[test]
+fn release_focus_is_rpc_not_local() {
+    let entry = r#"
+        api.on("ready_ack", function(_event)
+            local ok = api.transport.release_focus()
+            api.log.info("release_focus:" .. tostring(ok))
+        end)
+        api.ready()
+    "#;
+    let (_handle, events, requests) = spawn_test_plugin(entry, grants_with(&["transport.control"]));
+    wait_for_ready(&events);
+
+    let envelope = requests
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap_or_else(|e| unreachable!("release_focus never reached the RPC channel: {e}"));
+    assert!(
+        matches!(envelope.request, Request::ReleaseFocus),
+        "expected Request::ReleaseFocus over the RPC channel, got {:?}",
+        envelope.request
+    );
+    let _ = envelope.reply.send(Ok(Response::Ok));
+
+    let logs = drain_logs(&events, Duration::from_secs(1));
+    assert!(
+        logs.contains(&"release_focus:true".to_string()),
         "logs: {logs:?}"
     );
 }

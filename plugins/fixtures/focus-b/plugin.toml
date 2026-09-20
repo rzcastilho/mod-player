@@ -1,0 +1,17 @@
+identifier  = "org.modplayer.fixture.focus-b"
+name        = "Focus fixture B"
+description = "Requests transport focus and seeks on every grant; while it does not hold focus, attempts a seek on every play_state_changed and logs the resulting no_focus refusal."
+version     = "1.0.0"
+api         = "1.1"
+author      = "ModPlayer project"
+license     = "MIT OR Apache-2.0"
+source      = "fixture"
+entry       = "main.luau"
+
+[[permissions.required]]
+permission    = "playback.observe"
+justification = "Needs track_changed (to re-request focus) and play_state_changed (its own no_focus contention trigger) (010-transport-focus data-model.md §5)."
+
+[[permissions.required]]
+permission    = "transport.control"
+justification = "Requests transport focus and seeks, whether or not it currently holds focus, to prove single-holder contention (010-transport-focus data-model.md §5)."

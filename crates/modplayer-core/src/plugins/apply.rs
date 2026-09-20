@@ -29,7 +29,7 @@ use crate::markers::{
 use crate::queue::QueueItemId as CoreQueueItemId;
 use crate::transport::Intent;
 
-use super::PluginId;
+use super::{FocusHolder, PluginId, TransportActor};
 
 /// `CreateNode`'s `kind` argument (contracts/plugin-api-v1.md §3): the
 /// wire name back to a `NodeKind`, `None` for anything else
@@ -90,6 +90,22 @@ fn require_track<B: OutputBackend, H: SourceHost>(
         Ok(())
     } else {
         Err(Refusal::no_track())
+    }
+}
+
+/// C1/R12: the host-side re-check ahead of every focus-gated request —
+/// closes the admission→application race (a revoke landing in the one UI
+/// frame between the plugin thread's own `Gateway::admit` check and this
+/// request actually being drained) so FR-001's "no side effect" holds
+/// exactly, not just usually.
+fn require_focus<B: OutputBackend, H: SourceHost>(
+    controller: &mut PlaybackController<B, H>,
+    plugin: PluginId,
+) -> Result<(), Refusal> {
+    if controller.plugins_mut().arbiter().holder() == FocusHolder::Plugin(plugin) {
+        Ok(())
+    } else {
+        Err(Refusal::no_focus())
     }
 }
 
@@ -192,7 +208,13 @@ pub fn drain_plugin_requests<B: OutputBackend, H: SourceHost>(
             break;
         };
         let plugin = super::from_gateway_id(envelope.plugin);
-        let response = dispatch(controller, plugin, envelope.request);
+        // 010-transport-focus (design note 5, C1): every admitted request
+        // this plugin's own thread sent runs under `Plugin(id)` — the
+        // auto-policy revoke hook only ever fires for a genuine local
+        // user action, never for a plugin's own transport RPC.
+        let response = controller.with_transport_actor(TransportActor::Plugin(plugin), |ctrl| {
+            dispatch(ctrl, plugin, envelope.request)
+        });
         let _ = envelope.reply.send(response);
     }
 }
@@ -208,16 +230,19 @@ fn dispatch<B: OutputBackend, H: SourceHost>(
     match request {
         Request::Play => {
             require_track(controller)?;
+            require_focus(controller, plugin)?;
             controller.play();
             Ok(Response::Ok)
         }
         Request::Pause => {
             require_track(controller)?;
+            require_focus(controller, plugin)?;
             controller.pause();
             Ok(Response::Ok)
         }
         Request::Toggle => {
             require_track(controller)?;
+            require_focus(controller, plugin)?;
             if controller.transport_state().intent == Intent::Playing {
                 controller.pause();
             } else {
@@ -227,40 +252,39 @@ fn dispatch<B: OutputBackend, H: SourceHost>(
         }
         Request::Seek { position_ms } => {
             require_track(controller)?;
+            require_focus(controller, plugin)?;
             controller.seek(Duration::from_millis(position_ms));
             Ok(Response::Ok)
         }
         Request::SkipNext => {
             require_track(controller)?;
+            require_focus(controller, plugin)?;
             controller.skip_forward();
             Ok(Response::Ok)
         }
         Request::SkipPrevious => {
             require_track(controller)?;
+            require_focus(controller, plugin)?;
             controller.skip_back();
             Ok(Response::Ok)
         }
 
-        // -- transport focus (US2 T084, R12) -----------------------------
+        // -- transport focus (010-transport-focus, C1): a plain
+        // `request_focus`/`release_focus` RPC to core — always recorded,
+        // never refused (FR-003/FR-004/FR-011); the arbiter decides
+        // whether it grants immediately.
         Request::RequestFocus => {
-            let gid = super::to_gateway_id(plugin);
-            let host = controller.plugins_mut();
-            if host.focus().holder() == Some(gid) || host.focus().try_acquire(gid) {
-                Ok(Response::Ok)
-            } else {
-                Err(Refusal::focus_held())
-            }
+            controller.focus_request(plugin);
+            Ok(Response::Ok)
         }
         Request::ReleaseFocus => {
-            controller
-                .plugins_mut()
-                .focus()
-                .release_if(super::to_gateway_id(plugin));
+            controller.focus_release(plugin);
             Ok(Response::Ok)
         }
 
-        // -- loop arm/disarm (US2 T084; focus is already admitted by G2) -
+        // -- loop arm/disarm (C1: focus-gated) ----------------------------
         Request::ArmLoop { region } => {
+            require_focus(controller, plugin)?;
             let region_id = CoreRegionId::from_raw(region.0);
             require_owner(region_owner(controller, region_id), plugin)?;
             controller.arm_loop(region_id).map_err(marker_refusal)?;
@@ -268,6 +292,7 @@ fn dispatch<B: OutputBackend, H: SourceHost>(
             Ok(Response::Ok)
         }
         Request::DisarmLoop => {
+            require_focus(controller, plugin)?;
             let owned = controller.markers().and_then(|m| m.armed_region_owner())
                 == Some(Owner::Plugin(plugin));
             if !owned {

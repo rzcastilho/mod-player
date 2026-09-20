@@ -1,0 +1,25 @@
+identifier  = "org.modplayer.fixture.focus-a"
+name        = "Focus fixture A"
+description = "Requests transport focus, seeks and arms a loop region on every grant, and hangs on its third play_state_changed, to exercise contention and a holder suspension."
+version     = "1.0.0"
+api         = "1.1"
+author      = "ModPlayer project"
+license     = "MIT OR Apache-2.0"
+source      = "fixture"
+entry       = "main.luau"
+
+[[permissions.required]]
+permission    = "playback.observe"
+justification = "Needs track_changed (to re-request focus) and play_state_changed (its own hang trigger) (010-transport-focus data-model.md §5)."
+
+[[permissions.required]]
+permission    = "transport.control"
+justification = "Requests/holds transport focus, seeks and arms its own loop region on every grant (010-transport-focus data-model.md §5)."
+
+[[permissions.required]]
+permission    = "markers.read"
+justification = "Reads back the loop region's armed state (010-transport-focus data-model.md §5)."
+
+[[permissions.required]]
+permission    = "markers.write"
+justification = "Creates the transient loop region it arms on every focus grant (010-transport-focus data-model.md §5)."

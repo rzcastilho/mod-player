@@ -426,7 +426,8 @@ fn restart_keeps_session_counter() {
     );
 }
 
-/// L7 (FR-012, fixed order): `focus.release_if` → `disarm_if_owned_by` →
+/// L7 (FR-012, fixed order; 010-transport-focus C4): `arbiter.vacate(id,
+/// Fault)` (applied via `apply_focus_changes`) → `disarm_if_owned_by` →
 /// `remove_transient_owned_by` → `orphan_owned_by`. Since `ArmLoop`/
 /// `CreateMarker`/`CreateNode`'s own request-application lands with
 /// US2/US3, this drives the same owned-mutation model methods directly
@@ -447,9 +448,16 @@ fn disable_runs_teardown_in_order() {
         |h| is_active(h, id)
     ));
 
-    assert!(
-        host.focus().try_acquire(to_gateway_id(id)),
-        "focus must be free to acquire at the start of this test"
+    // 010-transport-focus (research R1): the arbiter, not a CAS on the
+    // token, is the only decision-maker now — grant this plugin focus
+    // via a host "Give focus" (works under any policy, A5) so the L7a
+    // assertion below has something real to release.
+    let changes = host.arbiter_mut().give(id);
+    host.apply_focus_changes(changes);
+    assert_eq!(
+        host.focus().holder(),
+        Some(to_gateway_id(id)),
+        "focus must be held by this plugin at the start of this test"
     );
 
     let mut markers = TrackMarkers::new(
@@ -473,7 +481,11 @@ fn disable_runs_teardown_in_order() {
 
     host.stop(id, UnloadReason::Disable, Some(&mut markers), &mut chain);
 
-    assert_eq!(host.focus().holder(), None, "L7a: focus must be released");
+    assert_eq!(
+        host.focus().holder(),
+        None,
+        "L7a: focus must be released (arbiter.vacate(id, Fault) first)"
+    );
     assert!(
         markers.armed_region().is_none(),
         "L7b: the loop region this plugin owned must be disarmed"

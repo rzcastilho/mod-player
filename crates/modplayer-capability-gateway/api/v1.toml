@@ -25,7 +25,7 @@ refusal_codes = [
 
 [api_version]
 major = 1
-minor = 0
+minor = 1
 
 # ---------------------------------------------------------------------------
 # Permission catalog (25 entries; data-model.md §1.1, FR-015)
@@ -571,3 +571,13 @@ payload = ["handle"]
 [[event]]
 name = "PositionReached"
 payload = ["handle", "position_ms"]
+
+[[event]]
+name = "FocusGranted"
+requires = "transport.control"
+payload = ["holder"]
+
+[[event]]
+name = "FocusRevoked"
+requires = "transport.control"
+payload = ["holder"]

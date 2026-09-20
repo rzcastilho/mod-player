@@ -23,8 +23,9 @@ use modplayer_core::settings::{
     AudioSettings, DeviceName, DisclosureAcknowledgement, InvalidField, SettingsStore,
     SettingsWarning, generate_connect_device_id,
 };
-use modplayer_core::{Chord, HostAction, PlaybackController};
+use modplayer_core::{Chord, FocusPolicy, HostAction, PlaybackController};
 use modplayer_engine::{BufferPreset, VolumePercent};
+use proptest::prelude::*;
 
 /// Parse a literal that must be valid grammar (test convenience).
 fn chord(s: &str) -> Chord {
@@ -491,4 +492,95 @@ fn keybindings_invalid_entries_warning_reaches_controller_notifications() {
             panic!("PlaybackController::new must raise keybindings-invalid-entries")
         });
     assert_eq!(notification.args, vec![("ids", "host.nope.x".to_string())]);
+}
+
+// ---------------------------------------------------------------------
+// 010-transport-focus (US2-8, SC-007, FR-012): `[transport] focus_policy`
+// (data-model.md §2.2) — the holder and pending queue are session-only
+// and never appear here at all (`AudioSettings` itself has no field for
+// either), so a round-trip of `AudioSettings` is already, by
+// construction, a round-trip of the policy alone.
+// ---------------------------------------------------------------------
+
+#[test]
+fn settings_round_trip_focus_policy() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+
+    for policy in FocusPolicy::ALL {
+        let settings = AudioSettings {
+            focus_policy: policy,
+            ..AudioSettings::default()
+        };
+        assert!(store.save(&settings).is_ok());
+
+        let outcome = store.load();
+        assert_eq!(outcome.settings.focus_policy, policy);
+        assert!(outcome.warnings.is_empty());
+    }
+
+    let on_disk = fs::read_to_string(store.path()).unwrap_or_default();
+    assert!(
+        on_disk.contains("[transport]") && on_disk.contains("focus_policy"),
+        "settings.toml must persist the [transport] section, got:\n{on_disk}"
+    );
+}
+
+#[test]
+fn absent_transport_section_means_default_focus_policy_no_warning() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let _ = fs::write(store.path(), "schema_version = 1\n");
+
+    let outcome = store.load();
+    assert_eq!(
+        outcome.settings.focus_policy,
+        FocusPolicy::AutoOnInteraction
+    );
+    assert!(outcome.warnings.is_empty());
+}
+
+#[test]
+fn unknown_focus_policy_falls_back_to_default_with_a_warning() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let content = "schema_version = 1\n\n[transport]\nfocus_policy = \"not_a_policy\"\n";
+    let _ = fs::write(store.path(), content);
+
+    let outcome = store.load();
+    assert_eq!(
+        outcome.settings.focus_policy,
+        FocusPolicy::AutoOnInteraction
+    );
+    assert_eq!(
+        outcome.warnings,
+        vec![SettingsWarning::InvalidValue(vec![
+            InvalidField::FocusPolicy
+        ])]
+    );
+}
+
+// Constitution VIII: a small state-serialization proptest extension —
+// every one of `FocusPolicy::ALL`'s three variants round-trips through a
+// real save/load, exactly like `settings_round_trip_focus_policy` above
+// proves in a plain loop, but here driven by an arbitrary `proptest`
+// index selection strategy rather than a fixed iteration order.
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(16))]
+
+    #[test]
+    fn focus_policy_round_trips_for_any_arbitrary_variant(idx in 0usize..FocusPolicy::ALL.len()) {
+        let policy = FocusPolicy::ALL[idx];
+        let dir = TempDir::new();
+        let store = store_in(&dir);
+        let settings = AudioSettings {
+            focus_policy: policy,
+            ..AudioSettings::default()
+        };
+        prop_assert!(store.save(&settings).is_ok());
+
+        let outcome = store.load();
+        prop_assert_eq!(outcome.settings.focus_policy, policy);
+        prop_assert!(outcome.warnings.is_empty());
+    }
 }

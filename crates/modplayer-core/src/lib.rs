@@ -45,8 +45,8 @@ pub use links::STATUS_PAGE_URL;
 pub use modplayer_capability_gateway::refusal::Refusal;
 pub use notifications::{Notification, NotificationAction, NotificationCenter, Severity};
 pub use plugins::{
-    Health, Lifecycle, PluginHost, PluginId, PluginLog, PluginRecord, PluginRow, PluginsView,
-    Source,
+    FocusHolder, FocusPolicy, FocusRow, Health, Lifecycle, PluginHost, PluginId, PluginLog,
+    PluginRecord, PluginRow, PluginsView, Source, TransportFocusView,
 };
 pub use queue::{
     AdvanceReason, Origin, PlaybackChange, Queue, QueueChange, QueueItem, QueueItemId, QueueMode,
