@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use modplayer_audio_io::{FakeBackend, FakeDevice};
@@ -14,9 +15,10 @@ use modplayer_audio_source_synthetic::{ScriptedHost, ScriptedHostHandle};
 use modplayer_core::notifications::{
     KEY_EFFECT_CHAIN_AUTO_BYPASSED, KEY_EFFECT_CHAIN_OVER_BUDGET, KEY_EFFECTS_NO_TIME_STRETCH,
 };
+use modplayer_core::plugins::{Lifecycle, PluginId};
 use modplayer_core::settings::SettingsStore;
 use modplayer_core::{ChainError, ChainModel, PlaybackController, Severity};
-use modplayer_effects::catalog::{self, NodeKind, NodeOwner, ParamId};
+use modplayer_effects::catalog::{self, NodeKind, NodeOwner, ParamId, QualityMode};
 use modplayer_engine::{BufferPreset, DeviceId, Event, FrameCount, SampleRate};
 use proptest::prelude::*;
 
@@ -957,5 +959,346 @@ fn warning_clears_when_rt_reports_clean_window() {
             .count(),
         0,
         "must dismiss once the RT reports a clean window"
+    );
+}
+
+// -----------------------------------------------------------------------
+// 013-key-and-tempo-plugin (API 1.4, research R1/R3, contract
+// plugin-api-v1.4.md §8): `effect_chain_changed` fans out on a parameter/
+// mode change by any actor, coalesced to one per tick, carrying the
+// clamped target immediately — proven against a real subscribed plugin
+// thread, the `effects-observer` fixture (`MODPLAYER_PLUGIN_FIXTURES=1`),
+// so the R4 delivery fix and the R3 revision-bump rule are both exercised
+// end to end ahead of the bundled Key & Tempo package existing.
+// -----------------------------------------------------------------------
+
+const EFFECTS_OBSERVER: &str = "org.modplayer.fixture.effects-observer";
+
+static FIXTURES_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+/// As [`ready_controller`], but with fixtures enabled — the
+/// `effects-observer` fixture is what receives every `effect_chain_changed`
+/// these tests assert on.
+fn fixtures_ready_controller() -> (
+    PlaybackController<FakeBackend, ScriptedHost>,
+    TempDir,
+    TempDir,
+    TempDir,
+) {
+    let (store, dir) = fresh_store();
+    let plugin_state_dir = TempDir::new();
+    let track_state_dir = TempDir::new();
+    let host = ScriptedHost::new();
+    let devices = vec![fake_device()];
+    let mut controller = {
+        let _guard = FIXTURES_ENV_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // Safety: narrowly scopes each mutation to the one synchronous
+        // read `PlaybackController::new` makes of it, serialized against
+        // every other test in this binary via the lock above (mirrors
+        // `controller_plugins_permissions.rs`'s own `fixture_controller`).
+        unsafe {
+            std::env::set_var("MODPLAYER_PLUGIN_FIXTURES", "1");
+            std::env::set_var("MODPLAYER_PLUGIN_STATE_DIR", plugin_state_dir.path());
+            std::env::set_var("MODPLAYER_TRACK_STATE_DIR", track_state_dir.path());
+        }
+        let controller = PlaybackController::new(FakeBackend::new(devices), host, store);
+        unsafe {
+            std::env::remove_var("MODPLAYER_PLUGIN_FIXTURES");
+            std::env::remove_var("MODPLAYER_PLUGIN_STATE_DIR");
+            std::env::remove_var("MODPLAYER_TRACK_STATE_DIR");
+        }
+        controller
+    };
+    // The tests below exist specifically to prove the R3/R4 mechanism
+    // against the `effects-observer` fixture *in isolation* (this file's
+    // own header comment: "ahead of the bundled Key & Tempo package
+    // existing"). With every fixture *and* both bundled packages
+    // discovered (`MODPLAYER_PLUGIN_FIXTURES=1`), several other
+    // `audio.effects`-holding packages would otherwise also touch the
+    // chain on their own `ready_ack` — the `wellbehaved` fixture creates
+    // and parameterises a pitch_shift/time_stretch pair of its own (US3
+    // T091), and 013-key-and-tempo-plugin's own bundled Key & Tempo (G2)
+    // does the same — racing the exact-event-count assertions these
+    // tests make. Disabled here, before `launch()` ever spawns anything,
+    // so nothing but the observer itself ever runs — zero-race, not a
+    // timing workaround.
+    let other_ids: Vec<_> = controller
+        .plugins_mut()
+        .records()
+        .iter()
+        .filter(|r| r.identifier.as_str() != EFFECTS_OBSERVER)
+        .map(|r| r.id)
+        .collect();
+    for id in other_ids {
+        if let Some(record) = controller.plugins_mut().record_mut(id) {
+            record.enabled = false;
+        }
+    }
+    controller.launch();
+    let dev_id = DeviceId::new("dev-1").unwrap_or_else(|| unreachable!());
+    controller.confirm_device(dev_id, BufferPreset::Balanced);
+    (controller, dir, plugin_state_dir, track_state_dir)
+}
+
+fn effects_observer_id(controller: &mut PlaybackController<FakeBackend, ScriptedHost>) -> PluginId {
+    controller
+        .plugins_mut()
+        .records()
+        .iter()
+        .find(|r| r.identifier.as_str() == EFFECTS_OBSERVER)
+        .map(|r| r.id)
+        .unwrap_or_else(|| unreachable!("{EFFECTS_OBSERVER} must be discovered"))
+}
+
+fn pump_until(
+    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+    timeout: Duration,
+    mut done: impl FnMut(&mut PlaybackController<FakeBackend, ScriptedHost>) -> bool,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        controller.tick();
+        if done(controller) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// Waits for the observer to be `Active`, so every test starts from a
+/// clean, ready-to-receive state.
+fn wait_observer_active(controller: &mut PlaybackController<FakeBackend, ScriptedHost>) {
+    let id = effects_observer_id(controller);
+    assert!(
+        pump_until(controller, Duration::from_secs(2), |c| matches!(
+            c.plugins_mut().record(id).map(|r| &r.lifecycle),
+            Some(Lifecycle::Active)
+        )),
+        "the effects-observer fixture must reach Active"
+    );
+}
+
+/// Drains a handful of idle ticks so any `effect_chain_changed` already
+/// in flight from a just-issued structural edit (e.g. `chain_add_node`)
+/// lands and is logged before a test captures its own "before" baseline
+/// — otherwise that delivery could arrive during the test's own window
+/// and be mistaken for the one it triggers.
+fn settle(controller: &mut PlaybackController<FakeBackend, ScriptedHost>) {
+    for _ in 0..5 {
+        controller.tick();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// Every `effect_chain_changed#<seq>:...` line the observer has logged so
+/// far, in order.
+fn observer_log_lines(controller: &PlaybackController<FakeBackend, ScriptedHost>) -> Vec<String> {
+    controller
+        .plugin_log()
+        .entries()
+        .filter(|e| e.message.starts_with("effect_chain_changed#"))
+        .map(|e| e.message.clone())
+        .collect()
+}
+
+/// Extracts a numeric `field=<value>` from one of the observer's log
+/// lines — tolerant of however Luau chooses to render a float (`1.1` vs
+/// `1.1000000`), unlike a literal string match.
+fn field_value(log: &str, field: &str) -> f64 {
+    let marker = format!("{field}=");
+    let start = log
+        .find(&marker)
+        .unwrap_or_else(|| unreachable!("field '{field}' not found in {log:?}"))
+        + marker.len();
+    let rest = &log[start..];
+    let end = rest.find([',', ']']).unwrap_or(rest.len());
+    rest[..end]
+        .parse::<f64>()
+        .unwrap_or_else(|_| unreachable!("field '{field}' not numeric in {log:?}"))
+}
+
+/// research R3/R7: the host's `tempo_step` action (008 FR-017) bumps
+/// `revision` on the changed `ratio` target, which fans out exactly one
+/// `effect_chain_changed` carrying it — the same mechanism a plugin's own
+/// `set_param`, an Effect Chain panel edit, or auto-switch/rate-change all
+/// share (one bump site, `ChainModel::set_param`/`set_mode`/
+/// `set_source_rate`).
+#[test]
+fn tempo_step_fans_out_effect_chain_changed_with_ratio() {
+    let (mut controller, _dir, _psd, _tsd) = fixtures_ready_controller();
+    wait_observer_active(&mut controller);
+
+    controller
+        .chain_add_node(NodeKind::TimeStretch)
+        .unwrap_or_else(|e| unreachable!("{e:?}"));
+    settle(&mut controller);
+    let before = observer_log_lines(&controller).len();
+
+    controller.tempo_step(1);
+    assert!(
+        pump_until(&mut controller, Duration::from_secs(2), |c| {
+            observer_log_lines(c).len() > before
+        }),
+        "tempo_step must fan out effect_chain_changed"
+    );
+
+    let lines = observer_log_lines(&controller);
+    let last = lines.last().unwrap_or_else(|| unreachable!());
+    assert!(
+        last.contains("time_stretch["),
+        "expected a time_stretch node in the payload: {last}"
+    );
+    let ratio = field_value(last, "ratio");
+    assert!(
+        (ratio - 1.10).abs() < 1e-6,
+        "expected ratio ~= 1.10 (1.0 + TEMPO_STEP), got {ratio} ({last})"
+    );
+}
+
+/// research R3, contract §4.1: an Effect Chain panel edit — `chain_set_
+/// param`/`chain_set_mode` from the UI path, exactly as `effects_view.rs`
+/// calls them — fans out `effect_chain_changed` the same as any other
+/// actor; an explicit mode choice clears `auto_switched`.
+#[test]
+fn panel_edit_fans_out_effect_chain_changed() {
+    let (mut controller, _dir, _psd, _tsd) = fixtures_ready_controller();
+    wait_observer_active(&mut controller);
+
+    let id = controller
+        .chain_add_node(NodeKind::PitchShift)
+        .unwrap_or_else(|e| unreachable!("{e:?}"));
+    settle(&mut controller);
+    let before = observer_log_lines(&controller).len();
+
+    // A stage-use excursion (panel slider edit) auto-switches to Quality.
+    controller
+        .chain_set_param(id, ParamId(0), 7.0)
+        .unwrap_or_else(|e| unreachable!("{e:?}"));
+    assert!(
+        pump_until(&mut controller, Duration::from_secs(2), |c| {
+            observer_log_lines(c).len() > before
+        }),
+        "the panel's set_param must fan out effect_chain_changed"
+    );
+    let after_excursion = observer_log_lines(&controller);
+    let last = after_excursion.last().unwrap_or_else(|| unreachable!());
+    assert!(
+        last.contains("auto_switched=true"),
+        "the auto-switch must be visible in the payload: {last}"
+    );
+
+    // An explicit mode choice (the panel's Quality dropdown) clears
+    // `auto_switched`.
+    let before2 = after_excursion.len();
+    controller
+        .chain_set_mode(id, QualityMode::Performance)
+        .unwrap_or_else(|e| unreachable!("{e:?}"));
+    assert!(
+        pump_until(&mut controller, Duration::from_secs(2), |c| {
+            observer_log_lines(c).len() > before2
+        }),
+        "the panel's set_mode must fan out effect_chain_changed"
+    );
+    let lines = observer_log_lines(&controller);
+    let last = lines.last().unwrap_or_else(|| unreachable!());
+    assert!(
+        last.contains("auto_switched=false"),
+        "an explicit mode choice must clear auto_switched: {last}"
+    );
+}
+
+/// research R3: three parameter writes landing in the same tick (before
+/// `tick()` ever runs) still bump `revision` no more than the once the
+/// controller's own diff observes — coalesced to exactly one
+/// `effect_chain_changed`, not three.
+#[test]
+fn param_changes_coalesce_to_one_event_per_tick() {
+    let (mut controller, _dir, _psd, _tsd) = fixtures_ready_controller();
+    wait_observer_active(&mut controller);
+
+    let id = controller
+        .chain_add_node(NodeKind::Gain)
+        .unwrap_or_else(|e| unreachable!("{e:?}"));
+    settle(&mut controller);
+    let before = observer_log_lines(&controller).len();
+
+    // Three writes, no `tick()` between them.
+    controller
+        .chain_set_param(id, ParamId(0), -10.0)
+        .unwrap_or_else(|e| unreachable!("{e:?}"));
+    controller
+        .chain_set_param(id, ParamId(0), -20.0)
+        .unwrap_or_else(|e| unreachable!("{e:?}"));
+    controller
+        .chain_set_param(id, ParamId(0), -30.0)
+        .unwrap_or_else(|e| unreachable!("{e:?}"));
+
+    assert!(
+        pump_until(&mut controller, Duration::from_secs(2), |c| {
+            observer_log_lines(c).len() > before
+        }),
+        "the coalesced write must eventually fan out"
+    );
+    // Give the plugin thread a couple more idle ticks to prove no further
+    // delivery follows (it would if each write had fanned out its own
+    // event instead of being coalesced by the revision diff).
+    for _ in 0..5 {
+        controller.tick();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let lines = observer_log_lines(&controller);
+    assert_eq!(
+        lines.len(),
+        before + 1,
+        "three writes before one tick must coalesce to exactly one event: {lines:?}"
+    );
+    let last = lines.last().unwrap_or_else(|| unreachable!());
+    let level = field_value(last, "level");
+    assert!(
+        (level - -30.0).abs() < 1e-6,
+        "the coalesced event must carry the final, clamped value: {last}"
+    );
+}
+
+/// research R3/Constitution I: the value `effect_chain_changed` carries
+/// is `ChainModel`'s control-side clamped *target*, available the very
+/// tick the write lands — never a mid-ramp RT value, so no wait for the
+/// 20 ms ramp is needed for it to be correct.
+#[test]
+fn effect_chain_changed_params_are_targets_not_ramp() {
+    let (mut controller, _dir, _psd, _tsd) = fixtures_ready_controller();
+    wait_observer_active(&mut controller);
+
+    let id = controller
+        .chain_add_node(NodeKind::Gain)
+        .unwrap_or_else(|e| unreachable!("{e:?}"));
+    settle(&mut controller);
+    let before = observer_log_lines(&controller).len();
+
+    let clamped = controller
+        .chain_set_param(id, ParamId(0), -6.0)
+        .unwrap_or_else(|e| unreachable!("{e:?}"));
+
+    // Exactly one more tick — deliberately not waiting out the 20 ms ramp
+    // (008 FR-010) — the fan-out already happened on the tick the write
+    // landed in.
+    controller.tick();
+    assert!(
+        pump_until(&mut controller, Duration::from_millis(200), |c| {
+            observer_log_lines(c).len() > before
+        }),
+        "the write must fan out well within the 20 ms ramp window"
+    );
+    let lines = observer_log_lines(&controller);
+    let last = lines.last().unwrap_or_else(|| unreachable!());
+    let level = field_value(last, "level");
+    assert!(
+        (f64::from(clamped) - level).abs() < 1e-6,
+        "the event must carry the clamped target immediately, not a ramping value: {last}"
     );
 }

@@ -30,10 +30,11 @@ use modplayer_audio_source::{
 use modplayer_capability_gateway::event::{HostEvent, PlayState, TrackInfo, UnloadReason};
 use modplayer_capability_gateway::request::{
     MarkerId as GatewayMarkerId, MarkerInfo as GatewayMarkerInfo, NodeId as GatewayNodeId,
-    NodeInfo as GatewayNodeInfo, OwnerInfo, QueueItemId as GatewayQueueItemId, QueueItemInfo,
-    RegionId as GatewayRegionId, RegionInfo as GatewayRegionInfo, RepeatArg as GatewayRepeatArg,
+    NodeInfo as GatewayNodeInfo, OwnerInfo, ParamValue as GatewayParamValue,
+    QueueItemId as GatewayQueueItemId, QueueItemInfo, RegionId as GatewayRegionId,
+    RegionInfo as GatewayRegionInfo, RepeatArg as GatewayRepeatArg,
 };
-use modplayer_effects::catalog::{NodeKind, NodeOwner, ParamId, QualityMode};
+use modplayer_effects::catalog::{self, NodeKind, NodeOwner, ParamId, QualityMode, WireShape};
 use modplayer_engine::{
     BufferPreset, CeilingDb, Command, DeviceId, Event, NegotiatedBuffer, PositionClock, Processor,
     ProcessorConfig, RtShared, SampleRate, Theme, Transport, VolumePercent,
@@ -49,7 +50,8 @@ use crate::actions::{
 use crate::analysis::{AnalysisPaths, AnalysisService, AnalysisSnapshot};
 use crate::device_policy::{self, DeviceLostOutcome, DeviceResolution, DeviceWarning};
 use crate::effects::{
-    ChainError, ChainModel, ChainView, LevelPair, MeterSnapshot, NodeId, view as effects_view,
+    ChainError, ChainModel, ChainView, LevelPair, MeterSnapshot, NodeId, NodeModel,
+    view as effects_view,
 };
 use crate::i18n::tr;
 use crate::library::index::SyncOutcome;
@@ -196,6 +198,61 @@ fn frames_to_ms(frames: u64, rate: u32) -> u64 {
         0
     } else {
         frames * 1000 / u64::from(rate)
+    }
+}
+
+/// `node`, as a plugin sees it via `effects.list_chain()`/
+/// `effect_chain_changed` (013-key-and-tempo-plugin, data-model.md §2.3,
+/// research R3): the single projection both call sites share, so
+/// `params`/`auto_switched` (API 1.4) are filled exactly once. `params`
+/// is built from `NodeModel.params` — the control-side clamped *target*,
+/// never an RT value (Constitution I) — keyed by
+/// `catalog::param_wire_name` and shaped by `catalog::wire_shape`:
+/// `Bool` rounds the stored `0.0/1.0` to a boolean, `Enum` rounds to the
+/// nearest `catalog::enum_names` index (a value the model itself always
+/// keeps in range), everything else passes through as `Number`.
+/// `auto_switched` is `mode_state.auto_switched`, `false` for a kind with
+/// no mode.
+fn node_info(
+    index: usize,
+    node: &NodeModel,
+    ids: &crate::plugins::PluginIdTable,
+) -> GatewayNodeInfo {
+    let owner = owner_info(
+        match node.owner {
+            NodeOwner::Host => markers::Owner::Host,
+            NodeOwner::Plugin(id) => markers::Owner::Plugin(id),
+        },
+        ids,
+    );
+    let mut params = BTreeMap::new();
+    for (pos, def) in catalog::params(node.kind).iter().enumerate() {
+        let Some(name) = catalog::param_wire_name(node.kind, def.id) else {
+            continue;
+        };
+        let value = node.params[pos];
+        let gw_value = match catalog::wire_shape(node.kind, def.id) {
+            Some(WireShape::Bool) => GatewayParamValue::Bool(value.round() >= 1.0),
+            Some(WireShape::Enum) => {
+                let names = catalog::enum_names(node.kind, def.id).unwrap_or(&[]);
+                #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                let idx = value.round().max(0.0) as usize;
+                GatewayParamValue::Name(names.get(idx).copied().unwrap_or("").to_string())
+            }
+            _ => GatewayParamValue::Number(f64::from(value)),
+        };
+        params.insert(name.to_string(), gw_value);
+    }
+    GatewayNodeInfo {
+        id: GatewayNodeId(node.id.as_u32()),
+        kind: ChainModel::wire_name(node.kind).to_string(),
+        owner,
+        bypassed: node.bypassed,
+        auto_bypassed: node.auto_bypassed,
+        orphaned: node.orphaned,
+        index,
+        params,
+        auto_switched: node.mode_state.is_some_and(|m| m.auto_switched),
     }
 }
 
@@ -625,6 +682,13 @@ pub struct PlaybackController<B: OutputBackend, H: SourceHost> {
     /// placement/geometry/disabled mutation — mirrors `actions`'s own
     /// shadow-state convention above.
     plugin_panels: BTreeMap<String, crate::settings::PanelPersisted>,
+
+    /// `[onboarding] getting_started_dismissed` shadow state
+    /// (013-key-and-tempo-plugin, contracts/getting-started-card.md S1):
+    /// seeded from `settings.getting_started_dismissed` at construction
+    /// and persisted, through `persist_settings`, on
+    /// `dismiss_getting_started`.
+    getting_started_dismissed: bool,
 }
 
 /// `transport.seek_forward_step`/`seek_backward_step`'s step size
@@ -782,6 +846,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
             plugin_snapshot_queue: Vec::new(),
             transport_actor: TransportActor::default(),
             plugin_panels: settings.plugin_panels.clone(),
+            getting_started_dismissed: settings.getting_started_dismissed,
         };
         // 006, contracts/marker-service.md §4: resolved unconditionally at
         // construction, like `AnalysisPaths::resolve()` just above —
@@ -2090,21 +2155,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
             .nodes()
             .iter()
             .enumerate()
-            .map(|(index, node)| GatewayNodeInfo {
-                id: GatewayNodeId(node.id.as_u32()),
-                kind: ChainModel::wire_name(node.kind).to_string(),
-                owner: owner_info(
-                    match node.owner {
-                        NodeOwner::Host => markers::Owner::Host,
-                        NodeOwner::Plugin(id) => markers::Owner::Plugin(id),
-                    },
-                    ids,
-                ),
-                bypassed: node.bypassed,
-                auto_bypassed: node.auto_bypassed,
-                orphaned: node.orphaned,
-                index,
-            })
+            .map(|(index, node)| node_info(index, node, ids))
             .collect();
 
         {
@@ -2188,21 +2239,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
                 .nodes()
                 .iter()
                 .enumerate()
-                .map(|(index, node)| GatewayNodeInfo {
-                    id: GatewayNodeId(node.id.as_u32()),
-                    kind: ChainModel::wire_name(node.kind).to_string(),
-                    owner: owner_info(
-                        match node.owner {
-                            NodeOwner::Host => markers::Owner::Host,
-                            NodeOwner::Plugin(id) => markers::Owner::Plugin(id),
-                        },
-                        ids,
-                    ),
-                    bypassed: node.bypassed,
-                    auto_bypassed: node.auto_bypassed,
-                    orphaned: node.orphaned,
-                    index,
-                })
+                .map(|(index, node)| node_info(index, node, ids))
                 .collect();
             self.plugins
                 .fan_out(&HostEvent::EffectChainChanged { chain }, now);
@@ -2406,6 +2443,22 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
     pub fn set_focus_policy(&mut self, policy: FocusPolicy) {
         self.plugins.arbiter_mut().set_policy(policy);
         self.persist_settings(|settings| settings.focus_policy = policy);
+    }
+
+    /// Whether the Getting Started card has been dismissed
+    /// (013-key-and-tempo-plugin, contracts/getting-started-card.md V2).
+    #[must_use]
+    pub fn getting_started_dismissed(&self) -> bool {
+        self.getting_started_dismissed
+    }
+
+    /// Dismiss the Getting Started card and persist the flag (contracts/
+    /// getting-started-card.md C2): the in-memory flag is set even if the
+    /// save fails (a `settings-save-failed` warning is raised), so the
+    /// card still disappears for this session.
+    pub fn dismiss_getting_started(&mut self) {
+        self.getting_started_dismissed = true;
+        self.persist_settings(|settings| settings.getting_started_dismissed = true);
     }
 
     /// The user's "Give focus" (FR-008, C8): a no-op unless `id` is a

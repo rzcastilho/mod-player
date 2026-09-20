@@ -132,6 +132,11 @@ pub struct AudioSettings {
     /// currently registered is retained dormant (never dropped on load —
     /// mirrors 007 FR-013's keybinding-override convention).
     pub plugin_panels: BTreeMap<String, PanelPersisted>,
+    /// `[onboarding] getting_started_dismissed` (013-key-and-tempo-plugin,
+    /// contracts/getting-started-card.md S1): device-scoped, `false` when
+    /// absent; sign-out/revocation never touch it (S2), matching
+    /// `disclosure`'s own precedent.
+    pub getting_started_dismissed: bool,
     pub schema_version: u32,
 }
 
@@ -152,6 +157,7 @@ impl Default for AudioSettings {
             keybinding_overrides: KeymapOverrides::default(),
             focus_policy: FocusPolicy::default(),
             plugin_panels: BTreeMap::new(),
+            getting_started_dismissed: false,
             schema_version: SCHEMA_VERSION,
         }
     }
@@ -288,6 +294,11 @@ pub struct RawSettings {
     /// one entry (`InvalidField::PluginPanel`), never the whole table.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub plugin_panels: BTreeMap<String, RawPanel>,
+    /// `[onboarding]` (013-key-and-tempo-plugin, contracts/getting-
+    /// started-card.md S1): an optional table so older files (with no
+    /// such section) load the default `false`.
+    #[serde(default)]
+    pub onboarding: RawOnboarding,
 }
 
 fn default_schema_version() -> u32 {
@@ -306,6 +317,7 @@ impl Default for RawSettings {
             transport: RawTransport::default(),
             keybindings: BTreeMap::new(),
             plugin_panels: BTreeMap::new(),
+            onboarding: RawOnboarding::default(),
         }
     }
 }
@@ -479,6 +491,15 @@ pub struct RawDisclosure {
     pub acknowledged_at: Option<String>,
 }
 
+/// The `[onboarding]` section (013-key-and-tempo-plugin, contracts/
+/// getting-started-card.md S1): device-scoped, absent ⇒ `false`; never
+/// touched by sign-out/revocation (S2), same handling as `[disclosure]`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RawOnboarding {
+    #[serde(default)]
+    pub getting_started_dismissed: bool,
+}
+
 impl RawSettings {
     /// Serialize `settings` to its wire form.
     pub fn from_settings(settings: &AudioSettings) -> Self {
@@ -571,6 +592,9 @@ impl RawSettings {
                     )
                 })
                 .collect(),
+            onboarding: RawOnboarding {
+                getting_started_dismissed: settings.getting_started_dismissed,
+            },
         }
     }
 
@@ -726,6 +750,7 @@ impl RawSettings {
             keybinding_overrides,
             focus_policy,
             plugin_panels,
+            getting_started_dismissed: self.onboarding.getting_started_dismissed,
             schema_version: self.schema_version,
         };
 

@@ -16,10 +16,10 @@ use modplayer_audio_source::{SourceHost, TrackId};
 use modplayer_capability_gateway::refusal::Refusal;
 use modplayer_capability_gateway::request::{
     LoopEndpoint as GatewayLoopEndpoint, MarkerId as GatewayMarkerId, NodeId as GatewayNodeId,
-    QueueItemId as GatewayQueueItemId, RegionId as GatewayRegionId, RepeatArg as GatewayRepeatArg,
-    Request, Response,
+    ParamArg, ParamRef, QueueItemId as GatewayQueueItemId, RegionId as GatewayRegionId,
+    RepeatArg as GatewayRepeatArg, Request, Response,
 };
-use modplayer_effects::catalog::{NodeKind, NodeOwner, ParamId};
+use modplayer_effects::catalog::{self, NodeKind, NodeOwner, ParamId, WireShape};
 use modplayer_plugin_runtime::handle::Control;
 
 use crate::PlaybackController;
@@ -178,6 +178,71 @@ fn node_owner<B: OutputBackend, H: SourceHost>(
     id: CoreNodeId,
 ) -> Option<NodeOwner> {
     controller.chain().owned_by(id)
+}
+
+/// 013-key-and-tempo-plugin (research R2): `id`'s current `NodeKind`, so
+/// `SetParam`/`ScheduleParam`'s widened `ParamRef`/`ParamArg` can be
+/// resolved against the right kind's wire-name/shape tables. `None` for
+/// an id that does not exist (mirrors [`node_owner`]).
+fn node_kind<B: OutputBackend, H: SourceHost>(
+    controller: &PlaybackController<B, H>,
+    id: CoreNodeId,
+) -> Option<NodeKind> {
+    controller
+        .chain()
+        .nodes()
+        .iter()
+        .find(|n| n.id == id)
+        .map(|n| n.kind)
+}
+
+/// `SetParam`/`ScheduleParam`'s `param` argument (API 1.4, research R2):
+/// the 1.0-1.3 numeric id unchanged, or the wire name resolved against
+/// `kind`'s catalog — `invalid_state`/`invalid_argument`, naming the
+/// parameter, for a name `kind` has no such parameter.
+fn resolve_param_ref(kind: NodeKind, param: ParamRef) -> Result<ParamId, Refusal> {
+    match param {
+        ParamRef::Id(id) => Ok(ParamId(id)),
+        ParamRef::Name(name) => catalog::param_by_wire_name(kind, &name).ok_or_else(|| {
+            Refusal::invalid_state("invalid_argument", format!("Unknown parameter '{name}'."))
+        }),
+    }
+}
+
+/// `SetParam`/`ScheduleParam`'s `value` argument (API 1.4, research R2):
+/// the 1.0-1.3 numeric form unchanged; a boolean valid only for a
+/// `WireShape::Bool` parameter (0.0/1.0); an enum name valid only for a
+/// `WireShape::Enum` parameter, resolved to its catalog index. Any
+/// shape mismatch or unknown enum name is `invalid_state`/
+/// `invalid_argument`, naming the parameter.
+fn resolve_param_arg(kind: NodeKind, param: ParamId, value: ParamArg) -> Result<f32, Refusal> {
+    match value {
+        ParamArg::Number(n) => Ok(n),
+        ParamArg::Bool(b) => match catalog::wire_shape(kind, param) {
+            Some(WireShape::Bool) => Ok(if b { 1.0 } else { 0.0 }),
+            _ => Err(Refusal::invalid_state(
+                "invalid_argument",
+                "A boolean value was given for a non-boolean parameter.",
+            )),
+        },
+        ParamArg::Name(name) => match catalog::wire_shape(kind, param) {
+            Some(WireShape::Enum) => catalog::enum_names(kind, param)
+                .unwrap_or(&[])
+                .iter()
+                .position(|n| *n == name)
+                .map(|i| i as f32)
+                .ok_or_else(|| {
+                    Refusal::invalid_state(
+                        "invalid_argument",
+                        format!("Unknown value '{name}' for this parameter."),
+                    )
+                }),
+            _ => Err(Refusal::invalid_state(
+                "invalid_argument",
+                "An enum name was given for a non-enum parameter.",
+            )),
+        },
+    }
 }
 
 /// `not_found` when `owner` is `None` (the id does not exist); `not_owner`
@@ -368,11 +433,19 @@ fn dispatch<B: OutputBackend, H: SourceHost>(
         }
 
         // -- owned effect-node mutations (US2 T086, C2) -------------------
+        // 013-key-and-tempo-plugin (API 1.4, research R2): `param`/`value`
+        // are resolved against `nid`'s kind (`ParamRef`/`ParamArg` ->
+        // `ParamId`/`f32`) only *after* the ownership check, so a
+        // not-owned/not-found node still refuses `not_owner`/`not_found`
+        // ahead of any parameter-shape refusal.
         Request::SetParam { node, param, value } => {
             let nid = CoreNodeId::from_raw(node.0);
             require_node_owner(node_owner(controller, nid), plugin)?;
+            let kind = node_kind(controller, nid).ok_or_else(Refusal::not_found)?;
+            let param_id = resolve_param_ref(kind, param)?;
+            let value = resolve_param_arg(kind, param_id, value)?;
             controller
-                .chain_set_param(nid, ParamId(param), value)
+                .chain_set_param(nid, param_id, value)
                 .map_err(chain_refusal)?;
             Ok(Response::Ok)
         }
@@ -389,8 +462,11 @@ fn dispatch<B: OutputBackend, H: SourceHost>(
         } => {
             let nid = CoreNodeId::from_raw(node.0);
             require_node_owner(node_owner(controller, nid), plugin)?;
+            let kind = node_kind(controller, nid).ok_or_else(Refusal::not_found)?;
+            let param_id = resolve_param_ref(kind, param)?;
+            let value = resolve_param_arg(kind, param_id, value)?;
             controller
-                .chain_set_param(nid, ParamId(param), value)
+                .chain_set_param(nid, param_id, value)
                 .map_err(chain_refusal)?;
             Ok(Response::Ok)
         }

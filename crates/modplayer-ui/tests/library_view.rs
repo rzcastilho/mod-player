@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use egui::accesskit::Role;
-use egui::{Context, Pos2, RawInput, Rect};
+use egui::{Context, Event, OpenUrl, OutputCommand, PointerButton, Pos2, RawInput, Rect};
 use modplayer_audio_io::{FakeBackend, FakeDevice};
 use modplayer_audio_source::{
     AlbumId, AlbumRef, ArtistId, ArtistRef, Availability, CatalogError, LibraryItem, LibraryPage,
@@ -22,10 +22,11 @@ use modplayer_audio_source_synthetic::scripted::HydratedReply;
 use modplayer_audio_source_synthetic::{ScriptedHost, SyntheticHost};
 use modplayer_core::library::LibraryPaths;
 use modplayer_core::settings::SettingsStore;
-use modplayer_core::{PlaybackController, tr, tr_args};
+use modplayer_core::{GETTING_STARTED_TUTORIAL_URL, PlaybackController, tr, tr_args};
 use modplayer_engine::{BufferPreset, DeviceId, FrameCount, SampleRate};
 use modplayer_ui::artwork::ArtworkCache;
 use modplayer_ui::detail_view::{self, DetailOutcome, DetailTarget};
+use modplayer_ui::getting_started::{self, GettingStartedOutcome};
 use modplayer_ui::library_view::{self, LibraryOutcome, LibraryTab, LibraryViewState};
 
 struct TempDir(PathBuf);
@@ -1236,4 +1237,154 @@ fn time_library_frame(
         .filter(|(_, node)| matches!(node.role(), Role::ListItem | Role::Status))
         .count();
     (row_count, elapsed)
+}
+
+// ---------------------------------------------------------------------
+// 013-key-and-tempo-plugin (US4, contracts/getting-started-card.md):
+// the dismissible Getting Started card. `App::show_library` draws it
+// above the tab row, guarded by `!controller.getting_started_dismissed()`
+// and only outside a detail target (design note 11: `open_url` only ever
+// happens in `App`) — `render_library_with_card` below reproduces that
+// exact guard, mirroring `first_launch.rs`'s own convention of calling
+// the real production function/dispatch directly rather than driving the
+// whole `App`.
+// ---------------------------------------------------------------------
+
+/// Reproduces `App::show_library`'s card placement (V1/V2): drawn above
+/// `library_view::show`, only when `!detail_open` and not dismissed.
+fn render_library_with_card(
+    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+    artwork: &mut ArtworkCache,
+    state: &mut LibraryViewState,
+    detail_open: bool,
+) -> (Vec<Node>, GettingStartedOutcome) {
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+    let mut card_outcome = GettingStartedOutcome::None;
+    let output = ctx.run_ui(default_input(), |ui| {
+        if detail_open {
+            return;
+        }
+        if !controller.getting_started_dismissed() {
+            card_outcome = getting_started::show(ui);
+        }
+        let _ = library_view::show(ui, controller, artwork, state);
+    });
+    (collect_nodes(&ctx, output), card_outcome)
+}
+
+/// V1/V2/C2: the card is present naming both bundled plugins until
+/// `Dismiss` is clicked, after which it is gone in the same session.
+#[test]
+fn getting_started_card_shown_until_dismissed() {
+    let (mut controller, _handle, _dir) = active_controller("getting-started-shown");
+    let mut artwork = ArtworkCache::new();
+    let mut state = LibraryViewState::default();
+
+    let (nodes, outcome) =
+        render_library_with_card(&mut controller, &mut artwork, &mut state, false);
+    assert_eq!(outcome, GettingStartedOutcome::None);
+    assert!(
+        has_name(&nodes, &tr("getting-started-title")),
+        "the card's heading must be present before dismissal: {nodes:?}"
+    );
+    assert!(has_name(&nodes, &tr("getting-started-section-loop")));
+    assert!(has_name(&nodes, &tr("getting-started-key-tempo")));
+    assert!(has(&nodes, Role::Button, &tr("getting-started-dismiss")));
+
+    controller.dismiss_getting_started();
+
+    let (nodes, _) = render_library_with_card(&mut controller, &mut artwork, &mut state, false);
+    assert!(
+        !has_name(&nodes, &tr("getting-started-title")),
+        "the card must be gone the same session right after Dismiss: {nodes:?}"
+    );
+}
+
+/// V1: the card is absent while a detail target is open.
+#[test]
+fn getting_started_not_shown_in_detail_view() {
+    let (mut controller, _handle, _dir) = active_controller("getting-started-detail");
+    let mut artwork = ArtworkCache::new();
+    let mut state = LibraryViewState::default();
+
+    let (nodes, outcome) =
+        render_library_with_card(&mut controller, &mut artwork, &mut state, true);
+    assert_eq!(outcome, GettingStartedOutcome::None);
+    assert!(
+        !has_name(&nodes, &tr("getting-started-title")),
+        "the card must not render while a detail target is open: {nodes:?}"
+    );
+}
+
+/// C1: clicking the tutorial link-button reports `OpenTutorial`, and the
+/// same dispatch `App` uses (`ctx.open_url` with the constant) issues the
+/// command in that frame's output.
+#[test]
+fn getting_started_tutorial_opens_url() {
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+
+    // Discover the tutorial control's bounds first (no click yet).
+    let mut discover = ctx.run_ui(default_input(), |ui| {
+        let _ = getting_started::show(ui);
+    });
+    let update = discover
+        .platform_output
+        .accesskit_update
+        .take()
+        .expect("accesskit_update should be populated once enabled");
+    discover.drop_without_applying_deltas();
+    let tutorial_label = tr("getting-started-tutorial");
+    let bounds = update
+        .nodes
+        .iter()
+        .find(|(_, n)| n.role() == Role::Link && n.label() == Some(tutorial_label.as_str()))
+        .and_then(|(_, n)| n.bounds())
+        .expect("the tutorial control must have a Link role and bounds");
+    let center = Pos2::new(
+        ((bounds.x0 + bounds.x1) / 2.0) as f32,
+        ((bounds.y0 + bounds.y1) / 2.0) as f32,
+    );
+
+    let mut press = default_input();
+    press.events.push(Event::PointerButton {
+        pos: center,
+        button: PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::default(),
+    });
+    ctx.run_ui(press, |ui| {
+        let _ = getting_started::show(ui);
+    })
+    .drop_without_applying_deltas();
+
+    let mut outcome = GettingStartedOutcome::None;
+    let mut release = default_input();
+    release.events.push(Event::PointerButton {
+        pos: center,
+        button: PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::default(),
+    });
+    // Exactly `App::show_library`'s own dispatch (design note 11):
+    // `open_url` is called in the same frame the outcome comes back as
+    // `OpenTutorial`.
+    let output = ctx.run_ui(release, |ui| {
+        outcome = getting_started::show(ui);
+        if outcome == GettingStartedOutcome::OpenTutorial {
+            ui.ctx()
+                .open_url(OpenUrl::new_tab(GETTING_STARTED_TUTORIAL_URL));
+        }
+    });
+    let commands = output.platform_output.commands.clone();
+    output.drop_without_applying_deltas();
+
+    assert_eq!(outcome, GettingStartedOutcome::OpenTutorial);
+    assert!(
+        commands.iter().any(
+            |c| matches!(c, OutputCommand::OpenUrl(u) if u.url == GETTING_STARTED_TUTORIAL_URL)
+        ),
+        "App must issue open_url with the tutorial constant, got: {commands:?}"
+    );
 }

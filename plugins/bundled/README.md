@@ -26,9 +26,9 @@ Packages currently shipped here:
 - `org.modplayer.section-loop` — Section Loop (012-section-loop-plugin):
   A/B loop marking, gapless repeat, and cue navigation for hands-free
   drilling of a track section.
-
-Key & Tempo (013) will be added as a sibling folder once built against
-the public API this slice defines.
+- `org.modplayer.key-tempo` — Key & Tempo (013-key-and-tempo-plugin):
+  independent semitone transpose and tempo/time-stretch control, with
+  optional per-track memory of the chosen key and tempo.
 
 The eight test-only fixture packages used to exercise and demonstrate
 this slice live under `../fixtures/` instead (discovered only when

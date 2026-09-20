@@ -5,6 +5,13 @@
 //! §1 "P1"-"P4"): discovery/enablement, exact manifest permissions,
 //! that `main.luau` calls only the public schema surface (SC-008),
 //! byte-identical licence copies, and full `@key` string coverage.
+//!
+//! 013-key-and-tempo-plugin (research R8): `bundled::packages()` now
+//! also ships Key & Tempo alongside Section Loop — every test below
+//! still looks Section Loop's own record up by identifier (never by
+//! position or an exact package count), so it is unaffected; the
+//! sibling `bundled_key_tempo.rs` covers the same acceptance shape for
+//! the second package.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;

@@ -23,7 +23,9 @@ use modplayer_account::{
     CredentialStore, FakeAuthorizationService, FakeClock, LoadOutcome, Profile, SessionState, Tier,
     TokenSet,
 };
-use modplayer_core::{DisclosureAcknowledgement, SettingsStore};
+use modplayer_audio_io::FakeBackend;
+use modplayer_audio_source_synthetic::SyntheticHost;
+use modplayer_core::{DisclosureAcknowledgement, PlaybackController, SettingsStore};
 use modplayer_secure_store::{MemorySecureStore, SecureStore};
 use modplayer_ui::welcome;
 
@@ -223,6 +225,40 @@ fn drive_callback(port: &str, state: &str, query: &str) {
         std::thread::sleep(StdDuration::from_millis(10));
     }
     assert!(connected, "could not connect to loopback listener");
+}
+
+/// 013-key-and-tempo-plugin (US4, contracts/getting-started-card.md S1):
+/// `Dismiss` persists through `SettingsStore::save` (`persist_settings`),
+/// so a whole new `PlaybackController` built from the same store — the
+/// same "new `App`, same store" relaunch this file's disclosure test
+/// above exercises — sees the card already dismissed.
+#[test]
+fn getting_started_dismiss_persists_across_relaunch() {
+    let dir = TempDir::new();
+    let store_path = dir.path().join("settings.toml");
+
+    let mut controller = PlaybackController::new(
+        FakeBackend::new(vec![]),
+        SyntheticHost::new(44_100),
+        SettingsStore::with_path(&store_path),
+    );
+    assert!(!controller.getting_started_dismissed());
+    controller.dismiss_getting_started();
+    assert!(controller.getting_started_dismissed());
+    drop(controller);
+
+    // Reconstruct a whole new controller from the same settings-store
+    // path, exactly like relaunching the app (mirrors `controller_
+    // actions.rs`'s `custom_binding_survives_controller_restart`).
+    let reconstructed = PlaybackController::new(
+        FakeBackend::new(vec![]),
+        SyntheticHost::new(44_100),
+        SettingsStore::with_path(&store_path),
+    );
+    assert!(
+        reconstructed.getting_started_dismissed(),
+        "the dismissal must survive a relaunch on the same settings.toml"
+    );
 }
 
 /// Drain `tick()` a bounded number of times, sleeping briefly between calls

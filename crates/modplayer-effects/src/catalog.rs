@@ -472,6 +472,145 @@ pub const fn mode_after_user_set(mode: QualityMode) -> ModeState {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Parameter wire names (013-key-and-tempo-plugin, data-model.md §2.1,
+// research R2). Host-owned, control-side only data (Constitution I): a
+// plugin's `set_param`/`schedule_param` may address a parameter by one of
+// these names instead of its numeric `ParamId`, and `NodeInfo.params`
+// (API 1.4) is keyed by them. The set of names equals `v1.toml`'s
+// `[[node_kind]]` table (`core/tests/effects_model.rs::
+// wire_names_match_api_schema`).
+// ---------------------------------------------------------------------------
+
+/// `NodeInfo.params`' value shape for a given parameter (API 1.4, research
+/// R2): a `Continuous` shape is always `Number`; a `Discrete` shape is
+/// `Bool` for a two-state toggle (`Unit::Toggle`) or `Enum` for a
+/// multi-state choice rendered as a name (`Unit::Combo`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WireShape {
+    Number,
+    Bool,
+    Enum,
+}
+
+/// `pitch_shift`/`time_stretch`'s shared `quality_mode` enum names, in
+/// `QualityMode`'s own discrete index order (`Performance = 0, Quality =
+/// 1`).
+const QUALITY_MODE_NAMES: [&str; 2] = ["performance", "quality"];
+
+/// `filter`'s `mode` enum names, in `ParamId(0)`'s discrete index order.
+const FILTER_MODE_NAMES: [&str; 2] = ["high_pass", "low_pass"];
+
+/// `equalizer` band `type`'s enum names, in `ParamId::eq_band(_, 3)`'s
+/// discrete index order.
+const EQ_BAND_TYPE_NAMES: [&str; 3] = ["peak", "low_shelf", "high_shelf"];
+
+/// `equalizer`'s 8 bands' 4 wire names each (`band<n>_freq`/`_gain`/`_q`/
+/// `_type`, `n` = 1..=8 — one-based, per `plugins/bundled/README.md`'s and
+/// contracts/plugin-api-v1.4.md §5's convention), indexed `[band][sub]`
+/// with `sub` matching `ParamId::eq_band`'s own `n` (`0` = freq, `1` =
+/// gain, `2` = q, `3` = type).
+const EQ_WIRE_NAMES: [[&str; 4]; 8] = [
+    ["band1_freq", "band1_gain", "band1_q", "band1_type"],
+    ["band2_freq", "band2_gain", "band2_q", "band2_type"],
+    ["band3_freq", "band3_gain", "band3_q", "band3_type"],
+    ["band4_freq", "band4_gain", "band4_q", "band4_type"],
+    ["band5_freq", "band5_gain", "band5_q", "band5_type"],
+    ["band6_freq", "band6_gain", "band6_q", "band6_type"],
+    ["band7_freq", "band7_gain", "band7_q", "band7_type"],
+    ["band8_freq", "band8_gain", "band8_q", "band8_type"],
+];
+
+/// `kind`'s `id` parameter's wire name (research R2), or `None` if `kind`
+/// has no such parameter.
+#[must_use]
+pub fn param_wire_name(kind: NodeKind, id: ParamId) -> Option<&'static str> {
+    match kind {
+        NodeKind::PitchShift => match id.0 {
+            0 => Some("semitones"),
+            1 => Some("formant"),
+            2 => Some("quality_mode"),
+            _ => None,
+        },
+        NodeKind::TimeStretch => match id.0 {
+            0 => Some("ratio"),
+            1 => Some("quality_mode"),
+            _ => None,
+        },
+        NodeKind::Gain => match id.0 {
+            0 => Some("level"),
+            1 => Some("mute"),
+            _ => None,
+        },
+        NodeKind::Filter => match id.0 {
+            0 => Some("mode"),
+            1 => Some("cutoff"),
+            2 => Some("resonance"),
+            _ => None,
+        },
+        NodeKind::StereoTools => match id.0 {
+            0 => Some("width"),
+            1 => Some("balance"),
+            2 => Some("mono_sum"),
+            3 => Some("phase_invert"),
+            4 => Some("channel_swap"),
+            _ => None,
+        },
+        NodeKind::Equalizer => {
+            let raw = id.0;
+            if raw < 16 {
+                return None;
+            }
+            let rel = raw - 16;
+            let band = (rel / 4) as usize;
+            let sub = (rel % 4) as usize;
+            EQ_WIRE_NAMES.get(band).map(|names| names[sub])
+        }
+    }
+}
+
+/// The inverse of [`param_wire_name`]: `kind`'s parameter named `name`, or
+/// `None` if no parameter of `kind` has that wire name.
+#[must_use]
+pub fn param_by_wire_name(kind: NodeKind, name: &str) -> Option<ParamId> {
+    params(kind)
+        .iter()
+        .find(|def| param_wire_name(kind, def.id) == Some(name))
+        .map(|def| def.id)
+}
+
+/// `kind`'s `id` parameter's enum names, in discrete-index order — `Some`
+/// only for a `Unit::Combo` discrete parameter (research R2); `None` for
+/// every continuous or toggle parameter, or an unknown pair.
+#[must_use]
+pub fn enum_names(kind: NodeKind, id: ParamId) -> Option<&'static [&'static str]> {
+    let def = params(kind).iter().find(|p| p.id == id)?;
+    if def.unit != Unit::Combo {
+        return None;
+    }
+    match (kind, id.0) {
+        (NodeKind::PitchShift, 2) | (NodeKind::TimeStretch, 1) => Some(&QUALITY_MODE_NAMES),
+        (NodeKind::Filter, 0) => Some(&FILTER_MODE_NAMES),
+        (NodeKind::Equalizer, raw) if raw >= 16 && (raw - 16) % 4 == 3 => Some(&EQ_BAND_TYPE_NAMES),
+        _ => None,
+    }
+}
+
+/// `kind`'s `id` parameter's `NodeInfo.params`/`set_param` value shape
+/// (research R2), or `None` for an unknown pair.
+#[must_use]
+pub fn wire_shape(kind: NodeKind, id: ParamId) -> Option<WireShape> {
+    let def = params(kind).iter().find(|p| p.id == id)?;
+    Some(match def.shape {
+        ParamShape::Continuous { .. } => WireShape::Number,
+        ParamShape::Discrete { .. } => match def.unit {
+            Unit::Toggle => WireShape::Bool,
+            Unit::Combo => WireShape::Enum,
+            _ => WireShape::Number,
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

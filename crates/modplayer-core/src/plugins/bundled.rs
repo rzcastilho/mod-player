@@ -41,11 +41,12 @@ pub fn fixtures_enabled() -> bool {
 }
 
 /// Every bundled package (FR-001) — always loaded, regardless of
-/// fixtures. 012-section-loop-plugin (data-model.md §2.6, research R5):
-/// the first (and this slice's only) real bundled package.
+/// fixtures. 012-section-loop-plugin (data-model.md §2.6, research R5)
+/// added the first; 013-key-and-tempo-plugin (data-model.md §2.7,
+/// research R8) adds the second, in declaration order.
 #[must_use]
 pub fn packages() -> Vec<BundledPackage> {
-    vec![section_loop()]
+    vec![section_loop(), key_tempo()]
 }
 
 /// 012-section-loop-plugin: Section Loop, the reference bundled plugin —
@@ -58,6 +59,22 @@ fn section_loop() -> BundledPackage {
         ),
         entry: include_str!("../../../../plugins/bundled/org.modplayer.section-loop/main.luau"),
         readme: include_str!("../../../../plugins/bundled/org.modplayer.section-loop/README.md"),
+        fixture: false,
+        resources: &[],
+    }
+}
+
+/// 013-key-and-tempo-plugin: Key & Tempo — independent semitone
+/// transpose and tempo/time-stretch control, with optional per-track
+/// memory of the chosen key and tempo (data-model.md §2.7/§3).
+fn key_tempo() -> BundledPackage {
+    BundledPackage {
+        identifier: "org.modplayer.key-tempo",
+        manifest_toml: include_str!(
+            "../../../../plugins/bundled/org.modplayer.key-tempo/plugin.toml"
+        ),
+        entry: include_str!("../../../../plugins/bundled/org.modplayer.key-tempo/main.luau"),
+        readme: include_str!("../../../../plugins/bundled/org.modplayer.key-tempo/README.md"),
         fixture: false,
         resources: &[],
     }
@@ -86,6 +103,7 @@ pub fn fixtures() -> Vec<BundledPackage> {
         fixture_ui_icons(),
         fixture_ui_settings(),
         fixture_ui_notify(),
+        fixture_effects_observer(),
     ]
 }
 
@@ -309,6 +327,22 @@ fn fixture_ui_notify() -> BundledPackage {
         manifest_toml: include_str!("../../../../plugins/fixtures/ui-notify/plugin.toml"),
         entry: include_str!("../../../../plugins/fixtures/ui-notify/main.luau"),
         readme: include_str!("../../../../plugins/fixtures/ui-notify/README.md"),
+        fixture: true,
+        resources: &[],
+    }
+}
+
+/// 013-key-and-tempo-plugin (Phase 2 Foundational, research R1/R3):
+/// `audio.effects` only; logs a summary of every `effect_chain_changed`
+/// it receives, so `controller_effects.rs` can prove the API 1.4 fan-out
+/// mechanism (and the R4 delivery fix) against a real subscribed plugin
+/// thread ahead of the bundled Key & Tempo package existing.
+fn fixture_effects_observer() -> BundledPackage {
+    BundledPackage {
+        identifier: "org.modplayer.fixture.effects-observer",
+        manifest_toml: include_str!("../../../../plugins/fixtures/effects-observer/plugin.toml"),
+        entry: include_str!("../../../../plugins/fixtures/effects-observer/main.luau"),
+        readme: include_str!("../../../../plugins/fixtures/effects-observer/README.md"),
         fixture: true,
         resources: &[],
     }

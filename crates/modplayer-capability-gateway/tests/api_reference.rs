@@ -20,6 +20,8 @@ struct Schema {
     permission: Vec<PermissionDto>,
     request: Vec<RequestDto>,
     event: Vec<EventDto>,
+    #[serde(default)]
+    node_kind: Vec<NodeKindDto>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -52,6 +54,25 @@ struct EventDto {
     #[serde(default)]
     requires: Option<String>,
     payload: Vec<String>,
+}
+
+/// 013-key-and-tempo-plugin (data-model.md §1.1, research R1): a
+/// documentary `[[node_kind]]` table, rendered below into a "Node
+/// parameters" section. Not consumed by `build.rs`.
+#[derive(Debug, Deserialize)]
+struct NodeKindDto {
+    name: String,
+    params: Vec<NodeKindParamDto>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NodeKindParamDto {
+    name: String,
+    shape: String,
+    #[serde(default)]
+    range: Option<String>,
+    #[serde(default)]
+    values: Vec<String>,
 }
 
 fn generate(schema: &Schema) -> String {
@@ -130,6 +151,28 @@ tests/api_reference.rs. Do not edit by hand (Constitution IX). Regenerate with \
         )
         .unwrap();
     }
+    writeln!(out).unwrap();
+
+    if !schema.node_kind.is_empty() {
+        writeln!(out, "## Node parameters\n").unwrap();
+        writeln!(out, "| Kind | Parameter | Shape | Range / values |").unwrap();
+        writeln!(out, "|---|---|---|---|").unwrap();
+        for k in &schema.node_kind {
+            for p in &k.params {
+                let range_or_values = if !p.values.is_empty() {
+                    p.values.join("\\|")
+                } else {
+                    p.range.clone().unwrap_or_default()
+                };
+                writeln!(
+                    out,
+                    "| `{}` | `{}` | {} | {} |",
+                    k.name, p.name, p.shape, range_or_values
+                )
+                .unwrap();
+            }
+        }
+    }
     out
 }
 
@@ -182,14 +225,47 @@ fn reference_is_current() {
     );
 }
 
-/// 012-section-loop-plugin (research R1, Constitution IX): the schema
-/// bump that adds `markers.set_loop_endpoint`/`markers.set_loop_repeat`.
+/// 013-key-and-tempo-plugin (research R1, Constitution IX): the schema
+/// bump that adds `NodeInfo.params`/`auto_switched`, the `set_param`/
+/// `schedule_param` argument widening, and the documentary `[[node_kind]]`
+/// table (superseded 012's `api_version_is_1_3`).
 #[test]
-fn api_version_is_1_3() {
+fn api_version_is_1_4() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let schema_path = manifest_dir.join("api/v1.toml");
     let text = fs::read_to_string(&schema_path).expect("read api/v1.toml");
     let schema: Schema = toml::from_str(&text).expect("parse api/v1.toml");
     assert_eq!(schema.api_version.major, 1);
-    assert_eq!(schema.api_version.minor, 3);
+    assert_eq!(schema.api_version.minor, 4);
+
+    // Reference regenerated and matches (folded in here rather than only
+    // in `reference_is_current`, per the named-test list in
+    // contracts/plugin-api-v1.4.md §8).
+    let generated = generate(&schema);
+    let doc_path = repo_root().join("docs/plugin-api/v1.md");
+    let committed = fs::read_to_string(&doc_path).unwrap_or_default();
+    assert_eq!(
+        committed, generated,
+        "docs/plugin-api/v1.md is stale — regenerate with \
+         MODPLAYER_UPDATE_API_REFERENCE=1 cargo test -p modplayer-capability-gateway \
+         --test api_reference"
+    );
+}
+
+/// 013-key-and-tempo-plugin (research R1): the "Node parameters" section
+/// is rendered from `[[node_kind]]` and lists every wire name the catalog
+/// exposes.
+#[test]
+fn reference_lists_node_kind_params() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let schema_path = manifest_dir.join("api/v1.toml");
+    let text = fs::read_to_string(&schema_path).expect("read api/v1.toml");
+    let schema: Schema = toml::from_str(&text).expect("parse api/v1.toml");
+    assert_eq!(schema.node_kind.len(), 6, "six built-in node kinds");
+    let generated = generate(&schema);
+    assert!(generated.contains("## Node parameters"));
+    assert!(generated.contains("`pitch_shift`"));
+    assert!(generated.contains("`semitones`"));
+    assert!(generated.contains("`quality_mode`"));
+    assert!(generated.contains("performance\\|quality"));
 }

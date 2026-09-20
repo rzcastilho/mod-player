@@ -268,9 +268,11 @@ fn click_at(
 
 // -----------------------------------------------------------------------
 
-/// 012-section-loop-plugin (research R5): `plugins/bundled/` now always
-/// ships Section Loop, so a controller discovered with no fixtures shows
-/// its one row (and enable checkbox), not the empty state.
+/// 012-section-loop-plugin (research R5), extended by
+/// 013-key-and-tempo-plugin: `plugins/bundled/` now always ships both
+/// Section Loop and Key & Tempo, so a controller discovered with no
+/// fixtures shows their two rows (and enable checkboxes), not the empty
+/// state.
 #[test]
 fn section_loop_row_without_fixtures() {
     let (mut controller, _dir) = plain_controller("section-loop-row");
@@ -283,12 +285,12 @@ fn section_loop_row_without_fixtures() {
         nodes
             .iter()
             .all(|n| n.accessible_name() != Some(&tr("plugins-empty"))),
-        "the empty-state label must not render once Section Loop is discovered: {nodes:?}"
+        "the empty-state label must not render once the bundled plugins are discovered: {nodes:?}"
     );
     let checkbox_count = nodes.iter().filter(|n| n.role == Role::CheckBox).count();
     assert_eq!(
-        checkbox_count, 1,
-        "exactly one plugin row (Section Loop) must render with no fixtures discovered: {nodes:?}"
+        checkbox_count, 2,
+        "exactly two plugin rows (Section Loop, Key & Tempo) must render with no fixtures discovered: {nodes:?}"
     );
 }
 
@@ -335,23 +337,29 @@ fn rows_show_every_column_sorted_by_name() {
         find_one(&nodes, Role::Label, &tr(key));
     }
 
-    // Every one of the 16 fixtures (010-transport-focus adds `focus-a`/
+    // Every one of the 17 fixtures (010-transport-focus adds `focus-a`/
     // `focus-b`; 011-plugin-ui-contributions US1 adds `ui-panel` (T060),
     // US2 adds `ui-shortcuts` (T079), US3 adds `ui-overlay` and
     // `ui-icons` (T092), US4 adds `ui-settings` (T106), US5 adds
-    // `ui-notify` (T115)) plus 012-section-loop-plugin's own bundled
-    // "Section Loop" (always discovered, `plugins/bundled/`'s one real
-    // package), sorted case-insensitively by name — already alphabetical
-    // for this fixture set. The invalid fixture's manifest never parses
-    // into a `Manifest` (only a `ManifestError`), so its row falls back
-    // to its raw identifier (`plugins/view.rs::row`, mirrors `plugins/
+    // `ui-notify` (T115); 013-key-and-tempo-plugin's Foundational phase
+    // adds `effects-observer` (T005/T011's `effect_chain_changed`
+    // regression fixture)) plus the two bundled packages,
+    // 012-section-loop-plugin's "Section Loop" and
+    // 013-key-and-tempo-plugin's own "Key & Tempo" (both always
+    // discovered, `plugins/bundled/`'s two real packages), sorted
+    // case-insensitively by name — already alphabetical for this fixture
+    // set. The invalid fixture's manifest never parses into a `Manifest`
+    // (only a `ManifestError`), so its row falls back to its raw
+    // identifier (`plugins/view.rs::row`, mirrors `plugins/
     // host.rs::record_sort_key`'s own fallback) rather than the `name`
     // its TOML never validated into.
     let expected_order = [
+        "Effects observer fixture",
         "Flood fixture",
         "Focus fixture A",
         "Focus fixture B",
         "Hang fixture",
+        "Key & Tempo",
         "Leak fixture",
         "Never-ready fixture",
         "Observer fixture",
@@ -411,13 +419,13 @@ fn rows_show_every_column_sorted_by_name() {
         "expected flood and focus-b to share the same two-permission explanation: {nodes:?}"
     );
 
-    // Every non-invalid fixture, plus Section Loop, is `Disabled`
-    // pre-launch, so its health is `Ok` and its CPU/memory are both the
-    // dash (not yet `Active`).
+    // Every non-invalid fixture, plus both bundled packages, is
+    // `Disabled` pre-launch, so its health is `Ok` and its CPU/memory are
+    // both the dash (not yet `Active`).
     assert_eq!(
         find_all(&nodes, Role::Label, &tr("plugins-health-ok")).len(),
-        16,
-        "15 valid fixtures plus Section Loop must all read `ok` before any is launched: {nodes:?}"
+        18,
+        "16 valid fixtures plus Section Loop and Key & Tempo must all read `ok` before any is launched: {nodes:?}"
     );
 }
 

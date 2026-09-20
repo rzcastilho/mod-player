@@ -3,13 +3,63 @@
 //! `api.effects.*` (contract §3): list_chain, create_node, set_param,
 //! schedule_param, bypass, remove_node.
 
-use mlua::{Lua, Table};
+use mlua::{Lua, Table, Value};
 
 use modplayer_capability_gateway::api::RequestKind;
 use modplayer_capability_gateway::manifest::SuggestedPosition;
-use modplayer_capability_gateway::request::{NodeId, Request};
+use modplayer_capability_gateway::refusal::Refusal;
+use modplayer_capability_gateway::request::{NodeId, ParamArg, ParamRef, Request};
 
-use super::{SharedHandle, call};
+use super::{SharedHandle, call, lua_err};
+
+fn bad_argument(detail: impl Into<String>) -> Refusal {
+    Refusal::invalid_state("invalid_argument", detail)
+}
+
+/// `set_param`/`schedule_param`'s `param` argument (API 1.4, contract §5):
+/// the 1.0-1.3 numeric id (`Value::Integer`/`Value::Number` with no
+/// fraction, `0..=255`) or the parameter's wire name (`Value::String`).
+/// Any other Lua type is refused, never a Lua error (contract §2).
+fn parse_param_ref(value: &Value) -> Result<ParamRef, Refusal> {
+    match value {
+        Value::Integer(n) => u8::try_from(*n)
+            .map(ParamRef::Id)
+            .map_err(|_| bad_argument("param id must be in 0..=255.")),
+        Value::Number(n) if n.fract() == 0.0 && (0.0..=255.0).contains(n) =>
+        {
+            #[allow(clippy::cast_possible_truncation)]
+            Ok(ParamRef::Id(*n as u8))
+        }
+        Value::String(s) => Ok(ParamRef::Name(s.to_string_lossy())),
+        _ => Err(bad_argument(
+            "param must be an integer id or a parameter wire name string.",
+        )),
+    }
+}
+
+/// `set_param`/`schedule_param`'s `value` argument (API 1.4, contract §5):
+/// the 1.0-1.3 numeric form, a boolean for a `boolean`-shaped parameter,
+/// or an enum name string for an `enum`-shaped parameter. Any other Lua
+/// type is refused, never a Lua error (contract §2).
+fn parse_param_arg(value: &Value) -> Result<ParamArg, Refusal> {
+    match value {
+        Value::Integer(n) =>
+        {
+            #[allow(clippy::cast_precision_loss)]
+            Ok(ParamArg::Number(*n as f32))
+        }
+        Value::Number(n) =>
+        {
+            #[allow(clippy::cast_possible_truncation)]
+            Ok(ParamArg::Number(*n as f32))
+        }
+        Value::Boolean(b) => Ok(ParamArg::Bool(*b)),
+        Value::String(s) => Ok(ParamArg::Name(s.to_string_lossy())),
+        _ => Err(bad_argument(
+            "value must be a number, boolean or enum name string.",
+        )),
+    }
+}
 
 fn parse_suggested(opts: &Option<Table>) -> mlua::Result<Option<SuggestedPosition>> {
     let Some(opts) = opts else {
@@ -54,23 +104,40 @@ pub fn install(lua: &Lua, api: &Table, shared: SharedHandle) -> mlua::Result<()>
     ns.set("create_node", create_node)?;
 
     let shared_set = shared.clone();
-    let set_param = lua.create_function(move |lua, (node_id, param, value): (u32, u8, f32)| {
-        call(
-            lua,
-            &shared_set,
-            RequestKind::SetParam,
-            Request::SetParam {
-                node: NodeId(node_id),
-                param,
-                value,
-            },
-        )
-    })?;
+    let set_param =
+        lua.create_function(move |lua, (node_id, param, value): (u32, Value, Value)| {
+            let param = match parse_param_ref(&param) {
+                Ok(p) => p,
+                Err(refusal) => return lua_err(lua, &refusal),
+            };
+            let value = match parse_param_arg(&value) {
+                Ok(v) => v,
+                Err(refusal) => return lua_err(lua, &refusal),
+            };
+            call(
+                lua,
+                &shared_set,
+                RequestKind::SetParam,
+                Request::SetParam {
+                    node: NodeId(node_id),
+                    param,
+                    value,
+                },
+            )
+        })?;
     ns.set("set_param", set_param)?;
 
     let shared_schedule = shared.clone();
     let schedule_param = lua.create_function(
-        move |lua, (node_id, param, value, at_ms): (u32, u8, f32, u64)| {
+        move |lua, (node_id, param, value, at_ms): (u32, Value, Value, u64)| {
+            let param = match parse_param_ref(&param) {
+                Ok(p) => p,
+                Err(refusal) => return lua_err(lua, &refusal),
+            };
+            let value = match parse_param_arg(&value) {
+                Ok(v) => v,
+                Err(refusal) => return lua_err(lua, &refusal),
+            };
             call(
                 lua,
                 &shared_schedule,

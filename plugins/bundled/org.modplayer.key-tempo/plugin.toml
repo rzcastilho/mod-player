@@ -1,0 +1,60 @@
+identifier    = "org.modplayer.key-tempo"
+name          = "Key & Tempo"
+description   = "Transpose a song or change its tempo without changing the rest."
+version       = "1.0.0"
+api           = "1.4"
+author        = "ModPlayer project"
+license       = "MIT OR Apache-2.0"
+source        = "bundled"
+entry         = "main.luau"
+default_locale = "en-US"
+
+[[permissions.required]]
+permission    = "audio.effects"
+justification = "Creates and drives its one pitch-shift and one time-stretch node; observes every change to them."
+
+[[permissions.required]]
+permission    = "ui.panel"
+justification = "Registers the Key & Tempo panel."
+
+[[permissions.required]]
+permission    = "ui.shortcuts"
+justification = "Registers its 8 trigger actions (tempo up/down default + / -)."
+
+[[permissions.required]]
+permission    = "state.track"
+justification = "Stores and restores a track's key/tempo when 'Remember for this track' is on."
+
+[[permissions.required]]
+permission    = "playback.observe"
+justification = "Reacts to track changes and reads the current track to restore or reset its settings."
+
+[strings.en-US]
+panel_title = "Key & Tempo"
+key = "Key"
+cents = "Fine tune"
+tempo = "Tempo"
+step = "Tempo step"
+formant = "Preserve formant"
+quality = "High quality"
+remember = "Remember for this track"
+keep_across = "Keep across tracks"
+restored = "Status"
+restored_text = "Restored from this track's memory"
+step_note = "Shortcut note"
+step_note_text = "+ / - still steps by the default 10% until rebound in Settings › Controls"
+node_removed_text = "Effect node removed — disable and re-enable Key & Tempo to recreate it"
+key_up = "Key up"
+key_down = "Key down"
+tempo_up = "Tempo up"
+tempo_down = "Tempo down"
+reset_key = "Reset key"
+reset_tempo = "Reset tempo"
+action_key_up = "Key Up"
+action_key_down = "Key Down"
+action_tempo_up = "Tempo Up"
+action_tempo_down = "Tempo Down"
+action_reset_key = "Reset Key"
+action_reset_tempo = "Reset Tempo"
+action_toggle_remember = "Toggle Remember"
+action_toggle_keep_across = "Toggle Keep Across Tracks"

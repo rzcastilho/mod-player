@@ -4,7 +4,7 @@
 //! Manifest parsing/validation tests (Constitution VIII, contracts/
 //! manifest.md §5).
 
-use modplayer_capability_gateway::api::Permission;
+use modplayer_capability_gateway::api::{API_VERSION, Permission};
 use modplayer_capability_gateway::manifest::{self, ManifestError};
 
 const VALID: &str = r#"
@@ -169,6 +169,33 @@ fn over_limit_glyph_count_is_malformed_field() {
             ..
         }
     ));
+}
+
+/// 013-key-and-tempo-plugin (research R1, contracts/plugin-api-v1.4.md §8):
+/// the version gate moved by exactly one minor — a manifest declaring the
+/// new host minor (`1.4`) is compatible; the next one up (`1.5`) is not,
+/// exactly as `1.4` was refused before this bump (`ApiRange::supports`,
+/// research R1 §1.1).
+#[test]
+fn manifest_api_1_4_accepted_1_5_refused() {
+    let toml_14 = VALID.replace(r#"api = "1.0""#, r#"api = "1.4""#);
+    let manifest_14 = manifest::parse_and_validate(&toml_14, true).expect("1.4 manifest parses");
+    assert!(
+        manifest_14
+            .api
+            .supports(API_VERSION.major, API_VERSION.minor),
+        "a manifest declaring the host's own minor version must be accepted"
+    );
+
+    let toml_15 = VALID.replace(r#"api = "1.0""#, r#"api = "1.5""#);
+    let manifest_15 = manifest::parse_and_validate(&toml_15, true)
+        .expect("1.5 manifest still parses — the host gate is a separate check");
+    assert!(
+        !manifest_15
+            .api
+            .supports(API_VERSION.major, API_VERSION.minor),
+        "a manifest declaring a newer minor than the host must be refused"
+    );
 }
 
 mod proptests {

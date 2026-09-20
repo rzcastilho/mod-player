@@ -738,3 +738,67 @@ fn plugin_panels_bad_placement_dropped() {
         )]
     );
 }
+
+// ---------------------------------------------------------------------
+// 013-key-and-tempo-plugin (US4, contracts/getting-started-card.md S1/S2):
+// `[onboarding] getting_started_dismissed` — device-scoped, absent ⇒
+// `false`, untouched by sign-out, same file-section handling as
+// `[disclosure]` above.
+// ---------------------------------------------------------------------
+
+#[test]
+fn getting_started_flag_round_trip() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let settings = AudioSettings {
+        getting_started_dismissed: true,
+        ..AudioSettings::default()
+    };
+    assert!(store.save(&settings).is_ok());
+
+    let outcome = store.load();
+    assert_eq!(outcome.settings, settings);
+    assert!(outcome.warnings.is_empty());
+
+    let on_disk = fs::read_to_string(store.path()).unwrap_or_default();
+    assert!(
+        on_disk.contains("[onboarding]") && on_disk.contains("getting_started_dismissed = true"),
+        "settings.toml must persist the [onboarding] section, got:\n{on_disk}"
+    );
+}
+
+#[test]
+fn getting_started_flag_absent_section_means_not_dismissed() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let _ = fs::write(store.path(), "schema_version = 1\n");
+
+    let outcome = store.load();
+    assert!(!outcome.settings.getting_started_dismissed);
+    assert!(outcome.warnings.is_empty());
+}
+
+#[test]
+fn getting_started_flag_survives_sign_out() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let mut controller =
+        PlaybackController::new(FakeBackend::new(vec![]), SyntheticHost::new(44_100), store);
+
+    controller.dismiss_getting_started();
+    assert!(controller.getting_started_dismissed());
+
+    // `clear_for_sign_out` (002/003) must never reset the device-scoped
+    // onboarding flag — it is not account data (S2).
+    controller.clear_for_sign_out();
+    assert!(
+        controller.getting_started_dismissed(),
+        "sign-out must leave [onboarding] intact"
+    );
+
+    let on_disk = fs::read_to_string(controller.settings_store().path()).unwrap_or_default();
+    assert!(
+        on_disk.contains("[onboarding]") && on_disk.contains("getting_started_dismissed = true"),
+        "the persisted flag must also survive sign-out, got:\n{on_disk}"
+    );
+}

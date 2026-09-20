@@ -35,3 +35,11 @@ notification-action-sign-in = Sign in
 # real Welcome (US1) and Sign-in (US2) screens land.
 launch-gate-placeholder-welcome = Welcome screen coming soon.
 launch-gate-placeholder-sign-in = Sign-in screen coming soon.
+
+# 013-key-and-tempo-plugin (US4, contracts/getting-started-card.md §2):
+# the dismissible Getting Started card at the top of the Library view.
+getting-started-title = Getting started
+getting-started-section-loop = Section Loop — drop A and B around a passage and drill it hands-free. Shortcuts: I set A, O set B, L loop, [ / ] nudge.
+getting-started-key-tempo = Key & Tempo — transpose a song or slow it down without changing the rest. Shortcuts: + / - tempo step; key controls in the panel.
+getting-started-tutorial = Open plugin tutorial
+getting-started-dismiss = Dismiss

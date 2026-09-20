@@ -7,9 +7,11 @@
 //! `ChainModel`'s behaviour (G1-G9) is covered by `controller_effects.rs`
 //! from 008; this file only adds the 009 deltas.
 
+use std::path::PathBuf;
+
 use modplayer_capability_gateway::manifest::SuggestedPosition;
 use modplayer_core::effects::ChainModel;
-use modplayer_effects::catalog::{NodeKind, NodeOwner, PluginId};
+use modplayer_effects::catalog::{self, NodeKind, NodeOwner, ParamId, PluginId, QualityMode};
 
 /// `resolve_position` (data-model.md §1.2): `Index(n)` clamps to
 /// `0..=len()`; `Before`/`After` match the first node whose kind's wire
@@ -167,4 +169,192 @@ fn orphan_and_readopt() {
         .remove(owned_id)
         .unwrap_or_else(|e| unreachable!("{e}"));
     assert_eq!(model.owned_by(owned_id), None);
+}
+
+// -- 013-key-and-tempo-plugin (API 1.4, research R1-R3) ---------------------
+
+#[derive(Debug, serde::Deserialize)]
+struct NodeKindDto {
+    name: String,
+    params: Vec<NodeKindParamDto>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct NodeKindParamDto {
+    name: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct SchemaDto {
+    node_kind: Vec<NodeKindDto>,
+}
+
+fn kind_from_wire(name: &str) -> NodeKind {
+    match name {
+        "pitch_shift" => NodeKind::PitchShift,
+        "time_stretch" => NodeKind::TimeStretch,
+        "gain" => NodeKind::Gain,
+        "filter" => NodeKind::Filter,
+        "stereo_tools" => NodeKind::StereoTools,
+        "equalizer" => NodeKind::Equalizer,
+        other => unreachable!("unknown [[node_kind]] name '{other}' in v1.toml"),
+    }
+}
+
+/// A `[[node_kind]]` param name, expanded for the equalizer's generic
+/// `band<n>_*` template (`n` = 1..=8, contracts/plugin-api-v1.4.md §5)
+/// into its 8 concrete names; every other kind's name is used as-is.
+fn expand_schema_param_name(name: &str) -> Vec<String> {
+    if name.contains("<n>") {
+        (1..=8)
+            .map(|n| name.replace("<n>", &n.to_string()))
+            .collect()
+    } else {
+        vec![name.to_string()]
+    }
+}
+
+/// research R1/R2 (contract plugin-api-v1.4.md §5, §8): the wire names
+/// `crates/modplayer-effects/src/catalog.rs`'s `param_wire_name` produces
+/// for every `NodeKind` equal exactly the documentary `[[node_kind]]`
+/// table in `api/v1.toml` — the reference and the runtime cannot diverge
+/// (Constitution IX).
+#[test]
+fn wire_names_match_api_schema() {
+    let schema_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../modplayer-capability-gateway/api/v1.toml");
+    let text =
+        std::fs::read_to_string(&schema_path).unwrap_or_else(|e| unreachable!("read v1.toml: {e}"));
+    let schema: SchemaDto =
+        toml::from_str(&text).unwrap_or_else(|e| unreachable!("parse v1.toml: {e}"));
+    assert_eq!(schema.node_kind.len(), 6, "six built-in node kinds");
+
+    for entry in &schema.node_kind {
+        let kind = kind_from_wire(&entry.name);
+        let mut expected: Vec<String> = entry
+            .params
+            .iter()
+            .flat_map(|p| expand_schema_param_name(&p.name))
+            .collect();
+        expected.sort();
+
+        let mut actual: Vec<String> = catalog::params(kind)
+            .iter()
+            .filter_map(|def| catalog::param_wire_name(kind, def.id))
+            .map(str::to_string)
+            .collect();
+        actual.sort();
+
+        assert_eq!(
+            expected, actual,
+            "{} wire names disagree between v1.toml and the catalog",
+            entry.name
+        );
+    }
+}
+
+/// research R2: `param_by_wire_name(kind, param_wire_name(kind, id))` is
+/// `Some(id)` for every parameter of every kind — the name lookup exactly
+/// inverts.
+#[test]
+fn wire_name_round_trip_every_kind() {
+    for kind in NodeKind::ALL {
+        for def in catalog::params(kind) {
+            let name = catalog::param_wire_name(kind, def.id)
+                .unwrap_or_else(|| unreachable!("{kind:?} {:?} has no wire name", def.id));
+            assert_eq!(
+                catalog::param_by_wire_name(kind, name),
+                Some(def.id),
+                "{kind:?}/{name} does not round-trip"
+            );
+        }
+    }
+}
+
+/// research R3: `revision` bumps by exactly one on a changed parameter
+/// target, is untouched by a same-value write, and bumps again when the
+/// FR-008 auto-switch rule flips `mode_state`.
+#[test]
+fn set_param_bumps_revision_only_on_change() {
+    let mut model = ChainModel::new(44_100);
+    let (id, _) = model
+        .add(NodeKind::Gain, NodeOwner::Host)
+        .unwrap_or_else(|e| unreachable!("{e}"));
+
+    let rev0 = model.revision();
+    let _ = model
+        .set_param(id, ParamId(0), -6.0)
+        .unwrap_or_else(|e| unreachable!("{e}"));
+    assert_eq!(model.revision(), rev0 + 1, "a changed value bumps once");
+
+    let rev1 = model.revision();
+    let _ = model
+        .set_param(id, ParamId(0), -6.0)
+        .unwrap_or_else(|e| unreachable!("{e}"));
+    assert_eq!(model.revision(), rev1, "the same value again does not bump");
+
+    // A stage-use excursion that also flips `mode_state` (FR-008 rule 1)
+    // still bumps exactly once — not twice for "value changed" and "mode
+    // changed" separately.
+    let (pid, _) = model
+        .add(NodeKind::PitchShift, NodeOwner::Host)
+        .unwrap_or_else(|e| unreachable!("{e}"));
+    let rev2 = model.revision();
+    let _ = model
+        .set_param(pid, ParamId(0), 7.0)
+        .unwrap_or_else(|e| unreachable!("{e}"));
+    assert_eq!(
+        model.revision(),
+        rev2 + 1,
+        "value change + auto-switch is one bump, not two"
+    );
+}
+
+/// research R3: a numeric `set_param` write to the mode-carrying
+/// `ParamId` (`quality_mode`) delegates entirely to `set_mode` — it runs
+/// FR-008 rule 3 (clears `auto_switched`) and keeps `mode_state`/`params`
+/// in agreement, rather than leaving `mode_state` stale as a direct
+/// `params[pos]` write would.
+#[test]
+fn set_param_on_mode_id_delegates_to_set_mode() {
+    let mut model = ChainModel::new(44_100);
+    let (id, _) = model
+        .add(NodeKind::PitchShift, NodeOwner::Host)
+        .unwrap_or_else(|e| unreachable!("{e}"));
+
+    // A stage-use excursion auto-switches to Quality.
+    let _ = model
+        .set_param(id, ParamId(0), 7.0)
+        .unwrap_or_else(|e| unreachable!("{e}"));
+    let auto = model
+        .nodes()
+        .iter()
+        .find(|n| n.id == id)
+        .and_then(|n| n.mode_state)
+        .unwrap_or_else(|| unreachable!());
+    assert!(auto.auto_switched, "value excursion auto-switches");
+
+    // An explicit numeric write to the mode `ParamId` (2, per data-model.md
+    // §1.3) clears `auto_switched` and sets the mode, both in
+    // `mode_state` and in `params`.
+    let (clamped, _) = model
+        .set_param(id, ParamId(2), 0.0)
+        .unwrap_or_else(|e| unreachable!("{e}"));
+    assert_eq!(clamped, QualityMode::Performance as u8 as f32);
+    let node = model
+        .nodes()
+        .iter()
+        .find(|n| n.id == id)
+        .unwrap_or_else(|| unreachable!());
+    let state = node.mode_state.unwrap_or_else(|| unreachable!());
+    assert_eq!(state.mode, QualityMode::Performance);
+    assert!(
+        !state.auto_switched,
+        "an explicit mode write always clears auto_switched"
+    );
+    let mode_pos = catalog::params(NodeKind::PitchShift)
+        .iter()
+        .position(|p| p.id == ParamId(2))
+        .unwrap_or_else(|| unreachable!());
+    assert_eq!(node.params[mode_pos], QualityMode::Performance as u8 as f32);
 }

@@ -35,6 +35,7 @@ use modplayer_effects::catalog::NodeKind;
 use modplayer_engine::{BufferPreset, DeviceId, Event as EngineEvent, FrameCount, SampleRate};
 use modplayer_ui::artwork::ArtworkCache;
 use modplayer_ui::detail_view::{self, DetailTarget};
+use modplayer_ui::getting_started;
 use modplayer_ui::library_view::{self, LibraryTab, LibraryViewState};
 use modplayer_ui::settings::controls::{self, ControlsScreen};
 use modplayer_ui::waveform::WaveformState;
@@ -1936,15 +1937,18 @@ fn plugins_section_controls_named() {
     let nodes = render_nodes(|ui| modplayer_ui::plugins_view::show(ui, &mut controller));
 
     let checkboxes: Vec<_> = nodes.iter().filter(|n| n.role == Role::CheckBox).collect();
-    // 16 fixtures (010-transport-focus adds `focus-a`/`focus-b`;
+    // 17 fixtures (010-transport-focus adds `focus-a`/`focus-b`;
     // 011-plugin-ui-contributions adds `ui-panel`/`ui-shortcuts`/
-    // `ui-overlay`/`ui-icons`/`ui-settings`/`ui-notify`, T115) + 1
-    // bundled package (012-section-loop-plugin: Section Loop discovers
-    // regardless of `MODPLAYER_PLUGIN_FIXTURES`, research R5) => 17
-    // toggles.
+    // `ui-overlay`/`ui-icons`/`ui-settings`/`ui-notify`, T115;
+    // 013-key-and-tempo-plugin's Foundational phase adds
+    // `effects-observer`, T005/T011's `effect_chain_changed`
+    // regression fixture) + 2 bundled packages (012-section-loop-plugin's
+    // Section Loop and 013-key-and-tempo-plugin's own Key & Tempo, both
+    // discover regardless of `MODPLAYER_PLUGIN_FIXTURES`, research R5)
+    // => 19 toggles.
     assert_eq!(
         checkboxes.len(),
-        17,
+        19,
         "expected one toggle per fixture/bundled package: {nodes:?}"
     );
     for checkbox in &checkboxes {
@@ -1969,13 +1973,14 @@ fn plugins_section_controls_named() {
     assert_eq!(invalid_toggle.toggled, Some(Toggled::False));
 
     // No plugin is `Active` pre-launch, so every health label reads `ok`
-    // (the 15 valid fixtures + Section Loop, the one bundled package) —
-    // each a real, non-empty accessible name, never a bare colour dot.
+    // (the 16 valid fixtures, including `effects-observer`, + the two
+    // bundled packages, Section Loop and Key & Tempo) — each a real,
+    // non-empty accessible name, never a bare colour dot.
     let ok_labels = find_all(&nodes, Role::Label, &tr("plugins-health-ok"));
     assert_eq!(
         ok_labels.len(),
-        16,
-        "expected 16 `ok` health labels: {nodes:?}"
+        18,
+        "expected 18 `ok` health labels: {nodes:?}"
     );
 }
 
@@ -2301,4 +2306,45 @@ fn transport_panel_empty_state_exposes_its_accessible_name() {
     let nodes = render_nodes(|ui| modplayer_ui::transport_view::show(ui, &mut controller));
     let empty = find_one(&nodes, Role::Label, &tr("transport-empty"));
     assert!(!empty.disabled, "{empty:?}");
+}
+
+/// 013-key-and-tempo-plugin (US4, contracts/getting-started-card.md X1/X2):
+/// the Getting Started card's heading is announced, and both controls are
+/// ordinary interactive egui widgets (Tab-reachable, Enter/Space-activated
+/// by construction) exposing their label text as their accessible name —
+/// the tutorial control additionally carries `Role::Link`.
+#[test]
+fn getting_started_controls_accessible() {
+    let nodes = render_nodes(|ui| {
+        let _ = getting_started::show(ui);
+    });
+
+    // X2: the heading announces the section.
+    let heading_name = tr("getting-started-title");
+    assert!(
+        nodes
+            .iter()
+            .any(|n| n.accessible_name() == Some(heading_name.as_str())),
+        "the card's heading must be announced: {nodes:?}"
+    );
+    let section_loop_line = tr("getting-started-section-loop");
+    assert!(
+        nodes
+            .iter()
+            .any(|n| n.accessible_name() == Some(section_loop_line.as_str()))
+    );
+    let key_tempo_line = tr("getting-started-key-tempo");
+    assert!(
+        nodes
+            .iter()
+            .any(|n| n.accessible_name() == Some(key_tempo_line.as_str()))
+    );
+
+    // X1: the tutorial control is a link, named by its label.
+    let tutorial = find_one(&nodes, Role::Link, &tr("getting-started-tutorial"));
+    assert!(!tutorial.disabled, "{tutorial:?}");
+
+    // X1: Dismiss is an ordinary named, enabled button.
+    let dismiss = find_one(&nodes, Role::Button, &tr("getting-started-dismiss"));
+    assert!(!dismiss.disabled, "{dismiss:?}");
 }

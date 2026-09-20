@@ -32,6 +32,7 @@ registration of record:
 | `ui-icons` | 011 US3 | declares a manifest icon and two glyphs, one deliberately over the size cap |
 | `ui-settings` | 011 US4 | registers a 4-field settings schema; logs `settings_changed`; `get` probe |
 | `ui-notify` | 011 US5 | `arm:<level>:<n>`/`arm_invalid:<n>` queue posts, one per timer tick; `counts` probe reads back posted/refused, rate-limited to 6/60s |
+| `effects-observer` | 013 Foundational | `audio.effects` only; logs a summary of every `effect_chain_changed` (API 1.4 fan-out) |
 
 This directory is empty of packages until `MODPLAYER_PLUGIN_FIXTURES=1`
 is set.

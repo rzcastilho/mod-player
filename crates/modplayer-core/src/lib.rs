@@ -41,7 +41,7 @@ pub use effects::{
 };
 pub use i18n::{tr, tr_args};
 pub use library::{Connectivity, LibraryIndex, LibraryStatus, PlayLog, SyncScheduler};
-pub use links::STATUS_PAGE_URL;
+pub use links::{GETTING_STARTED_TUTORIAL_URL, STATUS_PAGE_URL};
 pub use modplayer_capability_gateway::refusal::Refusal;
 pub use notifications::{
     Notification, NotificationAction, NotificationCenter, PluginAttribution, Severity,

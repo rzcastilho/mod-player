@@ -22,7 +22,7 @@ use mlua::{Lua, LuaSerdeExt, Table, Value};
 use modplayer_capability_gateway::api::{API_VERSION, HOST_CAPABILITIES, RequestKind};
 use modplayer_capability_gateway::refusal::Refusal;
 use modplayer_capability_gateway::request::{
-    MarkerInfo, NodeInfo, OwnerInfo, RegionInfo, Request, Response,
+    MarkerInfo, NodeInfo, OwnerInfo, ParamValue, RegionInfo, Request, Response,
 };
 
 use crate::context::Shared;
@@ -114,7 +114,22 @@ fn region_info_to_lua(lua: &Lua, info: &RegionInfo) -> mlua::Result<Table> {
     Ok(table)
 }
 
-fn node_info_to_lua(lua: &Lua, info: &NodeInfo) -> mlua::Result<Table> {
+/// API 1.4: `Number` -> a Lua number, `Bool` -> a Lua boolean, `Name` -> a
+/// Lua string (contract plugin-api-v1.4.md §3.3).
+fn param_value_to_lua(lua: &Lua, value: &ParamValue) -> mlua::Result<Value> {
+    Ok(match value {
+        ParamValue::Number(n) => Value::Number(*n),
+        ParamValue::Bool(b) => Value::Boolean(*b),
+        ParamValue::Name(s) => Value::String(lua.create_string(s)?),
+    })
+}
+
+/// Hand-built like [`marker_info_to_lua`]/[`region_info_to_lua`] (the same
+/// `OwnerInfo::Plugin` newtype-variant `to_value` failure applies here —
+/// see this module's doc comment) — `pub(crate)` so the scheduler's
+/// `effect_chain_changed` payload (research R4) and this module's own
+/// `list_chain` response share one projection.
+pub(crate) fn node_info_to_lua(lua: &Lua, info: &NodeInfo) -> mlua::Result<Table> {
     let table = lua.create_table()?;
     table.set("id", info.id.0)?;
     table.set("kind", info.kind.as_str())?;
@@ -123,6 +138,12 @@ fn node_info_to_lua(lua: &Lua, info: &NodeInfo) -> mlua::Result<Table> {
     table.set("auto_bypassed", info.auto_bypassed)?;
     table.set("orphaned", info.orphaned)?;
     table.set("index", info.index)?;
+    let params = lua.create_table()?;
+    for (name, value) in &info.params {
+        params.set(name.as_str(), param_value_to_lua(lua, value)?)?;
+    }
+    table.set("params", params)?;
+    table.set("auto_switched", info.auto_switched)?;
     Ok(table)
 }
 

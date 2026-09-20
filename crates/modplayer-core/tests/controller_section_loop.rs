@@ -104,8 +104,12 @@ fn track(id: &str) -> TrackRef {
 /// be serialized against every other's brief mutation of them (mirrors
 /// `controller_plugin_ui.rs`'s own `PLUGIN_ENV_LOCK`). No
 /// `MODPLAYER_PLUGIN_FIXTURES`: the bundled Section Loop package always
-/// discovers regardless (research R5), so this controller's only plugin
-/// is Section Loop.
+/// discovers regardless (research R5) — 013-key-and-tempo-plugin
+/// (research R8) means Key & Tempo now discovers alongside it too, but
+/// this file's own tests only ever look up Section Loop's id and never
+/// assert an exact plugin count, so they stay unaffected by the second
+/// bundled package (it declares no `markers.*`/`transport.control`
+/// permission and touches none of this file's own subject matter).
 static PLUGIN_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn section_loop_controller() -> (

@@ -104,9 +104,22 @@ pub struct RegionInfo {
     pub armed: bool,
 }
 
+/// A parameter's current target value as a plugin sees it (API 1.4,
+/// data-model.md §1.2). `#[serde(untagged)]` so it serialises as a bare
+/// Lua-facing scalar (number / boolean / string), never a tagged table.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum ParamValue {
+    Number(f64),
+    Bool(bool),
+    Name(String),
+}
+
 /// One effect node, as reported to a plugin (contract §3 `effects.
-/// list_chain`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// list_chain`). `NodeInfo` derives `PartialEq` only (not `Eq`, since
+/// `params` carries an `f64`) — no caller relies on `Eq` (grep: only
+/// `PartialEq` comparisons in tests).
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct NodeInfo {
     pub id: NodeId,
     pub kind: String,
@@ -115,6 +128,12 @@ pub struct NodeInfo {
     pub auto_bypassed: bool,
     pub orphaned: bool,
     pub index: usize,
+    /// API 1.4: wire name -> current clamped *target* value (never
+    /// mid-ramp; data-model.md §1.2).
+    pub params: BTreeMap<String, ParamValue>,
+    /// API 1.4: 008 FR-008's flag for `pitch_shift`/`time_stretch`;
+    /// `false` for every other kind.
+    pub auto_switched: bool,
 }
 
 /// One queue row, as reported to a plugin (contract §3 `queue.list`).
@@ -125,6 +144,28 @@ pub struct QueueItemInfo {
     pub title: String,
     pub index: usize,
     pub is_current: bool,
+}
+
+/// `set_param`/`schedule_param`'s `param` argument (API 1.4, data-model.md
+/// §1.3): the 1.0-1.3 numeric id, or the wire name a plugin may now spell
+/// it with (research R2). Resolved against the catalog in
+/// `modplayer-core`'s `plugins::apply` (never in this crate or the
+/// runtime — the gateway has no dependency on the effects catalog by
+/// design).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParamRef {
+    Id(u8),
+    Name(String),
+}
+
+/// `set_param`/`schedule_param`'s `value` argument (API 1.4, data-model.md
+/// §1.3): the 1.0-1.3 numeric form, or a boolean/enum-name value for a
+/// `boolean`/`enum`-shaped parameter (research R2).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParamArg {
+    Number(f32),
+    Bool(bool),
+    Name(String),
 }
 
 /// Every request a plugin may make, exactly the [`crate::api::
@@ -227,13 +268,13 @@ pub enum Request {
     },
     SetParam {
         node: NodeId,
-        param: u8,
-        value: f32,
+        param: ParamRef,
+        value: ParamArg,
     },
     ScheduleParam {
         node: NodeId,
-        param: u8,
-        value: f32,
+        param: ParamRef,
+        value: ParamArg,
         at_ms: u64,
     },
     SetBypass {

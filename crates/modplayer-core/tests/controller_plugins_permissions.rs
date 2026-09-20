@@ -41,13 +41,15 @@ use modplayer_capability_gateway::focus::FocusToken;
 use modplayer_capability_gateway::gateway::Gateway;
 use modplayer_capability_gateway::refusal::RefusalCode;
 use modplayer_capability_gateway::request::{
-    MarkerId as GatewayMarkerId, QueueItemId as GatewayQueueItemId, Request, Response,
+    MarkerId as GatewayMarkerId, ParamArg, ParamRef, QueueItemId as GatewayQueueItemId, Request,
+    Response,
 };
 use modplayer_core::PlaybackController;
 use modplayer_core::markers::Owner;
 use modplayer_core::plugins::{Lifecycle, PluginHost, PluginId, to_gateway_id};
 use modplayer_core::settings::SettingsStore;
 use modplayer_core::transport::Intent;
+use modplayer_effects::catalog::{self, NodeKind, NodeOwner};
 use modplayer_engine::{BufferPreset, DeviceId, FrameCount, SampleRate};
 use modplayer_plugin_runtime::handle::RpcEnvelope;
 
@@ -978,5 +980,130 @@ fn host_edit_keeps_owner_and_notifies() {
                 .any(|e| e.message.contains("marker_changed: actor=host"))
         }),
         "a plugin holding markers.read must see marker_changed with actor = host"
+    );
+}
+
+// -----------------------------------------------------------------------
+// 013-key-and-tempo-plugin (API 1.4, contract plugin-api-v1.4.md §5,
+// research R2): `SetParam`'s wire-name/enum/boolean widening resolves
+// against the owned node's own kind, checked only *after* the ownership
+// gate — proven through the real `apply.rs` dispatch via the synthetic-
+// envelope `call()` helper, exactly like `not_owner_vs_not_found` above.
+// -----------------------------------------------------------------------
+
+const EFFECTS_OBSERVER: &str = "org.modplayer.fixture.effects-observer";
+
+/// The catalog's positional index for `wire` within `kind`'s own
+/// `NodeModel.params` — mirrors `controller_effects.rs`'s own `pos`
+/// closure in `rate_change_rebuild_reclamps_eq`.
+fn param_pos(kind: NodeKind, wire: &str) -> usize {
+    let param = catalog::param_by_wire_name(kind, wire)
+        .unwrap_or_else(|| unreachable!("'{wire}' must be a known {kind:?} parameter"));
+    catalog::params(kind)
+        .iter()
+        .position(|p| p.id == param)
+        .unwrap_or_else(|| unreachable!("'{wire}' must be in {kind:?}'s own param list"))
+}
+
+/// contract plugin-api-v1.4.md §5: `set_param` accepts a wire name
+/// (`ParamRef::Name`) for `param`, and — shape-checked against that
+/// parameter — a boolean or an enum name for `value`; both land on the
+/// plugin's own owned node exactly as the numeric 1.0-1.3 form would.
+#[test]
+fn apply_set_param_by_name_and_enum() {
+    let (mut controller, _dir, _psd, _tsd) = fixture_controller();
+    let plugin = controller_plugin_id(&mut controller, EFFECTS_OBSERVER);
+
+    let created = call(
+        &mut controller,
+        plugin,
+        Request::CreateNode {
+            kind: "pitch_shift".to_string(),
+            suggested: None,
+        },
+    )
+    .unwrap_or_else(|e| unreachable!("create_node must succeed: {e:?}"));
+    let Response::NodeId(node) = created else {
+        unreachable!("CreateNode must return a NodeId, got {created:?}");
+    };
+
+    call(
+        &mut controller,
+        plugin,
+        Request::SetParam {
+            node,
+            param: ParamRef::Name("formant".to_string()),
+            value: ParamArg::Bool(true),
+        },
+    )
+    .unwrap_or_else(|e| unreachable!("set_param(formant, name/bool) must succeed: {e:?}"));
+
+    call(
+        &mut controller,
+        plugin,
+        Request::SetParam {
+            node,
+            param: ParamRef::Name("quality_mode".to_string()),
+            value: ParamArg::Name("quality".to_string()),
+        },
+    )
+    .unwrap_or_else(|e| unreachable!("set_param(quality_mode, name/enum) must succeed: {e:?}"));
+
+    let node_model = controller
+        .chain()
+        .nodes()
+        .iter()
+        .find(|n| n.owner == NodeOwner::Plugin(plugin))
+        .unwrap_or_else(|| unreachable!("the created node must exist"));
+    assert_eq!(
+        node_model.params[param_pos(NodeKind::PitchShift, "formant")],
+        1.0,
+        "the boolean wire value must land as 1.0"
+    );
+    assert_eq!(
+        node_model.params[param_pos(NodeKind::PitchShift, "quality_mode")],
+        catalog::QualityMode::Quality as u8 as f32,
+        "the enum name 'quality' must resolve to its catalog index"
+    );
+}
+
+/// contract plugin-api-v1.4.md §5: an unknown wire name is refused
+/// `invalid_state`/`invalid_argument`, naming the parameter — never a
+/// panic, never a silent no-op — checked only after the ownership gate
+/// (`not_owner_vs_not_found` covers that ordering for the numeric form
+/// already).
+#[test]
+fn apply_set_param_unknown_name_refused() {
+    let (mut controller, _dir, _psd, _tsd) = fixture_controller();
+    let plugin = controller_plugin_id(&mut controller, EFFECTS_OBSERVER);
+
+    let created = call(
+        &mut controller,
+        plugin,
+        Request::CreateNode {
+            kind: "gain".to_string(),
+            suggested: None,
+        },
+    )
+    .unwrap_or_else(|e| unreachable!("create_node must succeed: {e:?}"));
+    let Response::NodeId(node) = created else {
+        unreachable!("CreateNode must return a NodeId, got {created:?}");
+    };
+
+    let refusal = call(
+        &mut controller,
+        plugin,
+        Request::SetParam {
+            node,
+            param: ParamRef::Name("not_a_real_param".to_string()),
+            value: ParamArg::Number(1.0),
+        },
+    )
+    .expect_err("an unknown wire name must be refused, not accepted");
+    assert_eq!(refusal.code, RefusalCode::InvalidState);
+    assert_eq!(refusal.reason, "invalid_argument");
+    assert!(
+        refusal.message.contains("not_a_real_param"),
+        "the refusal must name the unknown parameter: {refusal:?}"
     );
 }

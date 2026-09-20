@@ -22,7 +22,7 @@ use modplayer_capability_gateway::gateway::Gateway;
 use modplayer_capability_gateway::state::{PluginStateStore, Scope, WriteJob};
 use modplayer_capability_gateway::ui::WidgetValue;
 
-use crate::bindings::{self, SharedHandle, lock};
+use crate::bindings::{self, SharedHandle, lock, node_info_to_lua};
 use crate::budget::BudgetState;
 use crate::context::{PluginContext, Shared};
 use crate::events::{AbortCause, RuntimeEvent, SuspendCause};
@@ -599,8 +599,18 @@ fn event_to_lua(lua: &mlua::Lua, event: &HostEvent) -> mlua::Result<(&'static st
             Value::Table(table)
         }
         HostEvent::EffectChainChanged { chain } => {
+            // R4 (013-key-and-tempo-plugin): `lua.to_value(chain)` cannot
+            // serialize `NodeInfo.owner`'s `OwnerInfo::Plugin(String)`
+            // newtype variant — this made the event undeliverable for any
+            // chain containing a plugin-owned node (`AbortCause::
+            // Exception`, no `plugin_log` entry). Built field-by-field via
+            // `node_info_to_lua` instead, exactly like `list_chain()`.
             let table = lua.create_table()?;
-            table.set("nodes", lua.to_value(chain)?)?;
+            let nodes = lua.create_table()?;
+            for (i, node) in chain.iter().enumerate() {
+                nodes.set(i + 1, node_info_to_lua(lua, node)?)?;
+            }
+            table.set("nodes", nodes)?;
             Value::Table(table)
         }
         HostEvent::Meter {

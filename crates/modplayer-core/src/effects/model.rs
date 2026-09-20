@@ -105,6 +105,19 @@ const fn mode_param_id(kind: NodeKind) -> Option<ParamId> {
     }
 }
 
+/// 013-key-and-tempo-plugin (research R3): a numeric write to a mode
+/// `ParamId` (from a plugin's `set_param`, numeric or wire-name form, or
+/// any other future caller) resolves to the nearest valid `QualityMode`
+/// index — `NaN`/negative defensively becomes `Performance`, mirroring
+/// `catalog::clamp`'s own discrete-rounding rule.
+fn quality_mode_from_value(value: f32) -> QualityMode {
+    if value.round().max(0.0) as u8 >= 1 {
+        QualityMode::Quality
+    } else {
+        QualityMode::Performance
+    }
+}
+
 impl ChainModel {
     /// An empty chain, every slot free (FR-002: session-scoped, empty at
     /// launch).
@@ -263,6 +276,16 @@ impl ChainModel {
     /// G3/G4: clamps and stores the clamped value; runs the FR-008 rule
     /// on a `semitones`/`ratio` change, possibly emitting a second
     /// command for `mode`. Returns the clamped value (SC-005).
+    ///
+    /// 013-key-and-tempo-plugin (research R3): a write to `kind`'s own
+    /// mode `ParamId` is not stored here at all — it delegates entirely
+    /// to [`Self::set_mode`], so an explicit mode write (numeric or
+    /// wire-name, from a plugin or any other caller) runs FR-008 rule 3
+    /// and keeps `mode_state` and `params` in agreement (previously a
+    /// numeric write to the mode id left `mode_state` stale). `revision`
+    /// bumps iff the stored value or `mode_state` actually changed — a
+    /// no-op write (same value) neither bumps nor, via the controller's
+    /// per-tick diff, fans out `effect_chain_changed`.
     pub fn set_param(
         &mut self,
         id: NodeId,
@@ -271,10 +294,17 @@ impl ChainModel {
     ) -> Result<(f32, Vec<Command>), ChainError> {
         let idx = self.find(id)?;
         let kind = self.nodes[idx].kind;
+        if mode_param_id(kind) == Some(param) {
+            let mode = quality_mode_from_value(requested);
+            let commands = self.set_mode(id, mode)?;
+            return Ok((mode as u8 as f32, commands));
+        }
         let Some(pos) = param_index(kind, param) else {
             return Err(ChainError::WrongKind);
         };
         let clamped = catalog::clamp(kind, param, requested, self.source_rate);
+        let old = self.nodes[idx].params[pos];
+        let mut changed = (clamped - old).abs() > f32::EPSILON;
         self.nodes[idx].params[pos] = clamped;
         let slot = self.nodes[idx].slot;
         let mut commands = vec![Command::ChainSetParam {
@@ -291,6 +321,7 @@ impl ChainModel {
             let new_state = mode_after_value_change(kind, clamped, state);
             if new_state != state {
                 self.nodes[idx].mode_state = Some(new_state);
+                changed = true;
                 if let Some(mode_param) = mode_param_id(kind)
                     && let Some(mode_pos) = param_index(kind, mode_param)
                 {
@@ -304,27 +335,36 @@ impl ChainModel {
                 }
             }
         }
+        if changed {
+            self.revision += 1;
+        }
         Ok((clamped, commands))
     }
 
     /// Explicit user mode choice (FR-008 rule 3); `Err(WrongKind)` for a
     /// kind without a mode (only `PitchShift`/`TimeStretch` have one).
+    /// `revision` bumps iff `mode_state` actually changed (mode or
+    /// `auto_switched`) — research R3.
     pub fn set_mode(&mut self, id: NodeId, mode: QualityMode) -> Result<Vec<Command>, ChainError> {
         let idx = self.find(id)?;
         let kind = self.nodes[idx].kind;
-        if self.nodes[idx].mode_state.is_none() {
+        let Some(old_state) = self.nodes[idx].mode_state else {
             return Err(ChainError::WrongKind);
-        }
+        };
         let Some(mode_param) = mode_param_id(kind) else {
             return Err(ChainError::WrongKind);
         };
         let Some(pos) = param_index(kind, mode_param) else {
             return Err(ChainError::WrongKind);
         };
-        self.nodes[idx].mode_state = Some(mode_after_user_set(mode));
+        let new_state = mode_after_user_set(mode);
+        self.nodes[idx].mode_state = Some(new_state);
         let value = mode as u8 as f32;
         self.nodes[idx].params[pos] = value;
         let slot = self.nodes[idx].slot;
+        if new_state != old_state {
+            self.revision += 1;
+        }
         Ok(vec![Command::ChainSetParam {
             slot,
             param: mode_param,
@@ -334,7 +374,9 @@ impl ChainModel {
 
     /// G7 (FR-014): re-clamps every `nyquist_clamped` parameter of every
     /// node at the new rate, emitting a command only for a value that
-    /// actually changed.
+    /// actually changed. `revision` bumps once iff any command was
+    /// emitted (research R3: an 008 FR-014 recomputation is a
+    /// parameter-target change).
     pub fn set_source_rate(&mut self, rate: u32) -> Vec<Command> {
         self.source_rate = rate;
         let mut commands = Vec::new();
@@ -358,6 +400,9 @@ impl ChainModel {
                     });
                 }
             }
+        }
+        if !commands.is_empty() {
+            self.revision += 1;
         }
         commands
     }

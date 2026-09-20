@@ -1190,6 +1190,28 @@ fn scaffold_keys_no_longer_resolve_or_exist() {
 /// must never resolve and must never be (re-)defined, so a future edit that
 /// adds it back either updates this test and the comment together or is
 /// caught here as an unreviewed drift from the documented deviation.
+/// 013-key-and-tempo-plugin (US4, contracts/getting-started-card.md §2/§6:
+/// `getting_started_strings_exist`): every key the Getting Started card
+/// looks up resolves against `locales/en-US/app.ftl`.
+const GETTING_STARTED_KEYS: &[&str] = &[
+    "getting-started-title",
+    "getting-started-section-loop",
+    "getting-started-key-tempo",
+    "getting-started-tutorial",
+    "getting-started-dismiss",
+];
+
+#[test]
+fn getting_started_strings_exist() {
+    for key in GETTING_STARTED_KEYS {
+        let resolved = tr(key);
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/app.ftl (tr() fell back to the raw key)"
+        );
+    }
+}
+
 #[test]
 fn markers_heading_key_was_intentionally_consolidated() {
     let resolved = tr("markers-heading");

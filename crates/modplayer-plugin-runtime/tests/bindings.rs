@@ -14,12 +14,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use modplayer_capability_gateway::budgets::Budgets;
+use modplayer_capability_gateway::event::HostEvent;
 use modplayer_capability_gateway::focus::{FocusToken, PluginId};
 use modplayer_capability_gateway::grants::Grants;
 use modplayer_capability_gateway::manifest::{self, ApiRange};
 use modplayer_capability_gateway::request::{
-    LoopEndpoint, MarkerId as GatewayMarkerId, NodeId as GatewayNodeId, OwnerInfo,
-    RegionId as GatewayRegionId, RegionInfo, RepeatArg, Request, Response,
+    LoopEndpoint, MarkerId as GatewayMarkerId, NodeId as GatewayNodeId, NodeInfo, OwnerInfo,
+    ParamArg, ParamRef, ParamValue, RegionId as GatewayRegionId, RegionInfo, RepeatArg, Request,
+    Response,
 };
 use modplayer_capability_gateway::state::PluginStatePaths;
 use modplayer_engine::RtShared;
@@ -408,7 +410,7 @@ fn identity_fields_have_the_contract_shape() {
         logs.contains(&"granted:playback.observe,state.plugin".to_string()),
         "logs: {logs:?}"
     );
-    assert!(logs.contains(&"version:1.3".to_string()), "logs: {logs:?}");
+    assert!(logs.contains(&"version:1.4".to_string()), "logs: {logs:?}");
     assert!(
         logs.contains(&"capabilities_has_timers:true".to_string()),
         "logs: {logs:?}"
@@ -818,5 +820,246 @@ fn list_markers_exposes_regions() {
     assert!(
         logs.contains(&"r2:9,host,1,2,4,true".to_string()),
         "logs: {logs:?}"
+    );
+}
+
+// -- 013-key-and-tempo-plugin (contracts/plugin-api-v1.4.md §8) ------------
+
+fn empty_node_info(id: u32, owner: OwnerInfo) -> NodeInfo {
+    NodeInfo {
+        id: GatewayNodeId(id),
+        kind: "pitch_shift".to_string(),
+        owner,
+        bypassed: false,
+        auto_bypassed: false,
+        orphaned: false,
+        index: 0,
+        params: std::collections::BTreeMap::new(),
+        auto_switched: false,
+    }
+}
+
+/// `set_param`/`schedule_param`'s widened `param`/`value` arguments (API
+/// 1.4, contract §5.1/§5.2): a string `param` resolves to `ParamRef::
+/// Name`, and `value` resolves to `ParamArg::{Number,Bool,Name}` per its
+/// Lua type.
+#[test]
+fn set_param_accepts_name_bool_and_enum() {
+    let entry = r#"
+        api.on("ready_ack", function(_event)
+            api.effects.set_param(1, "semitones", -2)
+            api.effects.set_param(1, "formant", true)
+            api.effects.set_param(1, "quality_mode", "quality")
+            api.log.info("done")
+        end)
+        api.ready()
+    "#;
+    let (_handle, events, requests) = spawn_test_plugin(entry, grants_with(&["audio.effects"]));
+    wait_for_ready(&events);
+
+    let e1 = requests
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap_or_else(|e| unreachable!("set_param(name, number) never reached the RPC: {e}"));
+    assert!(
+        matches!(
+            &e1.request,
+            Request::SetParam {
+                param: ParamRef::Name(p),
+                value: ParamArg::Number(v),
+                ..
+            } if p == "semitones" && (*v - -2.0).abs() < f32::EPSILON
+        ),
+        "expected SetParam{{param: Name(\"semitones\"), value: Number(-2.0)}}, got {:?}",
+        e1.request
+    );
+    let _ = e1.reply.send(Ok(Response::Ok));
+
+    let e2 = requests
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap_or_else(|e| unreachable!("set_param(name, bool) never reached the RPC: {e}"));
+    assert!(
+        matches!(
+            &e2.request,
+            Request::SetParam {
+                param: ParamRef::Name(p),
+                value: ParamArg::Bool(true),
+                ..
+            } if p == "formant"
+        ),
+        "expected SetParam{{param: Name(\"formant\"), value: Bool(true)}}, got {:?}",
+        e2.request
+    );
+    let _ = e2.reply.send(Ok(Response::Ok));
+
+    let e3 = requests
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap_or_else(|e| unreachable!("set_param(name, name) never reached the RPC: {e}"));
+    assert!(
+        matches!(
+            &e3.request,
+            Request::SetParam {
+                param: ParamRef::Name(p),
+                value: ParamArg::Name(v),
+                ..
+            } if p == "quality_mode" && v == "quality"
+        ),
+        "expected SetParam{{param: Name(\"quality_mode\"), value: Name(\"quality\")}}, got {:?}",
+        e3.request
+    );
+    let _ = e3.reply.send(Ok(Response::Ok));
+
+    let logs = drain_logs(&events, Duration::from_secs(1));
+    assert!(logs.contains(&"done".to_string()), "logs: {logs:?}");
+}
+
+/// `set_param`'s 1.0-1.3 numeric form is byte-for-byte unchanged under
+/// API 1.4 (research R2, contract §3.1): an integer `param` and a numeric
+/// `value` still produce `ParamRef::Id`/`ParamArg::Number`.
+#[test]
+fn set_param_numeric_form_unchanged() {
+    let entry = r#"
+        api.on("ready_ack", function(_event)
+            api.effects.set_param(1, 0, -2.0)
+            api.log.info("done")
+        end)
+        api.ready()
+    "#;
+    let (_handle, events, requests) = spawn_test_plugin(entry, grants_with(&["audio.effects"]));
+    wait_for_ready(&events);
+
+    let envelope = requests
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap_or_else(|e| unreachable!("set_param(id, number) never reached the RPC: {e}"));
+    assert!(
+        matches!(
+            &envelope.request,
+            Request::SetParam {
+                param: ParamRef::Id(0),
+                value: ParamArg::Number(v),
+                ..
+            } if (*v - -2.0).abs() < f32::EPSILON
+        ),
+        "expected SetParam{{param: Id(0), value: Number(-2.0)}}, got {:?}",
+        envelope.request
+    );
+    let _ = envelope.reply.send(Ok(Response::Ok));
+
+    let logs = drain_logs(&events, Duration::from_secs(1));
+    assert!(logs.contains(&"done".to_string()), "logs: {logs:?}");
+}
+
+/// contract §2/§3.1: a Lua type `set_param`/`schedule_param` cannot map to
+/// `ParamRef`/`ParamArg` (a table, here) is refused locally — `nil, {
+/// code = "invalid_state", reason = "invalid_argument" }` — and never
+/// reaches the RPC channel; an admitted call never raises a Lua error.
+#[test]
+fn set_param_bad_lua_type_is_refusal_not_error() {
+    let entry = r#"
+        api.on("ready_ack", function(_event)
+            local ok1, err1 = api.effects.set_param(1, {}, 1)
+            api.log.info("bad_param:" .. tostring(ok1) .. ":" .. tostring(err1.code) .. "/" .. tostring(err1.reason))
+            local ok2, err2 = api.effects.set_param(1, 0, {})
+            api.log.info("bad_value:" .. tostring(ok2) .. ":" .. tostring(err2.code) .. "/" .. tostring(err2.reason))
+        end)
+        api.ready()
+    "#;
+    let (_handle, events, requests) = spawn_test_plugin(entry, grants_with(&["audio.effects"]));
+    wait_for_ready(&events);
+
+    let logs = drain_logs(&events, Duration::from_secs(1));
+    assert!(
+        logs.contains(&"bad_param:nil:invalid_state/invalid_argument".to_string()),
+        "logs: {logs:?}"
+    );
+    assert!(
+        logs.contains(&"bad_value:nil:invalid_state/invalid_argument".to_string()),
+        "logs: {logs:?}"
+    );
+    assert!(
+        requests.try_recv().is_err(),
+        "neither bad-typed call may reach the RPC channel"
+    );
+}
+
+/// `effects.list_chain()`'s snapshot projection (API 1.4, contract §3.3):
+/// each node's `params` table carries a number, boolean and enum-name
+/// value with their Lua-native types, and `auto_switched` comes through.
+#[test]
+fn list_chain_carries_params_and_auto_switched() {
+    let mut node = empty_node_info(1, OwnerInfo::Host);
+    node.params
+        .insert("semitones".to_string(), ParamValue::Number(-2.0));
+    node.params
+        .insert("formant".to_string(), ParamValue::Bool(true));
+    node.params.insert(
+        "quality_mode".to_string(),
+        ParamValue::Name("quality".to_string()),
+    );
+    node.auto_switched = true;
+    let snapshot = PluginSnapshot {
+        chain: vec![node],
+        ..PluginSnapshot::default()
+    };
+    let entry = r#"
+        local c = api.effects.list_chain()
+        local n = c.nodes[1]
+        api.log.info("semitones:" .. type(n.params.semitones) .. ":" .. tostring(n.params.semitones == -2.0))
+        api.log.info("formant:" .. type(n.params.formant) .. ":" .. tostring(n.params.formant))
+        api.log.info("quality_mode:" .. type(n.params.quality_mode) .. ":" .. tostring(n.params.quality_mode))
+        api.log.info("auto_switched:" .. tostring(n.auto_switched))
+    "#;
+    let (_handle, events, _requests) =
+        spawn_test_plugin_with_snapshot(entry, grants_with(&["audio.effects"]), snapshot);
+    let logs = drain_logs(&events, Duration::from_secs(1));
+    assert!(
+        logs.contains(&"semitones:number:true".to_string()),
+        "logs: {logs:?}"
+    );
+    assert!(
+        logs.contains(&"formant:boolean:true".to_string()),
+        "logs: {logs:?}"
+    );
+    assert!(
+        logs.contains(&"quality_mode:string:quality".to_string()),
+        "logs: {logs:?}"
+    );
+    assert!(
+        logs.contains(&"auto_switched:true".to_string()),
+        "logs: {logs:?}"
+    );
+}
+
+/// R4 regression: under 1.3, `effect_chain_changed`'s payload was built
+/// with `lua.to_value(chain)`, which cannot serialize `NodeInfo.owner`'s
+/// `OwnerInfo::Plugin(String)` newtype variant — every delivery for a
+/// chain containing a plugin-owned node aborted the handler
+/// (`AbortCause::Exception`) before it ever ran. Fixed by building the
+/// payload with `node_info_to_lua` (like `list_chain()`); this asserts
+/// the handler now actually runs and sees the plugin-owned node.
+#[test]
+fn effect_chain_changed_with_plugin_owned_node_reaches_handler() {
+    let entry = r#"
+        api.on("effect_chain_changed", function(event)
+            local n = event.nodes[1]
+            api.log.info("chain_changed:" .. n.owner .. ":" .. tostring(#event.nodes))
+        end)
+        api.ready()
+    "#;
+    let (handle, events, _requests) = spawn_test_plugin(entry, grants_with(&["audio.effects"]));
+    wait_for_ready(&events);
+
+    let chain = vec![empty_node_info(
+        1,
+        OwnerInfo::Plugin("org.modplayer.test.bindings".to_string()),
+    )];
+    assert!(
+        handle.send_event(HostEvent::EffectChainChanged { chain }),
+        "the event must reach the plugin's inbox"
+    );
+
+    let logs = drain_logs(&events, Duration::from_secs(1));
+    assert!(
+        logs.contains(&"chain_changed:org.modplayer.test.bindings:1".to_string()),
+        "the handler never ran (still aborting under R4?): {logs:?}"
     );
 }

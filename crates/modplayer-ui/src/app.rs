@@ -26,14 +26,15 @@ use modplayer_audio_io::OutputBackend;
 use modplayer_audio_source::SourceHost;
 use modplayer_core::actions::ScopeState;
 use modplayer_core::{
-    ActiveState, Intent, NotRegisteredReason, NotificationAction, PlaybackController,
-    STATUS_PAGE_URL, Severity, tr,
+    ActiveState, GETTING_STARTED_TUTORIAL_URL, Intent, NotRegisteredReason, NotificationAction,
+    PlaybackController, STATUS_PAGE_URL, Severity, tr,
 };
 
 use crate::actions;
 use crate::artwork::ArtworkCache;
 use crate::detail_view::{self, DetailOutcome, DetailTarget};
 use crate::device_check::DeviceCheckScreen;
+use crate::getting_started::{self, GettingStartedOutcome};
 use crate::library_view::{self, LibraryOutcome};
 use crate::settings::SettingsScreen;
 use crate::shell::{Section, Shell};
@@ -564,6 +565,24 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
                 self.library_detail = None;
             }
             return;
+        }
+
+        // 013-key-and-tempo-plugin (US4, contracts/getting-started-card.md
+        // V1/V2): drawn above the tab row, only while no detail target is
+        // open (the early return above already handles that) and not yet
+        // dismissed. `open_url` happens only here, from `App` (design note
+        // 11); `Dismiss` persists through the controller.
+        if !self.controller.getting_started_dismissed() {
+            match getting_started::show(ui) {
+                GettingStartedOutcome::None => {}
+                GettingStartedOutcome::OpenTutorial => {
+                    ui.ctx()
+                        .open_url(OpenUrl::new_tab(GETTING_STARTED_TUTORIAL_URL));
+                }
+                GettingStartedOutcome::Dismiss => {
+                    self.controller.dismiss_getting_started();
+                }
+            }
         }
 
         let outcome = library_view::show(

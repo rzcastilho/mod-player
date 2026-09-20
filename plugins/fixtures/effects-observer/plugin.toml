@@ -1,0 +1,13 @@
+identifier  = "org.modplayer.fixture.effects-observer"
+name        = "Effects observer fixture"
+description = "Holds only audio.effects and logs a compact summary of every effect_chain_changed it receives."
+version     = "1.0.0"
+api         = "1.4"
+author      = "ModPlayer project"
+license     = "MIT OR Apache-2.0"
+source      = "fixture"
+entry       = "main.luau"
+
+[[permissions.required]]
+permission    = "audio.effects"
+justification = "Subscribes to effect_chain_changed to observe every node parameter/mode change (013-key-and-tempo-plugin, API 1.4)."

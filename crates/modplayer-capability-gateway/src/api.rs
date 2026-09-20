@@ -67,11 +67,11 @@ mod tests {
     }
 
     #[test]
-    fn api_version_is_one_dot_three() {
-        // 012-section-loop-plugin (research R1, Constitution IX): the
-        // minor bump that adds `markers.set_loop_endpoint`/
-        // `markers.set_loop_repeat`.
+    fn api_version_is_one_dot_four() {
+        // 013-key-and-tempo-plugin (research R1, Constitution IX): the
+        // minor bump that adds `NodeInfo.params`/`auto_switched` and the
+        // `set_param`/`schedule_param` argument widening.
         assert_eq!(API_VERSION.major, 1);
-        assert_eq!(API_VERSION.minor, 3);
+        assert_eq!(API_VERSION.minor, 4);
     }
 }

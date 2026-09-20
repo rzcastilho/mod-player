@@ -24,6 +24,7 @@ use modplayer_core::library::persist::{
     self, LibraryPaths, LoadWarning, load_index, load_play_log, save_index, save_play_log,
 };
 use modplayer_core::library::play_log::PlayLog;
+use modplayer_core::settings::{AudioSettings, SettingsStore};
 use proptest::prelude::*;
 
 fn temp_paths(tag: &str) -> LibraryPaths {
@@ -345,5 +346,34 @@ proptest! {
         prop_assert_eq!(outcome.warning, None);
         prop_assert_eq!(&outcome.play_log, &original);
         prop_assert_eq!(outcome.play_log.recent(), original.recent());
+    }
+
+    /// 013-key-and-tempo-plugin (US4, Constitution VIII, contracts/
+    /// getting-started-card.md S1): `[onboarding] getting_started_dismissed`
+    /// survives an arbitrary save -> load round trip through the real
+    /// `settings.toml` file, for both boolean values.
+    #[test]
+    fn settings_getting_started_flag_round_trips_any_bool(dismissed in any::<bool>()) {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "modplayer-persist-settings-onboarding-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let store = SettingsStore::with_path(dir.join("settings.toml"));
+
+        let settings = AudioSettings {
+            getting_started_dismissed: dismissed,
+            ..AudioSettings::default()
+        };
+        prop_assert!(store.save(&settings).is_ok());
+
+        let outcome = store.load();
+        prop_assert_eq!(outcome.settings.getting_started_dismissed, dismissed);
+        prop_assert!(outcome.warnings.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

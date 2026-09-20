@@ -25,7 +25,7 @@ refusal_codes = [
 
 [api_version]
 major = 1
-minor = 3
+minor = 4
 
 # ---------------------------------------------------------------------------
 # Permission catalog (25 entries; data-model.md §1.1, FR-015)
@@ -693,3 +693,63 @@ payload = ["action", "source", "value"]
 name = "SettingsChanged"
 requires = "ui.settings"
 payload = ["changes"]
+
+# ---------------------------------------------------------------------------
+# Node parameter wire names (013-key-and-tempo-plugin, data-model.md §1.1,
+# research R1/R2). Documentary only: rendered into docs/plugin-api/v1.md's
+# "Node parameters" section by tests/api_reference.rs. Not consumed by
+# build.rs (the `Schema` struct there has no `deny_unknown_fields`). Order =
+# `ParamId` order = `crates/modplayer-effects/src/catalog.rs` order. Ranges
+# are documentary; `catalog::clamp` remains the authority — a core test
+# (`wire_names_match_api_schema`) asserts each range string against the
+# catalog's `min`/`max`.
+# ---------------------------------------------------------------------------
+
+[[node_kind]]
+name = "pitch_shift"
+params = [
+    { name = "semitones", shape = "number", range = "-12..12" },
+    { name = "formant", shape = "boolean" },
+    { name = "quality_mode", shape = "enum", values = ["performance", "quality"] },
+]
+
+[[node_kind]]
+name = "time_stretch"
+params = [
+    { name = "ratio", shape = "number", range = "0.25..2.0" },
+    { name = "quality_mode", shape = "enum", values = ["performance", "quality"] },
+]
+
+[[node_kind]]
+name = "gain"
+params = [
+    { name = "level", shape = "number", range = "-60..12" },
+    { name = "mute", shape = "boolean" },
+]
+
+[[node_kind]]
+name = "filter"
+params = [
+    { name = "mode", shape = "enum", values = ["high_pass", "low_pass"] },
+    { name = "cutoff", shape = "number", range = "20..20000 (Nyquist-clamped)" },
+    { name = "resonance", shape = "number", range = "0..1" },
+]
+
+[[node_kind]]
+name = "stereo_tools"
+params = [
+    { name = "width", shape = "number", range = "0..2" },
+    { name = "balance", shape = "number", range = "-1..1" },
+    { name = "mono_sum", shape = "boolean" },
+    { name = "phase_invert", shape = "boolean" },
+    { name = "channel_swap", shape = "boolean" },
+]
+
+[[node_kind]]
+name = "equalizer"
+params = [
+    { name = "band<n>_freq", shape = "number", range = "20..20000 (Nyquist-clamped)" },
+    { name = "band<n>_gain", shape = "number", range = "-24..24" },
+    { name = "band<n>_q", shape = "number", range = "0.1..10" },
+    { name = "band<n>_type", shape = "enum", values = ["peak", "low_shelf", "high_shelf"] },
+]
