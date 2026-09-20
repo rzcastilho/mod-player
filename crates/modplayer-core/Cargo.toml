@@ -12,6 +12,11 @@ modplayer-effects = { path = "../modplayer-effects", version = "0.1.0" }
 modplayer-audio-io = { path = "../modplayer-audio-io", version = "0.1.0" }
 modplayer-audio-source = { path = "../modplayer-audio-source", version = "0.1.0" }
 modplayer-audio-source-synthetic = { path = "../modplayer-audio-source-synthetic", version = "0.1.0" }
+# Plugin host (009-plugin-runtime-and-permissions): the Capability
+# Gateway's types (manifest, grants, requests, events, state store) and
+# the runtime's `PluginHandle`.
+modplayer-capability-gateway = { path = "../modplayer-capability-gateway", version = "0.1.0" }
+modplayer-plugin-runtime = { path = "../modplayer-plugin-runtime", version = "0.1.0" }
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
@@ -29,6 +34,9 @@ time = { workspace = true, features = ["formatting", "parsing"] }
 thread-priority.workspace = true
 # sha256 of `TrackId` for the on-disk waveform cache filename (005, research R7).
 sha2.workspace = true
+# Plugin console: `log` façade entries tagged `plugin:<identifier>`
+# (009-plugin-runtime-and-permissions, research R19).
+log.workspace = true
 
 [dev-dependencies]
 # SC-011: queue operation-sequence proptests (research: Dependency additions).

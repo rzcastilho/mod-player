@@ -27,6 +27,12 @@ use modplayer_audio_source::{
     AudioSource, CatalogError, LibraryPage, Program, Repeat, SourceCommand, SourceEvent,
     SourceHealth, SourceHost, TrackId, TrackList, TrackListSource, TrackRef,
 };
+use modplayer_capability_gateway::event::{HostEvent, PlayState, TrackInfo, UnloadReason};
+use modplayer_capability_gateway::request::{
+    MarkerId as GatewayMarkerId, MarkerInfo as GatewayMarkerInfo, NodeId as GatewayNodeId,
+    NodeInfo as GatewayNodeInfo, OwnerInfo, QueueItemId as GatewayQueueItemId, QueueItemInfo,
+    RegionId as GatewayRegionId,
+};
 use modplayer_effects::catalog::{NodeKind, NodeOwner, ParamId, QualityMode};
 use modplayer_engine::{
     BufferPreset, CeilingDb, Command, DeviceId, Event, NegotiatedBuffer, PositionClock, Processor,
@@ -56,6 +62,7 @@ use crate::notifications::{
     KEY_NO_OUTPUT_DEVICES, KEY_QUEUE_ITEM_SKIPPED_UNAVAILABLE, KEY_TRACK_STATE_NEWER_VERSION,
     KEY_TRACK_STATE_SAVE_FAILED, KEY_TRACK_STATE_UNREADABLE, NotificationCenter, Severity,
 };
+use crate::plugins::{Lifecycle, PluginLog, PluginsView};
 use crate::queue::{
     AdvanceReason, Origin, PlaybackChange, Queue, QueueChange, QueueItem, QueueItemId, QueueMode,
     XorShiftRng,
@@ -80,6 +87,96 @@ const fn effect_owner_label_key(owner: NodeOwner) -> &'static str {
     } else {
         "effects-owner-plugin"
     }
+}
+
+/// 009 T087: a core `markers::Owner` as the gateway's own `OwnerInfo`,
+/// resolving a plugin id to its identifier through `ids` (an id
+/// `PluginIdTable` has never seen — impossible in practice, since every
+/// `Owner::Plugin`/`NodeOwner::Plugin` this controller ever constructs
+/// comes from an id the table already interned at discovery — falls back
+/// to an empty identifier rather than panicking, G3's "no panic" spirit).
+fn owner_info(owner: markers::Owner, ids: &crate::plugins::PluginIdTable) -> OwnerInfo {
+    match owner {
+        markers::Owner::Host => OwnerInfo::Host,
+        markers::Owner::Plugin(id) => OwnerInfo::Plugin(
+            ids.identifier_of(id)
+                .map(|i| i.to_string())
+                .unwrap_or_default(),
+        ),
+    }
+}
+
+/// The `MarkerInfo.kind` wire string for `marker.kind` (data-model.md
+/// §1.4, US3 T094): snake_case, mirroring `ChainModel::wire_name`'s own
+/// convention for node kinds.
+fn marker_kind_wire(kind: MarkerKind) -> &'static str {
+    match kind {
+        MarkerKind::Point => "point",
+        MarkerKind::RegionStart { .. } => "region_start",
+        MarkerKind::RegionEnd { .. } => "region_end",
+        MarkerKind::Cue { .. } => "cue",
+    }
+}
+
+/// `marker`, as a plugin sees it via `markers.list()`/`PluginSnapshot`
+/// (US3 T094, contracts/plugin-api-v1.md §3): position converted from
+/// frames to milliseconds at `rate`.
+fn marker_info(
+    marker: &markers::Marker,
+    rate: u32,
+    ids: &crate::plugins::PluginIdTable,
+) -> GatewayMarkerInfo {
+    let region = match marker.kind {
+        MarkerKind::RegionStart { region } | MarkerKind::RegionEnd { region } => {
+            Some(GatewayRegionId(region.raw()))
+        }
+        MarkerKind::Point | MarkerKind::Cue { .. } => None,
+    };
+    let slot = match marker.kind {
+        MarkerKind::Cue { slot } => Some(slot.get()),
+        _ => None,
+    };
+    GatewayMarkerInfo {
+        id: GatewayMarkerId(marker.id.raw()),
+        kind: marker_kind_wire(marker.kind).to_string(),
+        position_ms: frames_to_ms(marker.position, rate),
+        name: marker.name.clone(),
+        color: marker.color.get(),
+        owner: owner_info(marker.owner, ids),
+        transient: marker.transient,
+        region,
+        slot,
+    }
+}
+
+/// The inverse of `PlaybackController::ms_to_frames`, at an explicit
+/// rate (a `TrackMarkers`'s own `sample_rate()`, not necessarily the
+/// controller's *current* `source_sample_rate` — US3 T094).
+fn frames_to_ms(frames: u64, rate: u32) -> u64 {
+    if rate == 0 {
+        0
+    } else {
+        frames * 1000 / u64::from(rate)
+    }
+}
+
+/// `queue`'s effective order as the plugin-facing `QueueItemInfo` list
+/// (US3 T092/T094, contracts/plugin-api-v1.md §3 `queue.list`) — shared
+/// by the `queue_changed` fan-out and `PluginSnapshot.queue`.
+fn queue_item_infos(queue: &Queue) -> Vec<QueueItemInfo> {
+    let current_uid = queue.current().map(|item| item.uid);
+    queue
+        .effective_order()
+        .iter()
+        .enumerate()
+        .map(|(index, item)| QueueItemInfo {
+            id: GatewayQueueItemId(item.uid.get() as u32),
+            track: item.track.id.to_string(),
+            title: item.track.title.clone(),
+            index,
+            is_current: Some(item.uid) == current_uid,
+        })
+        .collect()
 }
 
 /// contracts/library-and-search-core.md §4: at most this many ids per
@@ -420,6 +517,60 @@ pub struct PlaybackController<B: OutputBackend, H: SourceHost> {
     /// C5/C6) — raised on the first `Event::Overload` not already
     /// shown, dismissed by `tick` once `RtShared::over_budget()` clears.
     over_budget_notified: bool,
+
+    /// The plugin host (009-plugin-runtime-and-permissions, data-model.md
+    /// §3.2): discovery, lifecycle bookkeeping and the request/event
+    /// channels every running plugin's own thread talks through.
+    plugins: crate::plugins::PluginHost,
+    /// Who last mutated `markers` through a host-initiated path (as
+    /// opposed to a plugin's `Request`), so a coalesced `marker_changed`
+    /// fan-out reports the right actor — host paths eventually reset this
+    /// to `Host` (009 contracts/plugin-host-service.md §3 "All applies
+    /// set `last_marker_actor`..."; a later slice's own edit paths, US3
+    /// T100). `apply.rs` sets it to `Plugin(id)` on every owned marker/
+    /// loop mutation (US2 T085, via [`Self::set_last_marker_actor`]);
+    /// `fan_out_revision_events()` (T087) reads it.
+    last_marker_actor: crate::markers::Owner,
+    /// The current track id last fanned out as `TrackChanged` to
+    /// `playback.observe` plugins (T070, E table row 1) — `dispatch()`
+    /// compares against this on every call, regardless of which of its
+    /// recursive call sites actually moved the cursor.
+    plugin_last_track: Option<TrackId>,
+    /// The transport intent last fanned out as `PlayStateChanged` (T070,
+    /// E table row 2).
+    plugin_last_intent: Intent,
+    /// 009 T087 (E table row 4): the current track's `TrackMarkers.
+    /// revision()` last fanned out as `marker_changed`; reset to `0`
+    /// whenever the current track (and so the `TrackMarkers` instance)
+    /// changes, so a freshly attached track never spuriously re-fires on
+    /// its own revision `0`.
+    plugin_last_marker_revision: u64,
+    /// As `plugin_last_marker_revision`, for `ChainModel.revision()`
+    /// (E table row 6) — never reset: the chain is session-scoped, not
+    /// per-track (data-model.md §2.3).
+    plugin_last_chain_revision: u64,
+    /// 009 T087 (E table row 5): the armed region (if any) last fanned
+    /// out as `loop_armed`/`loop_disarmed` — only a real transition, not
+    /// the steady state, triggers the event.
+    plugin_last_armed_region: Option<RegionId>,
+    /// The owner of `plugin_last_armed_region` at the moment it was
+    /// (re-)armed — `loop_disarmed`'s own `by`, read after the region
+    /// itself may already be gone (a track change, a plugin's teardown).
+    plugin_last_armed_owner: Option<crate::markers::Owner>,
+    /// US3 T094 (contracts/plugin-host-service.md §3 "`ListMarkers`/
+    /// `ListChain`/`QueueList` … never reach core (snapshot)"): the
+    /// `TrackMarkers.revision()` last *published* into `PluginHost::
+    /// snapshot()` — tracked independently of `plugin_last_marker_
+    /// revision` (the `marker_changed` fan-out's own bookkeeping) so
+    /// publishing the read model never suppresses the event, or vice
+    /// versa.
+    plugin_snapshot_marker_revision: u64,
+    /// As `plugin_snapshot_marker_revision`, for `ChainModel.revision()`.
+    plugin_snapshot_chain_revision: u64,
+    /// The queue's effective order last published into `PluginHost::
+    /// snapshot()` — compared by value (the model carries no revision
+    /// counter of its own).
+    plugin_snapshot_queue: Vec<QueueItemInfo>,
 }
 
 /// `transport.seek_forward_step`/`seek_backward_step`'s step size
@@ -430,6 +581,10 @@ pub const SEEK_STEP: Duration = Duration::from_secs(5);
 /// `transport.volume_up`/`volume_down`'s step size (FR-004a; research
 /// R9) — 5 % of the 0-100 % scale.
 pub const VOLUME_STEP: u8 = 5;
+
+/// `shutdown()`'s plugin-teardown bound (009, contracts/plugin-host-
+/// service.md §1): "wait ≤ 250 ms for `Exited`s".
+const SHUTDOWN_WAIT: Duration = Duration::from_millis(250);
 
 /// [`PlaybackController::library_track_list`]'s reply state (contracts/
 /// library-and-search-core.md §1).
@@ -558,6 +713,19 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
             end_of_track_pending: false,
             engine_ended_track: false,
             over_budget_notified: false,
+            plugins: crate::plugins::PluginHost::discover(
+                crate::plugins::bundled::fixtures_enabled(),
+            ),
+            last_marker_actor: crate::markers::Owner::Host,
+            plugin_last_track: None,
+            plugin_last_intent: Intent::Stopped,
+            plugin_last_marker_revision: 0,
+            plugin_last_chain_revision: 0,
+            plugin_last_armed_region: None,
+            plugin_last_armed_owner: None,
+            plugin_snapshot_marker_revision: 0,
+            plugin_snapshot_chain_revision: 0,
+            plugin_snapshot_queue: Vec::new(),
         };
         // 006, contracts/marker-service.md §4: resolved unconditionally at
         // construction, like `AnalysisPaths::resolve()` just above —
@@ -783,6 +951,23 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         let (id, commands) = self
             .chain
             .add(kind, modplayer_effects::catalog::NodeOwner::Host)?;
+        for command in commands {
+            self.push_command_retrying(command);
+        }
+        Ok(id)
+    }
+
+    /// `plugins::apply`'s own `CreateNode` handler (US3 T093): as
+    /// [`Self::chain_add_node`], but at an explicit index (already
+    /// resolved from the request's `SuggestedPosition` via `self.chain.
+    /// resolve_position`) and with a plugin owner.
+    pub(crate) fn chain_add_node_owned(
+        &mut self,
+        kind: NodeKind,
+        owner: NodeOwner,
+        index: usize,
+    ) -> Result<NodeId, ChainError> {
+        let (id, commands) = self.chain.add_at(kind, owner, index)?;
         for command in commands {
             self.push_command_retrying(command);
         }
@@ -1139,6 +1324,11 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         // not account data, so unlike `library`/`play_log` the file
         // itself is kept (data-model.md §4 rule 4).
         self.clear_marker_state_for_sign_out();
+        // 009 FR-014: every plugin's in-memory track scope is dropped and
+        // its on-disk `tracks/` directory deleted; `state.plugin`
+        // survives sign-out untouched.
+        self.plugins.clear_track_state_for_sign_out();
+        self.plugin_last_track = None;
         if self.registered_or_pending {
             self.registered_or_pending = false;
             self.source_host.command(SourceCommand::Deregister);
@@ -1176,9 +1366,30 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         self.on_tier_rejected();
     }
 
+    /// `shutdown()`'s plugin half: `stop(id, Shutdown)` every running
+    /// plugin, then poll `reap_plugin_threads()` until every thread has
+    /// exited or `SHUTDOWN_WAIT` has elapsed (contracts/plugin-host-
+    /// service.md §1).
+    fn shutdown_plugins(&mut self) {
+        self.plugins
+            .stop_all_for_shutdown(self.markers.as_mut(), &mut self.chain);
+        let deadline = self.now() + SHUTDOWN_WAIT;
+        loop {
+            self.plugins.reap_plugin_threads();
+            if !self.plugins.any_thread_running() || self.now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// `App::on_exit` (design note 8, FR-008): stop, release the source's
     /// resources, and drop the stream.
     pub fn shutdown(&mut self) {
+        // 009 contracts/plugin-host-service.md §1: every running plugin
+        // gets `stop(id, Shutdown)` first, with a bounded (≤ 250 ms) wait
+        // for its thread to actually exit, before anything else below.
+        self.shutdown_plugins();
         self.stop();
         self.source_host.command(SourceCommand::Shutdown);
         // Contracts/transport-delta.md §2: after the source `Shutdown`.
@@ -1312,6 +1523,12 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
                 }
             }
         }
+
+        // 009 contracts/plugin-host-service.md §1: every valid, enabled
+        // bundled record is loaded once, after the device/tone steps
+        // above.
+        let shared = Arc::clone(&self.shared);
+        self.plugins.load_all_enabled(&shared);
     }
 
     /// Preview a specific device: reopens the stream on it and restarts the
@@ -1676,6 +1893,20 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
     /// T11/T12 mirror is wired this phase — health/session/transfer
     /// mirroring lands with US3/US4). Call once per UI tick.
     pub fn tick(&mut self) {
+        // 009 contracts/plugin-host-service.md §1: every queued plugin
+        // request/runtime-event, then reap any thread that has exited —
+        // first, so a plugin's own effect on the models below (once a
+        // user story wires it) is visible to the rest of this tick.
+        self.drain_plugin_requests();
+        let plugin_now = self.now();
+        self.plugins.drain_plugin_runtime_events(
+            &mut self.notifications,
+            &mut self.chain,
+            self.markers.as_mut(),
+            plugin_now,
+        );
+        self.plugins.reap_plugin_threads();
+
         self.flush_pending_commands();
         self.drain_backend_events();
         self.drain_source_events();
@@ -1708,6 +1939,376 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         self.flush_track_state_if_due();
         self.drain_marker_store_events();
         self.analysis.drain();
+
+        // 009 contracts/plugin-host-service.md §1: last, so they see
+        // every model change this tick made.
+        self.publish_plugin_snapshot_if_changed();
+        self.fan_out_revision_events();
+    }
+
+    /// C1: drain every queued plugin request in arrival order, always
+    /// replying. `Play`/`Pause`/`Toggle`/`Seek`/`SkipNext`/`SkipPrevious`
+    /// are implemented (Phase 2: Foundational); every other request kind
+    /// is a later user story's task (contracts/plugin-host-service.md
+    /// §3, `plugins::apply`).
+    fn drain_plugin_requests(&mut self) {
+        crate::plugins::apply::drain_plugin_requests(self);
+    }
+
+    /// 009 C3: republish the plugin-facing read model
+    /// (`PluginSnapshot`) once anything backing it has changed since the
+    /// last tick. No `Active` plugin can exist yet this phase (no
+    /// bundled/fixture package ships until a later user story adds one),
+    /// so there is nothing yet to keep honest — the
+    /// `TrackMarkers`/`ChainModel`/`Queue` -> DTO population lands with
+    /// US3 (T094), once a plugin can actually read it.
+    /// 009 C3 (US3 T094, contracts/plugin-host-service.md §3
+    /// "`ListMarkers`/`ListChain`/`QueueList` … never reach core
+    /// (snapshot)"): republish `PluginHost::snapshot()` — the
+    /// `Arc<Mutex<PluginSnapshot>>` every plugin thread reads its own
+    /// `markers.list()`/`effects.list_chain()`/`queue.list()` from
+    /// locally, without an RPC — whenever markers, the effect chain or
+    /// the queue changed since the last tick. Cheap no-op the vast
+    /// majority of ticks (three revision/value comparisons, no lock
+    /// taken unless something actually changed).
+    fn publish_plugin_snapshot_if_changed(&mut self) {
+        let marker_revision = self
+            .markers
+            .as_ref()
+            .map(TrackMarkers::revision)
+            .unwrap_or(0);
+        let chain_revision = self.chain.revision();
+        let markers_changed = marker_revision != self.plugin_snapshot_marker_revision;
+        let chain_changed = chain_revision != self.plugin_snapshot_chain_revision;
+        let queue_items = queue_item_infos(&self.queue);
+        let queue_changed = queue_items != self.plugin_snapshot_queue;
+        if !markers_changed && !chain_changed && !queue_changed {
+            return;
+        }
+
+        let ids = self.plugins.id_table();
+        let (markers, armed_region) = match &self.markers {
+            Some(m) => {
+                let rate = m.sample_rate();
+                let markers = m
+                    .markers()
+                    .iter()
+                    .map(|mk| marker_info(mk, rate, ids))
+                    .collect();
+                let armed = m
+                    .armed_region()
+                    .map(|region| GatewayRegionId(region.id.raw()));
+                (markers, armed)
+            }
+            None => (Vec::new(), None),
+        };
+        let chain: Vec<GatewayNodeInfo> = self
+            .chain
+            .nodes()
+            .iter()
+            .enumerate()
+            .map(|(index, node)| GatewayNodeInfo {
+                id: GatewayNodeId(node.id.as_u32()),
+                kind: ChainModel::wire_name(node.kind).to_string(),
+                owner: owner_info(
+                    match node.owner {
+                        NodeOwner::Host => markers::Owner::Host,
+                        NodeOwner::Plugin(id) => markers::Owner::Plugin(id),
+                    },
+                    ids,
+                ),
+                bypassed: node.bypassed,
+                auto_bypassed: node.auto_bypassed,
+                orphaned: node.orphaned,
+                index,
+            })
+            .collect();
+
+        {
+            let snapshot = self.plugins.snapshot();
+            let mut guard = snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.markers = markers;
+            guard.armed_region = armed_region;
+            guard.chain = chain;
+            guard.queue = queue_items.clone();
+            guard.marker_revision = marker_revision;
+            guard.chain_revision = chain_revision;
+        }
+        self.plugin_snapshot_marker_revision = marker_revision;
+        self.plugin_snapshot_chain_revision = chain_revision;
+        self.plugin_snapshot_queue = queue_items;
+    }
+
+    /// 009 C3 (US2 T087, E table rows 4-6): fan out `marker_changed`
+    /// (`TrackMarkers.revision()`), `loop_armed`/`loop_disarmed` (the
+    /// armed region itself transitioning — host or plugin, since both
+    /// `arm_loop`/`disarm_loop` go through the same two methods) and
+    /// `effect_chain_changed` (`ChainModel.revision()`) for whatever
+    /// changed since the last tick. `loop_wrapped`'s own trigger is the
+    /// engine's `Event::LoopWrapped` itself, fanned out directly from
+    /// `drain_engine_events()` (`fan_out_loop_wrapped`) rather than a
+    /// revision diff here — a wrap is not a persistent state change.
+    fn fan_out_revision_events(&mut self) {
+        let now = self.now();
+
+        if let Some(revision) = self.markers.as_ref().map(TrackMarkers::revision)
+            && revision != self.plugin_last_marker_revision
+        {
+            self.plugin_last_marker_revision = revision;
+            let actor = owner_info(self.last_marker_actor, self.plugins.id_table());
+            self.plugins
+                .fan_out(&HostEvent::MarkerChanged { actor, revision }, now);
+        }
+
+        let armed_now = self
+            .markers
+            .as_ref()
+            .and_then(TrackMarkers::armed_region)
+            .map(|region| region.id);
+        if armed_now != self.plugin_last_armed_region {
+            match armed_now {
+                Some(region) => {
+                    let owner = self
+                        .markers
+                        .as_ref()
+                        .and_then(TrackMarkers::armed_region_owner)
+                        .unwrap_or(markers::Owner::Host);
+                    self.plugin_last_armed_owner = Some(owner);
+                    let by = owner_info(owner, self.plugins.id_table());
+                    self.plugins.fan_out(
+                        &HostEvent::LoopArmed {
+                            region: GatewayRegionId(region.raw()),
+                            by,
+                        },
+                        now,
+                    );
+                }
+                None => {
+                    let owner = self.plugin_last_armed_owner.unwrap_or(markers::Owner::Host);
+                    self.plugin_last_armed_owner = None;
+                    let by = owner_info(owner, self.plugins.id_table());
+                    self.plugins.fan_out(&HostEvent::LoopDisarmed { by }, now);
+                }
+            }
+            self.plugin_last_armed_region = armed_now;
+        }
+
+        let chain_revision = self.chain.revision();
+        if chain_revision != self.plugin_last_chain_revision {
+            self.plugin_last_chain_revision = chain_revision;
+            let ids = self.plugins.id_table();
+            let chain: Vec<GatewayNodeInfo> = self
+                .chain
+                .nodes()
+                .iter()
+                .enumerate()
+                .map(|(index, node)| GatewayNodeInfo {
+                    id: GatewayNodeId(node.id.as_u32()),
+                    kind: ChainModel::wire_name(node.kind).to_string(),
+                    owner: owner_info(
+                        match node.owner {
+                            NodeOwner::Host => markers::Owner::Host,
+                            NodeOwner::Plugin(id) => markers::Owner::Plugin(id),
+                        },
+                        ids,
+                    ),
+                    bypassed: node.bypassed,
+                    auto_bypassed: node.auto_bypassed,
+                    orphaned: node.orphaned,
+                    index,
+                })
+                .collect();
+            self.plugins
+                .fan_out(&HostEvent::EffectChainChanged { chain }, now);
+        }
+    }
+
+    /// The literal `Event::LoopWrapped` trigger (US2 T087, E table row 5)
+    /// — one coalesced `loop_wrapped` per tick with >= 1 wrap, mirroring
+    /// `drain_engine_events`'s own re-seek coalescing just above it. A
+    /// no-op if nothing is armed (a wrap that arrives the same tick the
+    /// region was disarmed/torn down never reaches a plugin).
+    fn fan_out_loop_wrapped(&mut self) {
+        let Some(region) = self.markers.as_ref().and_then(TrackMarkers::armed_region) else {
+            return;
+        };
+        let region_id = region.id;
+        let wraps = self.shared.loop_wraps();
+        let now = self.now();
+        // US3 T095: a loop wrap also resets the position "changed" edge
+        // (contracts/plugin-api-v1.md §4), same as a seek.
+        self.plugins.playback_snapshot().bump_position_epoch();
+        self.plugins.fan_out(
+            &HostEvent::LoopWrapped {
+                region: GatewayRegionId(region_id.raw()),
+                wraps,
+            },
+            now,
+        );
+    }
+
+    /// Install the UI's repaint waker (contracts/plugin-host-service.md
+    /// §1): called after every admitted plugin request is queued, so a
+    /// UI thread blocked on its own event loop wakes up promptly.
+    pub fn set_waker(&mut self, waker: Arc<dyn Fn() + Send + Sync>) {
+        self.plugins.set_waker(waker);
+    }
+
+    /// The Plugins section's read model (FR-023, US4 T104): one row per
+    /// discovered plugin, sorted by name, gauges live while `Active`.
+    pub fn plugins_view(&self) -> PluginsView {
+        PluginsView::from_records(self.plugins.records(), self.now())
+    }
+
+    /// `Disabled -> Loading` (fresh thread/state); a no-op for `Invalid`
+    /// or an id that isn't currently `Disabled` (contracts/plugin-host-
+    /// service.md §1). Full lifecycle semantics (suspension counters,
+    /// notifications, teardown ordering) land with US1 (T074) — this
+    /// phase only spawns the thread.
+    pub fn plugin_enable(&mut self, id: crate::plugins::PluginId) {
+        let Some(record) = self.plugins.record(id) else {
+            return;
+        };
+        if !matches!(record.lifecycle, Lifecycle::Disabled) || record.manifest.is_err() {
+            return;
+        }
+        if let Some(record) = self.plugins.record_mut(id) {
+            record.enabled = true;
+        }
+        let shared = Arc::clone(&self.shared);
+        self.plugins.spawn(id, &shared);
+    }
+
+    /// `stop(id, Disable)` then `enabled = false` (contracts/plugin-
+    /// host-service.md §1). From `Suspended` the plugin's own thread is
+    /// already gone (RT8's teardown ran at suspension time), so this
+    /// only flips the flag and dismisses its `plugin-suspended` notice.
+    pub fn plugin_disable(&mut self, id: crate::plugins::PluginId) {
+        let Some(record) = self.plugins.record(id) else {
+            return;
+        };
+        match record.lifecycle {
+            Lifecycle::Loading | Lifecycle::Active => {
+                self.plugins.stop(
+                    id,
+                    UnloadReason::Disable,
+                    self.markers.as_mut(),
+                    &mut self.chain,
+                );
+            }
+            Lifecycle::Suspended { .. } => {
+                if let Some(identifier) = self.plugins.id_table().identifier_of(id).cloned() {
+                    self.notifications
+                        .dismiss_by_dedupe(&format!("plugin-suspended:{identifier}"));
+                }
+            }
+            Lifecycle::Invalid(_) | Lifecycle::Disabled | Lifecycle::Draining => {}
+        }
+        if let Some(record) = self.plugins.record_mut(id) {
+            record.enabled = false;
+        }
+    }
+
+    /// `Suspended -> Loading`; a no-op from any other lifecycle. The
+    /// session suspension counter is **not** reset (contracts/plugin-
+    /// host-service.md §1); the `plugin-suspended` notice is dismissed.
+    pub fn plugin_restart(&mut self, id: crate::plugins::PluginId) {
+        let Some(record) = self.plugins.record(id) else {
+            return;
+        };
+        if !matches!(record.lifecycle, Lifecycle::Suspended { .. }) {
+            return;
+        }
+        if let Some(identifier) = self.plugins.id_table().identifier_of(id).cloned() {
+            self.notifications
+                .dismiss_by_dedupe(&format!("plugin-suspended:{identifier}"));
+        }
+        if let Some(record) = self.plugins.record_mut(id) {
+            record.lifecycle = Lifecycle::Disabled;
+        }
+        let shared = Arc::clone(&self.shared);
+        self.plugins.spawn(id, &shared);
+    }
+
+    /// The 1 000-entry plugin console ring (research R19).
+    pub fn plugin_log(&self) -> &PluginLog {
+        self.plugins.plugin_log()
+    }
+
+    /// Test-only (and `plugins::apply`'s own) access to the plugin host
+    /// itself.
+    pub fn plugins_mut(&mut self) -> &mut crate::plugins::PluginHost {
+        &mut self.plugins
+    }
+
+    /// `plugins::apply`'s own hook (US2 T085/T086, contracts/plugin-host-
+    /// service.md §3 "All applies set `last_marker_actor`..."): records
+    /// who just mutated `markers` through an admitted plugin request, so
+    /// this tick's own `fan_out_revision_events()` (T087) reports the
+    /// right `marker_changed`/`loop_armed`/`loop_disarmed` actor.
+    pub(crate) fn set_last_marker_actor(&mut self, actor: crate::markers::Owner) {
+        self.last_marker_actor = actor;
+    }
+
+    /// `plugins::apply`'s own `SetCue` handler (US2 T085): unlike the
+    /// host's own [`Self::set_cue`] (always `Owner::Host`, at the
+    /// playhead), a plugin's cue carries its own owner and an explicit
+    /// millisecond position — `TrackMarkers::set_cue_owned` already
+    /// refuses `NotOwner` when the slot holds a different owner's cue, so
+    /// there is nothing else to check here.
+    pub(crate) fn plugin_set_cue(
+        &mut self,
+        slot: CueSlot,
+        position_ms: u64,
+        owner: crate::markers::Owner,
+    ) -> Result<MarkerId, MarkerError> {
+        let frames = self.ms_to_frames(u32::try_from(position_ms).unwrap_or(u32::MAX));
+        let id = self
+            .current_markers_mut()?
+            .set_cue_owned(slot, frames, owner)?;
+        self.last_marker_actor = owner;
+        Ok(id)
+    }
+
+    /// `plugins::apply`'s own `CreateMarker` handler (US3 T093): a
+    /// plugin-owned point marker at an explicit millisecond position,
+    /// optionally named.
+    pub(crate) fn plugin_add_marker(
+        &mut self,
+        position_ms: u64,
+        name: Option<&str>,
+        owner: crate::markers::Owner,
+        transient: bool,
+    ) -> Result<MarkerId, MarkerError> {
+        let frames = self.ms_to_frames(u32::try_from(position_ms).unwrap_or(u32::MAX));
+        let id = self
+            .current_markers_mut()?
+            .add_point_owned(frames, owner, transient)?;
+        if let Some(name) = name {
+            self.current_markers_mut()?.rename(id, name)?;
+        }
+        self.last_marker_actor = owner;
+        Ok(id)
+    }
+
+    /// `plugins::apply`'s own `CreateLoopRegion` handler (US3 T093): both
+    /// endpoints created together, already owned.
+    pub(crate) fn plugin_add_loop_region(
+        &mut self,
+        a_ms: u64,
+        b_ms: u64,
+        owner: crate::markers::Owner,
+        transient: bool,
+    ) -> Result<RegionId, MarkerError> {
+        let a = self.ms_to_frames(u32::try_from(a_ms).unwrap_or(u32::MAX));
+        let b = self.ms_to_frames(u32::try_from(b_ms).unwrap_or(u32::MAX));
+        let id = self
+            .current_markers_mut()?
+            .new_loop_region_owned(a, b, owner, transient)?;
+        self.last_marker_actor = owner;
+        Ok(id)
     }
 
     /// The current track's latest waveform analysis, if any (contracts/
@@ -1749,6 +2350,16 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
     /// replaces this lazy-create with a real load/save cycle; this phase
     /// (US1) only needs a model to mutate for the current track.
     fn current_markers_mut(&mut self) -> Result<&mut TrackMarkers, MarkerError> {
+        // US3 T100 (contracts/plugin-host-service.md §3, "All applies set
+        // `last_marker_actor`..."): every marker/loop mutation this
+        // controller ever makes — host-initiated or plugin-initiated —
+        // reaches the model through this one method, so resetting to
+        // `Host` here first and letting `plugins::apply`'s own callers
+        // (which all call `set_last_marker_actor(Owner::Plugin(id))`
+        // immediately afterward) override it back is enough to keep a
+        // host edit from being misattributed to whichever plugin mutated
+        // markers most recently.
+        self.last_marker_actor = crate::markers::Owner::Host;
         let item = self.current_track().ok_or(MarkerError::NoTrack)?;
         let id = item.track.id.clone();
         let len_frames = self.ms_to_frames(item.track.duration_ms);
@@ -2103,6 +2714,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         }
         if wrapped {
             self.reseek_for_loop_wrap();
+            self.fan_out_loop_wrapped();
         }
         if released && let Some(markers) = self.markers.as_mut() {
             markers.disarm();
@@ -2277,7 +2889,13 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         let rate = self.source_sample_rate.max(1);
         let len_frames = self.ms_to_frames(item.track.duration_ms);
         let outcome = match &self.track_state_paths {
-            Some(paths) => markers::store::load(paths, &item.track.id, rate, len_frames),
+            Some(paths) => markers::store::load(
+                paths,
+                &item.track.id,
+                rate,
+                len_frames,
+                self.plugins.id_table_mut(),
+            ),
             None => markers::store::LoadOutcome {
                 state: TrackMarkers::new(item.track.id.clone(), rate, len_frames),
                 warning: None,
@@ -2309,7 +2927,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
             return;
         }
         let path = paths.file_for(markers.track());
-        let bytes = markers::store::encode(markers);
+        let bytes = markers::store::encode(markers, self.plugins.id_table());
         markers.mark_clean();
         if let Some(tx) = &self.marker_persist_tx {
             let _ = tx.send(markers::store::PersistJob::Save { path, bytes });
@@ -2756,6 +3374,18 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         } else {
             None
         };
+        // 009 T070 (E table row 3): captured before `input` moves into
+        // `reduce` — "any `QueueChange`" means any pass through this
+        // exact `Input` variant, however it was reached.
+        let is_queue_changed = matches!(&input, Input::QueueChanged { .. });
+        // US3 T095 (contracts/plugin-api-v1.md §4 `position`): a seek
+        // (host- or plugin-initiated, both funnel through this same
+        // `Input::Seek`) resets every plugin's position "changed" edge —
+        // independent of `track_generation`, so it never cancels position
+        // timers the way a track change does.
+        if matches!(&input, Input::Seek { .. }) {
+            self.plugins.playback_snapshot().bump_position_epoch();
+        }
         let (new_state, effects) =
             transport::reduce(std::mem::take(&mut self.transport_state), input);
         self.transport_state = new_state;
@@ -2779,6 +3409,51 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
             if let Some(markers) = self.markers.as_mut() {
                 markers.set_len_frames(len_frames);
             }
+        }
+        self.fan_out_plugin_playback_events(is_queue_changed);
+    }
+
+    /// 009 T070 (E table rows 1-3): `TrackChanged`/`PlayStateChanged` fire
+    /// whenever this exact `dispatch()` call actually changed the current
+    /// track or the transport intent (compared against the last value
+    /// fanned out, so a recursive `Effect::Queue` call and its own
+    /// outer/nested caller never double-fan the same change);
+    /// `QueueChanged` fires whenever this call's `Input` was itself
+    /// `QueueChanged` (row 3's "any `QueueChange`").
+    fn fan_out_plugin_playback_events(&mut self, is_queue_changed: bool) {
+        let now = self.now();
+        let current_track_id = self.queue.current().map(|item| item.track.id.clone());
+        if current_track_id != self.plugin_last_track {
+            self.plugin_last_track = current_track_id;
+            // 009 T087: a fresh `TrackMarkers` (or none at all) starts at
+            // revision 0 — reset the baseline here so `fan_out_revision_
+            // events()` doesn't spuriously re-fire `marker_changed` for a
+            // track it never actually mutated.
+            self.plugin_last_marker_revision = 0;
+            let track = self.queue.current().map(|item| TrackInfo {
+                id: item.track.id.to_string(),
+                title: item.track.title.clone(),
+                artists: item.track.artists.clone(),
+                duration_ms: u64::from(item.track.duration_ms),
+            });
+            self.plugins.playback_snapshot().bump_track_generation();
+            self.plugins
+                .fan_out(&HostEvent::TrackChanged { track }, now);
+        }
+        if self.transport_state.intent != self.plugin_last_intent {
+            self.plugin_last_intent = self.transport_state.intent;
+            let state = match self.plugin_last_intent {
+                Intent::Playing => PlayState::Playing,
+                Intent::Paused => PlayState::Paused,
+                Intent::Stopped => PlayState::Stopped,
+            };
+            self.plugins
+                .fan_out(&HostEvent::PlayStateChanged { state }, now);
+        }
+        if is_queue_changed {
+            let items = queue_item_infos(&self.queue);
+            self.plugins
+                .fan_out(&HostEvent::QueueChanged { items }, now);
         }
     }
 
@@ -2997,8 +3672,9 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
 
     /// Convert a millisecond position to source-rate frames, using the
     /// sample rate captured at the last `attach()` (0 before any stream
-    /// has ever been opened, so this yields frame 0).
-    fn ms_to_frames(&self, position_ms: u32) -> u64 {
+    /// has ever been opened, so this yields frame 0). `pub(crate)`: also
+    /// `plugins::apply`'s own (US2 T085) position-carrying requests.
+    pub(crate) fn ms_to_frames(&self, position_ms: u32) -> u64 {
         (u64::from(position_ms) * u64::from(self.source_sample_rate)) / 1000
     }
 

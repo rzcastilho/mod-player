@@ -1,0 +1,5 @@
+-- org.modplayer.fixture.invalid (US2 T082): never actually runs — its
+-- manifest fails validation (rule 4, `UnknownPermission`) before the
+-- host ever loads this entry script. Present only so the package's
+-- on-disk layout matches every other fixture's (contracts/manifest.md
+-- §1: `main.luau` is a required file).

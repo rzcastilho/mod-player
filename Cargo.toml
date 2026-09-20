@@ -54,3 +54,13 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 # Below-normal priority for the decode-ahead (modplayer-audio-source-connect)
 # and analysis (modplayer-core) threads (005-now-playing-waveform, research R9).
 thread-priority = "3.1.1"
+# Plugin runtime only (009-plugin-runtime-and-permissions, research R1): the
+# Luau scripting VM. `luau` vendors and builds Luau's C++ via `cc`; `send`
+# makes `Lua` values `Send` for the one-thread-per-plugin model (R3);
+# `serialize` gives the `serde_json::Value` <-> `LuaValue` conversion used
+# for state and event payloads. No `luau-jit`.
+mlua = { version = "0.12", features = ["luau", "send", "serialize"] }
+# modplayer-core (plugin console) and modplayer-plugin-runtime (log.*
+# binding); modplayer's main.rs installs the one process-wide logger
+# (009-plugin-runtime-and-permissions, research R19).
+log = "0.4"

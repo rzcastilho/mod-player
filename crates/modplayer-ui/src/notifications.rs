@@ -70,6 +70,11 @@ fn action_label_key(action: NotificationAction) -> &'static str {
         NotificationAction::OpenStatusPage => "action-status-page",
         NotificationAction::RetrySource => "action-retry",
         NotificationAction::OpenUpgradePage => "action-open-upgrade-page",
+        // 009 US4 (T108): click handling (`plugin_restart`/`plugin_disable`)
+        // lives in `app.rs`'s own action-dispatch match, exactly like every
+        // other action here.
+        NotificationAction::RestartPlugin(_) => "notification-action-restart-plugin",
+        NotificationAction::DisablePlugin(_) => "notification-action-disable-plugin",
     }
 }
 
@@ -118,6 +123,7 @@ mod tests {
             actions: Vec::new(),
             created_at: std::time::Instant::now(),
             dismissed: false,
+            dedupe_key: None,
         };
         assert_eq!(message(&notification), tr("no-output-devices"));
     }

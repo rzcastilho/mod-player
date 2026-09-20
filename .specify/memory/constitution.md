@@ -1,6 +1,31 @@
 <!--
 Sync Impact Report
 ==================
+Version change: 1.1.0 → 1.1.1
+Rationale: PATCH — Principle II's `TODO(WASM_RUNTIME_DECISION)` is
+resolved: the plugin scripting runtime is Luau via `mlua` 0.12, recorded
+with full rationale and rejected alternatives in
+docs/adr/0001-plugin-runtime-luau.md (009-plugin-runtime-and-permissions
+Setup phase, T008). Wording-only change to Principle II's prose (the
+open TODO sentence is replaced with a link to the now-written ADR); no
+principle is added, removed, or materially redefined.
+
+Modified principles: II (Plugins Are Guests) — TODO resolved, no
+semantic change to the principle's requirements.
+
+Added sections (1.1.1): none.
+
+Templates requiring updates (1.1.1):
+- .specify/templates/plan-template.md / spec-template.md /
+  tasks-template.md: ✅ no change needed — generic, no
+  constitution-specific references to this TODO.
+
+Follow-up TODOs remaining:
+- TODO(MSRV): Principle VII references MSRV [1.xx] — pin exact Rust
+  version once toolchain is selected.
+
+Previous report (1.1.0)
+------------------------
 Version change: 1.0.0 → 1.1.0
 Rationale: MINOR — Governance materially expanded with "Manual Scenario
 Sign-Off": the implementing agent executes each feature's quickstart.md
@@ -95,9 +120,10 @@ notification budgets (PL-1.3, PL-1.4, PL-8, NFR-4.3). A plugin fault
 dropout, a host crash, or another plugin's failure. Refusals from the
 gateway are ordinary `Err` values, never panics. The plugin runtime MUST
 support execution budgets and memory caps natively — the sanctioned
-choice (WASM via wasmtime with fuel metering, vs. Rhai, vs. Lua via mlua)
-MUST be recorded with rationale in an Architecture Decision Record before
-the plugin-runtime crate is implemented.
+choice is Luau via `mlua`, recorded with rationale and rejected
+alternatives (WASM via wasmtime with fuel metering; Rhai) in
+[docs/adr/0001-plugin-runtime-luau.md](../../docs/adr/0001-plugin-runtime-luau.md)
+(009-plugin-runtime-and-permissions).
 
 **Rationale**: Plugins are third-party, scripted, and untrusted by
 default. A live performer cannot afford a community plugin taking down
@@ -316,4 +342,4 @@ touches the real service, the real secure store and real audio hardware
 formality and has, in 003, hidden six live-only defects until the agent
 actually drove the app.
 
-**Version**: 1.1.0 | **Ratified**: 2026-09-14 | **Last Amended**: 2026-09-17
+**Version**: 1.1.1 | **Ratified**: 2026-09-14 | **Last Amended**: 2026-09-19

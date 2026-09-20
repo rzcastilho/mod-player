@@ -24,7 +24,6 @@ nav-search = Search
 nav-now-playing = Now Playing
 nav-plugins = Plugins
 nav-settings = Settings
-placeholder-plugins = Plugins are coming in a future update.
 
 severity-critical = Critical
 severity-warning = Warning

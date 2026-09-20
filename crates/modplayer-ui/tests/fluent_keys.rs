@@ -22,11 +22,6 @@ const SHELL_AND_NOTIFICATION_KEYS: &[&str] = &[
     "nav-now-playing",
     "nav-plugins",
     "nav-settings",
-    // Placeholder sections. `placeholder-library` was retired in
-    // 004-search-and-library-browse (T026/T065: `library_view` replaces
-    // the placeholder wiring point) — `SCAFFOLD_KEYS_MUST_BE_GONE` below
-    // asserts it no longer resolves.
-    "placeholder-plugins",
     // Notification area chrome.
     "severity-critical",
     "severity-warning",
@@ -371,6 +366,81 @@ const EFFECTS_NODE_OWNER_ARG_KEYS: &[&str] = &["effect-chain-over-budget"];
 /// `effects-no-time-stretch` (008, Phase 3) takes no Fluent placeholder.
 const EFFECTS_NO_ARG_NOTIFICATION_KEYS: &[&str] = &["effects-no-time-stretch"];
 
+/// `plugins.ftl` keys with no Fluent placeholder (009-plugin-runtime-and-
+/// permissions US4, T111; contracts/ui-plugins.md §2/§3): the section's own
+/// chrome, the 25-entry permission catalog's explanation strings
+/// (`Permission::explanation_key`, `plugins_view.rs::permissions_summary`
+/// — any of the 25 can appear in a row's summary, not only the 9 operable
+/// this slice, since a manifest may request any catalog permission), and
+/// the suspension-cause fragments `plugins/host.rs::cause_label` resolves.
+/// `manifest-error-*` is deliberately **not** listed here:
+/// `ManifestError`'s `Display` (`crates/modplayer-capability-gateway/src/
+/// manifest.rs`) renders its own hard-coded English sentence — kept in
+/// sync with these Fluent strings by contracts/manifest.md §3's ordering
+/// alone, never looked up via `tr`/`tr_args` — so those 8 keys exist in
+/// `plugins.ftl` for parity/future localization but are not exercised by
+/// any UI code path this test could assert against.
+const PLUGINS_KEYS: &[&str] = &[
+    "plugins-title",
+    "plugins-empty",
+    "plugins-col-name",
+    "plugins-col-version",
+    "plugins-col-source",
+    "plugins-col-enabled",
+    "plugins-col-health",
+    "plugins-col-permissions",
+    "plugins-col-cpu",
+    "plugins-col-memory",
+    "plugins-source-bundled",
+    "plugins-health-ok",
+    "plugins-health-warning",
+    "plugins-health-suspended",
+    "plugins-dash",
+    "plugins-list-separator",
+    "permission-playback-observe",
+    "permission-transport-control",
+    "permission-queue-write",
+    "permission-markers-read",
+    "permission-markers-write",
+    "permission-audio-effects",
+    "permission-audio-meter",
+    "permission-audio-process",
+    "permission-analysis-read",
+    "permission-analysis-write",
+    "permission-library-read",
+    "permission-library-write",
+    "permission-ui-panel",
+    "permission-ui-overlay",
+    "permission-ui-shortcuts",
+    "permission-ui-notify",
+    "permission-ui-settings",
+    "permission-state-plugin",
+    "permission-state-track",
+    "permission-network",
+    "permission-files-read",
+    "permission-files-write",
+    "permission-midi-observe",
+    "permission-midi-output",
+    "permission-clipboard",
+    "plugin-suspended-cause-hang",
+    "plugin-suspended-cause-cpu-share",
+    "plugin-suspended-cause-memory",
+    "plugin-suspended-cause-did-not-start",
+    "notification-action-restart-plugin",
+    "notification-action-disable-plugin",
+];
+
+/// `plugins.ftl` keys that take a Fluent placeholder — resolved via
+/// `tr_args` with a stand-in value.
+const PLUGINS_ARG_KEYS: &[&str] = &[
+    "plugins-enable-toggle",
+    "plugins-invalid-manifest",
+    "plugins-cpu",
+    "plugins-memory",
+    "plugin-suspended",
+    "plugin-auto-disabled",
+];
+
 /// Every Settings-screen key (US5, T086): the eleven fixed-order category
 /// labels, the search box, the placeholder text for categories with no
 /// working settings yet, and every working setting's title/description
@@ -555,13 +625,16 @@ const LIBRARY_KEYS: &[&str] = &[
 const LIBRARY_ARG_KEYS: &[&str] = &["playlist-owner", "playlist-track-count"];
 
 /// 003's "Play from account" scaffold keys (`developer.rs`'s doc comment,
-/// FR-022) and `placeholder-library` (T026/T065) — retired alongside their
-/// code paths in 004-search-and-library-browse. None of these may resolve
-/// any more: a stray leftover key with no code path would otherwise
-/// silently pass `no_unused_keys_in_playback_and_settings_ftl` simply by
-/// never being tested, rather than by being absent from the `.ftl` files.
+/// FR-022), `placeholder-library` (T026/T065), and `placeholder-plugins`
+/// (009-plugin-runtime-and-permissions T106/T107: `plugins_view::show`
+/// replaces `shell::plugins_placeholder`) — retired alongside their code
+/// paths. None of these may resolve any more: a stray leftover key with no
+/// code path would otherwise silently pass
+/// `no_unused_keys_in_playback_and_settings_ftl` simply by never being
+/// tested, rather than by being absent from the `.ftl` files.
 const SCAFFOLD_KEYS_MUST_BE_GONE: &[&str] = &[
     "placeholder-library",
+    "placeholder-plugins",
     "setting-play-from-account",
     "setting-play-from-account-desc",
     "play-from-account-loading",
@@ -867,6 +940,37 @@ fn defined_keys(ftl: &str) -> HashSet<&str> {
             line.split_once(" = ").map(|(key, _)| key.trim())
         })
         .collect()
+}
+
+/// 009-plugin-runtime-and-permissions US4 (T111, contracts/ui-plugins.md
+/// §2/§3): every `plugins.ftl` key `plugins_view.rs`/`notifications.rs`/
+/// `plugins/host.rs` actually look up resolves to a real string.
+#[test]
+fn plugins_ftl_keys_used_exist() {
+    for key in PLUGINS_KEYS {
+        let resolved = tr(key);
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/plugins.ftl (tr() fell back to the raw key)"
+        );
+    }
+
+    for key in PLUGINS_ARG_KEYS {
+        let resolved = tr_args(
+            key,
+            &[
+                ("plugin", "Example plugin".to_string()),
+                ("reason", "example reason".to_string()),
+                ("pct", "3".to_string()),
+                ("used", "1.2".to_string()),
+                ("cause", "it stopped responding".to_string()),
+            ],
+        );
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/plugins.ftl (tr_args() fell back to the raw key)"
+        );
+    }
 }
 
 /// FR-024 / T095: every key `playback.ftl` and `settings.ftl` define is

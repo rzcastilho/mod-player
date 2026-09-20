@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Core marker/loop-region model: `TrackMarkers` and its mutation API
-//! (006, data-model.md §1).
+//! (006, data-model.md §1; owner deltas per 009 data-model.md §1.5,
+//! FR-024, contracts/plugin-host-service.md).
 
 use modplayer_audio_source::TrackId;
+use modplayer_effects::catalog::PluginId;
 
 /// The most markers (of any kind, counting the lone endpoint of an
 /// incomplete region) a single track may carry (I1, FR-002).
@@ -125,12 +127,12 @@ impl RepeatCount {
     }
 }
 
-/// A marker's owner (data-model.md §1.3, FR-024). Always `Host` this
-/// slice; the enum exists so the persisted file format never changes
-/// once plugins can own markers (Constitution II).
+/// A marker's owner (data-model.md §1.3, FR-024; 009 data-model.md
+/// §1.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Owner {
     Host,
+    Plugin(PluginId),
 }
 
 /// What role a marker plays (data-model.md §1.2).
@@ -238,6 +240,10 @@ pub enum MarkerError {
     RegionIncomplete,
     #[error("marker not found")]
     NotFound,
+    /// A plugin tried to mutate a marker/region/cue it does not own (009
+    /// FR-024, C2).
+    #[error("this plugin does not own that marker, region or cue")]
+    NotOwner,
     /// Controller-level only: no current track (marker-service.md §1).
     #[error("no current track")]
     NoTrack,
@@ -274,6 +280,11 @@ pub struct TrackMarkers {
     next_marker_id: u32,
     next_region_id: u32,
     dirty: bool,
+    /// Bumped alongside `dirty` on every mutation (009 C3): the
+    /// controller compares this against its own last-seen value once per
+    /// `tick()` to decide whether to fan out `marker_changed`/
+    /// `loop_*`/etc, independent of whether a save is due.
+    revision: u64,
 }
 
 impl TrackMarkers {
@@ -290,6 +301,7 @@ impl TrackMarkers {
             next_marker_id: 1,
             next_region_id: 1,
             dirty: false,
+            revision: 0,
         }
     }
 
@@ -315,6 +327,14 @@ impl TrackMarkers {
 
     pub fn mark_clean(&mut self) {
         self.dirty = false;
+    }
+
+    /// Monotonic, bumped on every mutation (009 C3) — never reset by
+    /// [`Self::mark_clean`], since it tracks "has anything changed since
+    /// I last fanned out an event", not "has anything changed since I
+    /// last saved".
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Crate-internal: reconstruct a loaded state directly from its parts
@@ -346,6 +366,7 @@ impl TrackMarkers {
             next_marker_id,
             next_region_id,
             dirty: false,
+            revision: 0,
         }
     }
 
@@ -459,6 +480,150 @@ impl TrackMarkers {
         });
         self.resort();
         self.dirty = true;
+        self.revision += 1;
+        Ok(id)
+    }
+
+    /// As [`Self::add_point`], for a plugin-created point (009 FR-024):
+    /// `owner`/`transient` are caller-supplied instead of always `Owner::
+    /// Host`/`false`.
+    pub fn add_point_owned(
+        &mut self,
+        pos: u64,
+        owner: Owner,
+        transient: bool,
+    ) -> Result<MarkerId, MarkerError> {
+        if self.markers.len() >= MAX_MARKERS {
+            return Err(MarkerError::LimitReached);
+        }
+        let pos = pos.min(self.len_frames);
+        let id = self.alloc_marker_id();
+        let name = self.default_name_for(MarkerKind::Point);
+        self.markers.push(Marker {
+            id,
+            kind: MarkerKind::Point,
+            position: pos,
+            name,
+            color: PaletteIndex::new(1),
+            owner,
+            transient,
+            visible: true,
+            clamped: false,
+        });
+        self.resort();
+        self.dirty = true;
+        self.revision += 1;
+        Ok(id)
+    }
+
+    /// `CreateLoopRegion` (009 contracts/plugin-api-v1.md §3): both
+    /// endpoints are created together, already owned — unlike the host's
+    /// two-step `set_loop_a`/`set_loop_b`.
+    pub fn new_loop_region_owned(
+        &mut self,
+        a_ms: u64,
+        b_ms: u64,
+        owner: Owner,
+        transient: bool,
+    ) -> Result<RegionId, MarkerError> {
+        if self.markers.len() + 2 > MAX_MARKERS {
+            return Err(MarkerError::LimitReached);
+        }
+        let region_id = self.alloc_region_id();
+        self.regions.push(LoopRegion {
+            id: region_id,
+            a: None,
+            b: None,
+            crossfade_ms: DEFAULT_CROSSFADE_MS,
+            repeat: RepeatCount::Infinite,
+            armed: false,
+            wraps: 0,
+        });
+
+        let a_pos = a_ms.min(self.len_frames);
+        let a_id = self.alloc_marker_id();
+        self.markers.push(Marker {
+            id: a_id,
+            kind: MarkerKind::RegionStart { region: region_id },
+            position: a_pos,
+            name: String::new(),
+            color: PaletteIndex::new(0),
+            owner,
+            transient,
+            visible: true,
+            clamped: false,
+        });
+
+        let b_pos = b_ms.min(self.len_frames);
+        let b_id = self.alloc_marker_id();
+        self.markers.push(Marker {
+            id: b_id,
+            kind: MarkerKind::RegionEnd { region: region_id },
+            position: b_pos,
+            name: String::new(),
+            color: PaletteIndex::new(0),
+            owner,
+            transient,
+            visible: true,
+            clamped: false,
+        });
+
+        if let Some(r) = self.region_mut(region_id) {
+            r.a = Some(a_id);
+            r.b = Some(b_id);
+        }
+        self.current_region = Some(region_id);
+        self.maybe_swap_region_endpoints(region_id);
+        self.resort();
+        self.dirty = true;
+        self.revision += 1;
+        Ok(region_id)
+    }
+
+    /// `SetCue` (009 contracts/plugin-api-v1.md §3): an empty slot
+    /// creates a plugin-owned cue; a slot the same owner already holds
+    /// moves it; a slot another owner holds is refused (`NotOwner`).
+    pub fn set_cue_owned(
+        &mut self,
+        slot: CueSlot,
+        pos: u64,
+        owner: Owner,
+    ) -> Result<MarkerId, MarkerError> {
+        let pos = pos.min(self.len_frames);
+        if let Some(existing) = self
+            .markers
+            .iter_mut()
+            .find(|m| matches!(m.kind, MarkerKind::Cue { slot: s } if s == slot))
+        {
+            if existing.owner != owner {
+                return Err(MarkerError::NotOwner);
+            }
+            existing.position = pos;
+            existing.clamped = false;
+            let id = existing.id;
+            self.resort();
+            self.dirty = true;
+            self.revision += 1;
+            return Ok(id);
+        }
+        if self.markers.len() >= MAX_MARKERS {
+            return Err(MarkerError::LimitReached);
+        }
+        let id = self.alloc_marker_id();
+        self.markers.push(Marker {
+            id,
+            kind: MarkerKind::Cue { slot },
+            position: pos,
+            name: String::new(),
+            color: PaletteIndex::new(2),
+            owner,
+            transient: false,
+            visible: true,
+            clamped: false,
+        });
+        self.resort();
+        self.dirty = true;
+        self.revision += 1;
         Ok(id)
     }
 
@@ -520,6 +685,7 @@ impl TrackMarkers {
         self.maybe_swap_region_endpoints(region_id);
         self.resort();
         self.dirty = true;
+        self.revision += 1;
         Ok((region_id, marker_id))
     }
 
@@ -549,6 +715,7 @@ impl TrackMarkers {
         });
         self.current_region = Some(id);
         self.dirty = true;
+        self.revision += 1;
         id
     }
 
@@ -566,6 +733,7 @@ impl TrackMarkers {
             let id = existing.id;
             self.resort();
             self.dirty = true;
+            self.revision += 1;
             return Ok(id);
         }
         if self.markers.len() >= MAX_MARKERS {
@@ -586,6 +754,7 @@ impl TrackMarkers {
         });
         self.resort();
         self.dirty = true;
+        self.revision += 1;
         Ok(id)
     }
 
@@ -603,6 +772,7 @@ impl TrackMarkers {
         }
         self.resort();
         self.dirty = true;
+        self.revision += 1;
         Ok(())
     }
 
@@ -621,6 +791,7 @@ impl TrackMarkers {
             marker.name = trimmed.chars().take(MAX_NAME_CHARS).collect();
         }
         self.dirty = true;
+        self.revision += 1;
         Ok(())
     }
 
@@ -628,6 +799,7 @@ impl TrackMarkers {
         let marker = self.marker_mut(id).ok_or(MarkerError::NotFound)?;
         marker.color = color;
         self.dirty = true;
+        self.revision += 1;
         Ok(())
     }
 
@@ -635,6 +807,7 @@ impl TrackMarkers {
         let marker = self.marker_mut(id).ok_or(MarkerError::NotFound)?;
         marker.color = marker.color.next();
         self.dirty = true;
+        self.revision += 1;
         Ok(())
     }
 
@@ -671,6 +844,7 @@ impl TrackMarkers {
         }
 
         self.dirty = true;
+        self.revision += 1;
         Ok(())
     }
 
@@ -686,6 +860,7 @@ impl TrackMarkers {
             self.current_region = Some(region);
         }
         self.dirty = true;
+        self.revision += 1;
         Ok(())
     }
 
@@ -718,7 +893,20 @@ impl TrackMarkers {
         }
         self.current_region = Some(region);
         self.dirty = true;
+        self.revision += 1;
         Ok(())
+    }
+
+    /// L7b: disarm the armed region only if `owner` owns it (its `a`
+    /// endpoint's owner — both endpoints of a plugin-created region share
+    /// the same owner); a no-op (and `false`) otherwise.
+    pub fn disarm_if_owned_by(&mut self, owner: Owner) -> bool {
+        if self.armed_region_owner() == Some(owner) {
+            self.disarm();
+            true
+        } else {
+            false
+        }
     }
 
     /// Disarms whichever region is armed, if any (a no-op otherwise).
@@ -727,6 +915,7 @@ impl TrackMarkers {
             r.armed = false;
         }
         self.dirty = true;
+        self.revision += 1;
     }
 
     /// Arm `current_region` if it is disarmed, else disarm it.
@@ -750,6 +939,7 @@ impl TrackMarkers {
         let r = self.region_mut(region).ok_or(MarkerError::NotFound)?;
         r.crossfade_ms = ms.min(50);
         self.dirty = true;
+        self.revision += 1;
         Ok(())
     }
 
@@ -760,6 +950,7 @@ impl TrackMarkers {
             RepeatCount::Times(n) => RepeatCount::times_clamped(n),
         };
         self.dirty = true;
+        self.revision += 1;
         Ok(())
     }
 
@@ -769,6 +960,7 @@ impl TrackMarkers {
         self.regions.clear();
         self.current_region = None;
         self.dirty = true;
+        self.revision += 1;
     }
 
     /// Re-clamps every marker to the new length, flagging `clamped` on
@@ -782,6 +974,7 @@ impl TrackMarkers {
             }
         }
         self.dirty = true;
+        self.revision += 1;
     }
 
     // -- Queries -----------------------------------------------------------
@@ -822,5 +1015,37 @@ impl TrackMarkers {
 
     pub fn position_of(&self, id: MarkerId) -> Option<u64> {
         self.marker(id).map(|m| m.position)
+    }
+
+    /// FR-024/C2: who owns `id`, or `None` if it does not exist
+    /// (`not_found` is the caller's job — existence and ownership are
+    /// deliberately separate checks).
+    pub fn owner_of(&self, id: MarkerId) -> Option<Owner> {
+        self.marker(id).map(|m| m.owner)
+    }
+
+    /// The owner of the currently armed region (its `a` endpoint), if
+    /// any is armed.
+    pub fn armed_region_owner(&self) -> Option<Owner> {
+        let region = self.armed_region()?;
+        region.a.and_then(|id| self.owner_of(id))
+    }
+
+    /// L7c: remove every transient marker/region-endpoint owned by
+    /// `owner` (a plugin's unload/disable/suspend teardown, or a track
+    /// change). Reuses [`Self::delete`]'s own region-cleanup rule, so a
+    /// transient region loses both endpoints atomically.
+    pub fn remove_transient_owned_by(&mut self, owner: Owner) -> usize {
+        let ids: Vec<MarkerId> = self
+            .markers
+            .iter()
+            .filter(|m| m.transient && m.owner == owner)
+            .map(|m| m.id)
+            .collect();
+        let count = ids.len();
+        for id in ids {
+            let _ = self.delete(id);
+        }
+        count
     }
 }

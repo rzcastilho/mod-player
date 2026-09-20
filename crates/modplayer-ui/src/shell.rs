@@ -82,12 +82,6 @@ impl Shell {
     }
 }
 
-/// Plugins placeholder content (`placeholder-plugins`) — the real Plugins
-/// screen is a later slice (Constitution Principle II).
-pub fn plugins_placeholder(ui: &mut Ui) {
-    ui.label(tr("placeholder-plugins"));
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
@@ -120,7 +114,6 @@ mod tests {
 
         let mut output = ctx.run_ui(RawInput::default(), |ui| {
             shell.nav_rail(ui);
-            plugins_placeholder(ui);
             crate::notifications::show(ui, &center);
         });
 

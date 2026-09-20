@@ -23,6 +23,16 @@ use modplayer_audio_source::{Availability, Program, Repeat, TrackId, TrackRef};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct QueueItemId(u64);
 
+impl QueueItemId {
+    /// The raw counter value (009, R21): the plugin-facing gateway id is
+    /// a narrower `u32` — callers at that boundary truncate this
+    /// (queues never approach 2^32 rows in a session).
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 /// Where a `QueueItem` came from (data-model.md §2.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {

@@ -247,3 +247,92 @@ mod no_sample_sink {
         );
     }
 }
+
+/// T064 (009-plugin-runtime-and-permissions, plan.md § Project Structure,
+/// Constitution V): neither new crate exposes sample data. Unlike
+/// `no_sample_sink` above, no allow-list is needed — nothing in either
+/// crate has a legitimate reason to return a raw sample slice, so the
+/// list starts (and should stay) empty.
+mod plugin_no_sample_sink {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    const SCANNED_CRATES: &[&str] = &["modplayer-capability-gateway", "modplayer-plugin-runtime"];
+
+    fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rs_files(&path, out);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// Extracts `(fn_name, signature_text)` for every `pub fn` in
+    /// `content` (mirrors `no_sample_sink::pub_fn_signatures`).
+    fn pub_fn_signatures(content: &str) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        let mut rest = content;
+        while let Some(idx) = rest.find("pub fn ") {
+            let tail = &rest[idx + "pub fn ".len()..];
+            let name_end = tail
+                .find(|c: char| c == '(' || c == '<' || c.is_whitespace())
+                .unwrap_or(tail.len());
+            let name = tail[..name_end].to_string();
+            let sig_end = tail.find(['{', ';']).unwrap_or(tail.len());
+            out.push((name, tail[..sig_end].to_string()));
+            rest = &tail[sig_end.min(tail.len())..];
+        }
+        out
+    }
+
+    #[test]
+    fn plugin_crates_expose_no_sample_sink() {
+        let crates_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap_or_else(|| panic!("CARGO_MANIFEST_DIR has no parent"));
+
+        let mut violations = Vec::new();
+
+        for crate_name in SCANNED_CRATES {
+            let src_dir = crates_dir.join(crate_name).join("src");
+            let mut files = Vec::new();
+            collect_rs_files(&src_dir, &mut files);
+            for file in files {
+                let contents = fs::read_to_string(&file)
+                    .unwrap_or_else(|e| panic!("failed to read {}: {e}", file.display()));
+                let rel_path = file
+                    .strip_prefix(&src_dir)
+                    .unwrap_or(&file)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+
+                for (name, sig) in pub_fn_signatures(&contents) {
+                    let returns_slice = sig.contains("-> &[f32]")
+                        || sig.contains("-> &mut [f32]")
+                        || sig.contains("-> Vec<f32>")
+                        || sig.contains("-> Box<[f32]>");
+                    if returns_slice {
+                        violations.push(format!(
+                            "{crate_name}/src/{rel_path}: `pub fn {name}` returns a raw sample \
+                             slice (Constitution V) — no capability request/event may carry \
+                             sample data"
+                        ));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            violations.is_empty(),
+            "sample-data-exposing public item(s) found in the plugin runtime/gateway crates \
+             (Constitution V, plan.md § Constitution Check):\n{}",
+            violations.join("\n")
+        );
+    }
+}

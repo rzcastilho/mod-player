@@ -83,6 +83,10 @@ allow = [
     "Ubuntu-font-1.0", # epaint_default_fonts' bundled Ubuntu font glyphs
     "CDLA-Permissive-2.0", # webpki-roots (via ureq/rustls, Mozilla root certificate list)
 ]
+# 009-plugin-runtime-and-permissions T007: `mlua`/`mlua-sys`/`luau0-src`
+# (MIT, the Luau scripting VM, research R1) and `log` (MIT OR Apache-2.0,
+# the process-wide logging façade) are both already covered by the "MIT"
+# and "Apache-2.0" entries above — no new allow-list entry needed.
 
 [bans]
 multiple-versions = "warn"

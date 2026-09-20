@@ -1,0 +1,13 @@
+identifier  = "org.modplayer.fixture.throw"
+name        = "Throw fixture"
+description = "Raises a Lua error on every position event."
+version     = "1.0.0"
+api         = "1.0"
+author      = "ModPlayer project"
+license     = "MIT OR Apache-2.0"
+source      = "fixture"
+entry       = "main.luau"
+
+[[permissions.required]]
+permission    = "playback.observe"
+justification = "Needs position events to throw on (research R18)."

@@ -17,6 +17,9 @@ modplayer-secure-store = { path = "../modplayer-secure-store", version = "0.1.0"
 modplayer-audio-source-connect = { path = "../modplayer-audio-source-connect", version = "0.1.0" }
 eframe.workspace = true
 anyhow.workspace = true
+# The one process-wide `log::Log` install, stderr at Info level
+# (009-plugin-runtime-and-permissions, research R19).
+log.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

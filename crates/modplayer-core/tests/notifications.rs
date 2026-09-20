@@ -6,7 +6,7 @@
 
 use std::time::{Duration, Instant};
 
-use modplayer_core::{NotificationCenter, Severity};
+use modplayer_core::{NotificationAction, NotificationCenter, PluginId, Severity};
 
 #[test]
 fn info_auto_dismisses_at_ten_seconds() {
@@ -47,4 +47,57 @@ fn warning_and_critical_persist_until_dismiss_is_called() {
 
     center.dismiss(critical_id);
     assert!(!center.visible().any(|n| n.id == critical_id));
+}
+
+/// 009 L6: `raise_keyed` dismisses any existing *visible* notification
+/// with the same `dedupe_key` first, so a repeat suspension for the same
+/// plugin replaces rather than stacks — mirrors `plugin-suspended:
+/// <identifier>`'s own dedupe key.
+#[test]
+fn raise_keyed_replaces() {
+    let mut center = NotificationCenter::new();
+    let key = "plugin-suspended:org.modplayer.fixture.hang";
+
+    let first = center.raise_keyed(
+        Severity::Warning,
+        "plugin-suspended",
+        vec![
+            ("plugin", "Hang fixture".to_string()),
+            ("cause", "hung".to_string()),
+        ],
+        vec![
+            NotificationAction::RestartPlugin(PluginId(0)),
+            NotificationAction::DisablePlugin(PluginId(0)),
+        ],
+        key,
+    );
+    assert!(center.visible().any(|n| n.id == first));
+
+    let second = center.raise_keyed(
+        Severity::Warning,
+        "plugin-suspended",
+        vec![
+            ("plugin", "Hang fixture".to_string()),
+            ("cause", "hung".to_string()),
+        ],
+        vec![
+            NotificationAction::RestartPlugin(PluginId(0)),
+            NotificationAction::DisablePlugin(PluginId(0)),
+        ],
+        key,
+    );
+
+    assert!(
+        !center.visible().any(|n| n.id == first),
+        "the earlier notification sharing this dedupe key must be dismissed"
+    );
+    assert!(center.visible().any(|n| n.id == second));
+    assert_eq!(
+        center
+            .visible()
+            .filter(|n| n.dedupe_key.as_deref() == Some(key))
+            .count(),
+        1,
+        "a repeat raise_keyed must replace, never stack"
+    );
 }

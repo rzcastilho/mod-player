@@ -14,6 +14,7 @@ use modplayer_core::PlaybackController;
 use modplayer_core::markers::store::{TrackStatePaths, load};
 use modplayer_core::markers::{RegionId, RepeatCount, TrackMarkers};
 use modplayer_core::notifications::{KEY_TRACK_STATE_NEWER_VERSION, KEY_TRACK_STATE_UNREADABLE};
+use modplayer_core::plugins::PluginIdTable;
 use modplayer_core::settings::SettingsStore;
 use modplayer_core::transport::Intent;
 use modplayer_engine::{BufferPreset, DeviceId, FrameCount, SampleRate};
@@ -515,7 +516,13 @@ fn track_change_flushes_disarms_then_loads() {
     // time it returns (mirrors `AnalysisService::shutdown()`'s join).
     controller.shutdown();
     let paths = TrackStatePaths::with_dir(track_state_dir.path());
-    let outcome = load(&paths, &track("a").id, TRACK_RATE, TRACK_LEN_FRAMES);
+    let outcome = load(
+        &paths,
+        &track("a").id,
+        TRACK_RATE,
+        TRACK_LEN_FRAMES,
+        &mut PluginIdTable::new(),
+    );
     assert_eq!(outcome.warning, None);
     assert_eq!(
         outcome.state.count(),
@@ -633,7 +640,13 @@ fn clear_all_writes_empty_state_immediately() {
 
     controller.shutdown();
     let paths = TrackStatePaths::with_dir(track_state_dir.path());
-    let outcome = load(&paths, &track("a").id, TRACK_RATE, TRACK_LEN_FRAMES);
+    let outcome = load(
+        &paths,
+        &track("a").id,
+        TRACK_RATE,
+        TRACK_LEN_FRAMES,
+        &mut PluginIdTable::new(),
+    );
     assert_eq!(outcome.warning, None);
     assert_eq!(
         outcome.state.count(),
@@ -667,7 +680,13 @@ fn sign_out_flushes_and_drops_state_but_keeps_file() {
 
     controller.shutdown();
     let paths = TrackStatePaths::with_dir(track_state_dir.path());
-    let outcome = load(&paths, &track("a").id, TRACK_RATE, TRACK_LEN_FRAMES);
+    let outcome = load(
+        &paths,
+        &track("a").id,
+        TRACK_RATE,
+        TRACK_LEN_FRAMES,
+        &mut PluginIdTable::new(),
+    );
     assert_eq!(outcome.warning, None);
     assert_eq!(
         outcome.state.count(),

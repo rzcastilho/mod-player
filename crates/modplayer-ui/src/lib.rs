@@ -20,6 +20,7 @@ pub mod library_view;
 pub mod markers;
 pub mod notifications;
 pub mod now_playing;
+pub mod plugins_view;
 pub mod privacy_notice;
 pub mod queue_view;
 pub mod rows;

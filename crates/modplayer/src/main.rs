@@ -35,6 +35,35 @@ use modplayer_core::{PlaybackController, SettingsStore};
 use modplayer_secure_store::{EntryName, KeyringSecureStore, SecureStore};
 use modplayer_ui::App;
 
+/// A ≤ 30-line stderr `log::Log` at `Info` level (009 research R19): lets
+/// the manual scenarios read `log::{info,warn,error}!(target:
+/// "plugin:<identifier>", …)` entries (and everything else routed through
+/// the `log` façade) on the terminal. `modplayer_core::plugins::PluginLog`
+/// is the structured, in-memory record the UI/tests read; this is just
+/// the human-readable mirror.
+struct StderrLogger;
+
+impl log::Log for StderrLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            eprintln!(
+                "[{level}] {target}: {args}",
+                level = record.level(),
+                target = record.target(),
+                args = record.args()
+            );
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+static STDERR_LOGGER: StderrLogger = StderrLogger;
+
 /// `ReceiverCredentials` over the OS secure store (design note 5:
 /// "the only read path"; contracts/connect-source.md §1). Reads the same
 /// `SessionCredential` 002's `AccountService` writes/refreshes — this
@@ -57,6 +86,10 @@ impl ReceiverCredentials for SecureStoreCredentials {
 }
 
 fn main() -> anyhow::Result<()> {
+    log::set_logger(&STDERR_LOGGER)
+        .map(|()| log::set_max_level(log::LevelFilter::Info))
+        .unwrap_or(());
+
     let settings_store = SettingsStore::new()
         .context("could not resolve a settings directory (no home directory found)")?;
     let config_dir = settings_store

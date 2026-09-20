@@ -16,6 +16,7 @@ pub mod library;
 pub mod links;
 pub mod markers;
 pub mod notifications;
+pub mod plugins;
 pub mod queue;
 pub mod search;
 pub mod settings;
@@ -41,7 +42,12 @@ pub use effects::{
 pub use i18n::{tr, tr_args};
 pub use library::{Connectivity, LibraryIndex, LibraryStatus, PlayLog, SyncScheduler};
 pub use links::STATUS_PAGE_URL;
+pub use modplayer_capability_gateway::refusal::Refusal;
 pub use notifications::{Notification, NotificationAction, NotificationCenter, Severity};
+pub use plugins::{
+    Health, Lifecycle, PluginHost, PluginId, PluginLog, PluginRecord, PluginRow, PluginsView,
+    Source,
+};
 pub use queue::{
     AdvanceReason, Origin, PlaybackChange, Queue, QueueChange, QueueItem, QueueItemId, QueueMode,
     QueueProgram, QueueRng, XorShiftRng,

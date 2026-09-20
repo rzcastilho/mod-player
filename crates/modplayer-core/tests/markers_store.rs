@@ -18,6 +18,7 @@ use modplayer_core::markers::store::{
 use modplayer_core::markers::{
     CueSlot, MarkerId, MarkerKind, PaletteIndex, RegionId, RepeatCount, TrackMarkers,
 };
+use modplayer_core::plugins::PluginIdTable;
 use proptest::prelude::*;
 
 const RATE: u32 = 44_100;
@@ -217,8 +218,8 @@ proptest! {
         let before = snapshot(&state);
 
         let paths = temp_paths("round-trip");
-        std::fs::write(paths.file_for(&id), encode(&state)).expect("write state");
-        let outcome = load(&paths, &id, RATE, LEN);
+        std::fs::write(paths.file_for(&id), encode(&state, &PluginIdTable::new())).expect("write state");
+        let outcome = load(&paths, &id, RATE, LEN, &mut PluginIdTable::new());
 
         prop_assert_eq!(outcome.warning, None);
         prop_assert_eq!(before, snapshot(&outcome.state));
@@ -249,11 +250,11 @@ fn crash_mid_write_keeps_previous_file() {
     let mut state = TrackMarkers::new(id.clone(), RATE, LEN);
     state.add_point(1_000).unwrap_or_else(|_| unreachable!());
     let path = paths.file_for(&id);
-    std::fs::write(&path, encode(&state)).expect("write previous good file");
+    std::fs::write(&path, encode(&state, &PluginIdTable::new())).expect("write previous good file");
     std::fs::write(path.with_extension("json.tmp"), b"garbage-mid-write")
         .expect("write leftover tmp");
 
-    let outcome = load(&paths, &id, RATE, LEN);
+    let outcome = load(&paths, &id, RATE, LEN, &mut PluginIdTable::new());
 
     assert_eq!(outcome.warning, None);
     assert_eq!(
@@ -268,7 +269,7 @@ fn missing_file_loads_empty_without_warning() {
     let paths = temp_paths("missing");
     let id = track("missing");
 
-    let outcome = load(&paths, &id, RATE, LEN);
+    let outcome = load(&paths, &id, RATE, LEN, &mut PluginIdTable::new());
 
     assert_eq!(outcome.warning, None);
     assert_eq!(outcome.state.count(), 0);
@@ -281,7 +282,7 @@ fn unparseable_loads_empty_with_unreadable() {
     let id = track("unparseable");
     std::fs::write(paths.file_for(&id), b"{ not json").expect("write garbage");
 
-    let outcome = load(&paths, &id, RATE, LEN);
+    let outcome = load(&paths, &id, RATE, LEN, &mut PluginIdTable::new());
 
     assert_eq!(outcome.warning, Some(LoadWarning::Unreadable));
     assert_eq!(outcome.state.count(), 0);
@@ -307,7 +308,7 @@ fn oversize_file_is_unreadable() {
     );
     std::fs::write(paths.file_for(&id), body).expect("write oversize file");
 
-    let outcome = load(&paths, &id, RATE, LEN);
+    let outcome = load(&paths, &id, RATE, LEN, &mut PluginIdTable::new());
 
     assert_eq!(outcome.warning, Some(LoadWarning::Unreadable));
     assert_eq!(outcome.state.count(), 0);
@@ -326,7 +327,7 @@ fn newer_schema_loads_empty_and_is_not_rewritten_until_mutation() {
     )
     .expect("write newer-schema file");
 
-    let outcome = load(&paths, &id, RATE, LEN);
+    let outcome = load(&paths, &id, RATE, LEN, &mut PluginIdTable::new());
 
     assert_eq!(outcome.warning, Some(LoadWarning::NewerSchema));
     assert_eq!(outcome.state.count(), 0);
@@ -373,7 +374,7 @@ fn unknown_keys_ignored_and_out_of_range_clamped() {
     );
     std::fs::write(paths.file_for(&id), body).expect("write");
 
-    let outcome = load(&paths, &id, RATE, len_frames);
+    let outcome = load(&paths, &id, RATE, len_frames, &mut PluginIdTable::new());
 
     assert_eq!(
         outcome.warning, None,
@@ -437,7 +438,7 @@ fn dangling_region_refs_are_repaired() {
     );
     std::fs::write(paths.file_for(&id), body).expect("write");
 
-    let outcome = load(&paths, &id, RATE, LEN);
+    let outcome = load(&paths, &id, RATE, LEN, &mut PluginIdTable::new());
 
     assert_eq!(outcome.warning, None);
     // Ids are crate-internal, so markers are found by the positions they
@@ -486,7 +487,8 @@ fn writer_reports_save_failed_and_leaves_previous_file() {
     let mut previous = TrackMarkers::new(id.clone(), RATE, LEN);
     previous.add_point(500).unwrap_or_else(|_| unreachable!());
     let path = paths.file_for(&id);
-    std::fs::write(&path, encode(&previous)).expect("seed the previous file");
+    std::fs::write(&path, encode(&previous, &PluginIdTable::new()))
+        .expect("seed the previous file");
 
     let dir = path
         .parent()
@@ -508,7 +510,7 @@ fn writer_reports_save_failed_and_leaves_previous_file() {
     job_tx
         .send(PersistJob::Save {
             path: path.clone(),
-            bytes: encode(&next),
+            bytes: encode(&next, &PluginIdTable::new()),
         })
         .expect("send job");
     drop(job_tx);
@@ -523,7 +525,7 @@ fn writer_reports_save_failed_and_leaves_previous_file() {
         event.is_ok()
     );
 
-    let outcome = load(&paths, &id, RATE, LEN);
+    let outcome = load(&paths, &id, RATE, LEN, &mut PluginIdTable::new());
     assert_eq!(outcome.warning, None);
     assert_eq!(outcome.state.count(), 1, "the previous file is untouched");
 }

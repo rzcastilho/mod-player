@@ -1,0 +1,573 @@
+# THE single machine-readable definition of ModPlayer's plugin API
+# (Constitution IX; 009-plugin-runtime-and-permissions, research R6).
+#
+# `build.rs` parses this file into `OUT_DIR/generated.rs` (`Permission`,
+# `RequestKind`, `EventKind`). `tests/api_reference.rs` regenerates and
+# checks `docs/plugin-api/v1.md` against it — that file is never
+# hand-edited. See `specs/009-plugin-runtime-and-permissions/contracts/
+# plugin-api-v1.md` for the human-authored rendering this must match.
+#
+# Any change to this file requires the written change request Constitution
+# IX asks for (see `.github/PULL_REQUEST_TEMPLATE.md`).
+
+# The closed six-code refusal set (FR-008). The `RefusalCode` enum itself
+# is hand-written in `src/refusal.rs` (it is not generated); this list is
+# carried here purely so the generated reference documents it alongside
+# the requests/events that can return it.
+refusal_codes = [
+    "permission_denied",
+    "no_focus",
+    "invalid_state",
+    "not_found",
+    "rate_limited",
+    "budget_exceeded",
+]
+
+[api_version]
+major = 1
+minor = 0
+
+# ---------------------------------------------------------------------------
+# Permission catalog (25 entries; data-model.md §1.1, FR-015)
+# ---------------------------------------------------------------------------
+# `operable = true` marks the 9 permissions this slice actually implements
+# calls for; every other permission is still a valid, grantable catalog
+# entry (a manifest requesting it is not an error) — every call needing it
+# is simply refused at call time until a later slice implements it.
+
+[[permission]]
+name = "playback.observe"
+category = "playback"
+operable = true
+
+[[permission]]
+name = "transport.control"
+category = "transport"
+operable = true
+
+[[permission]]
+name = "queue.write"
+category = "queue"
+operable = true
+
+[[permission]]
+name = "markers.read"
+category = "markers"
+operable = true
+
+[[permission]]
+name = "markers.write"
+category = "markers"
+operable = true
+
+[[permission]]
+name = "audio.effects"
+category = "audio"
+operable = true
+
+[[permission]]
+name = "audio.meter"
+category = "audio"
+operable = true
+
+[[permission]]
+name = "state.plugin"
+category = "state"
+operable = true
+
+[[permission]]
+name = "state.track"
+category = "state"
+operable = true
+
+[[permission]]
+name = "network"
+category = "network"
+operable = false
+
+[[permission]]
+name = "audio.process"
+category = "audio"
+operable = false
+
+[[permission]]
+name = "ui.panel"
+category = "ui"
+operable = false
+
+[[permission]]
+name = "ui.overlay"
+category = "ui"
+operable = false
+
+[[permission]]
+name = "ui.shortcuts"
+category = "ui"
+operable = false
+
+[[permission]]
+name = "ui.settings"
+category = "ui"
+operable = false
+
+[[permission]]
+name = "files.read"
+category = "files"
+operable = false
+
+[[permission]]
+name = "files.write"
+category = "files"
+operable = false
+
+[[permission]]
+name = "midi.observe"
+category = "midi"
+operable = false
+
+[[permission]]
+name = "midi.output"
+category = "midi"
+operable = false
+
+[[permission]]
+name = "clipboard"
+category = "system"
+operable = false
+
+[[permission]]
+name = "library.read"
+category = "library"
+operable = false
+
+[[permission]]
+name = "library.write"
+category = "library"
+operable = false
+
+[[permission]]
+name = "analysis.read"
+category = "analysis"
+operable = false
+
+[[permission]]
+name = "analysis.write"
+category = "analysis"
+operable = false
+
+[[permission]]
+name = "ui.notify"
+category = "ui"
+operable = false
+
+# ---------------------------------------------------------------------------
+# Requests (data-model.md §1.4; contracts/plugin-api-v1.md §3)
+# ---------------------------------------------------------------------------
+# `name` is the generated `RequestKind` variant (PascalCase); `namespace`/
+# `method` are the Lua-facing `api.<namespace>.<method>(...)` path (an
+# empty namespace means a call directly on `api`, e.g. `debug_probe`).
+# `requires` omitted means no permission is needed (only timers and
+# `debug_probe`, per data-model.md §1.1). `category` is one of the five
+# `RateCategory` variants (limiter.rs) that every request — including the
+# locally served ones — is rate-limited under (G5).
+
+[[request]]
+name = "PlaybackSubscribePosition"
+namespace = "playback"
+method = "subscribe_position"
+requires = "playback.observe"
+needs_focus = false
+category = "transport"
+
+[[request]]
+name = "PlaybackState"
+namespace = "playback"
+method = "state"
+requires = "playback.observe"
+needs_focus = false
+category = "transport"
+
+[[request]]
+name = "TransportPlay"
+namespace = "transport"
+method = "play"
+requires = "transport.control"
+needs_focus = true
+category = "transport"
+
+[[request]]
+name = "TransportPause"
+namespace = "transport"
+method = "pause"
+requires = "transport.control"
+needs_focus = true
+category = "transport"
+
+[[request]]
+name = "TransportToggle"
+namespace = "transport"
+method = "toggle"
+requires = "transport.control"
+needs_focus = true
+category = "transport"
+
+[[request]]
+name = "TransportSeek"
+namespace = "transport"
+method = "seek"
+requires = "transport.control"
+needs_focus = true
+category = "transport"
+
+[[request]]
+name = "TransportSkipNext"
+namespace = "transport"
+method = "skip_next"
+requires = "transport.control"
+needs_focus = true
+category = "transport"
+
+[[request]]
+name = "TransportSkipPrevious"
+namespace = "transport"
+method = "skip_previous"
+requires = "transport.control"
+needs_focus = true
+category = "transport"
+
+[[request]]
+name = "TransportRequestFocus"
+namespace = "transport"
+method = "request_focus"
+requires = "transport.control"
+needs_focus = false
+category = "transport"
+
+[[request]]
+name = "TransportReleaseFocus"
+namespace = "transport"
+method = "release_focus"
+requires = "transport.control"
+needs_focus = false
+category = "transport"
+
+[[request]]
+name = "TransportArmLoop"
+namespace = "transport"
+method = "arm_loop"
+requires = "markers.write"
+needs_focus = true
+category = "transport"
+
+[[request]]
+name = "TransportDisarmLoop"
+namespace = "transport"
+method = "disarm_loop"
+requires = "markers.write"
+needs_focus = true
+category = "transport"
+
+[[request]]
+name = "QueueList"
+namespace = "queue"
+method = "list"
+requires = "queue.write"
+needs_focus = false
+category = "transport"
+
+[[request]]
+name = "QueueMove"
+namespace = "queue"
+method = "move"
+requires = "queue.write"
+needs_focus = false
+category = "transport"
+
+[[request]]
+name = "QueueRemove"
+namespace = "queue"
+method = "remove"
+requires = "queue.write"
+needs_focus = false
+category = "transport"
+
+[[request]]
+name = "QueuePlayNext"
+namespace = "queue"
+method = "play_next"
+requires = "queue.write"
+needs_focus = false
+category = "transport"
+
+[[request]]
+name = "QueueAdd"
+namespace = "queue"
+method = "add"
+requires = "queue.write"
+needs_focus = false
+category = "transport"
+
+[[request]]
+name = "ListMarkers"
+namespace = "markers"
+method = "list"
+requires = "markers.read"
+needs_focus = false
+category = "markers"
+
+[[request]]
+name = "CreateMarker"
+namespace = "markers"
+method = "create"
+requires = "markers.write"
+needs_focus = false
+category = "markers"
+
+[[request]]
+name = "MoveMarker"
+namespace = "markers"
+method = "move"
+requires = "markers.write"
+needs_focus = false
+category = "markers"
+
+[[request]]
+name = "RenameMarker"
+namespace = "markers"
+method = "rename"
+requires = "markers.write"
+needs_focus = false
+category = "markers"
+
+[[request]]
+name = "RecolorMarker"
+namespace = "markers"
+method = "recolor"
+requires = "markers.write"
+needs_focus = false
+category = "markers"
+
+[[request]]
+name = "DeleteMarker"
+namespace = "markers"
+method = "delete"
+requires = "markers.write"
+needs_focus = false
+category = "markers"
+
+[[request]]
+name = "CreateLoopRegion"
+namespace = "markers"
+method = "create_loop"
+requires = "markers.write"
+needs_focus = false
+category = "markers"
+
+[[request]]
+name = "SetCue"
+namespace = "markers"
+method = "set_cue"
+requires = "markers.write"
+needs_focus = false
+category = "markers"
+
+[[request]]
+name = "ListChain"
+namespace = "effects"
+method = "list_chain"
+requires = "audio.effects"
+needs_focus = false
+category = "effects"
+
+[[request]]
+name = "CreateNode"
+namespace = "effects"
+method = "create_node"
+requires = "audio.effects"
+needs_focus = false
+category = "effects"
+
+[[request]]
+name = "SetParam"
+namespace = "effects"
+method = "set_param"
+requires = "audio.effects"
+needs_focus = false
+category = "effects"
+
+[[request]]
+name = "ScheduleParam"
+namespace = "effects"
+method = "schedule_param"
+requires = "audio.effects"
+needs_focus = false
+category = "effects"
+
+[[request]]
+name = "SetBypass"
+namespace = "effects"
+method = "bypass"
+requires = "audio.effects"
+needs_focus = false
+category = "effects"
+
+[[request]]
+name = "RemoveNode"
+namespace = "effects"
+method = "remove_node"
+requires = "audio.effects"
+needs_focus = false
+category = "effects"
+
+[[request]]
+name = "StatePluginGet"
+namespace = "state.plugin"
+method = "get"
+requires = "state.plugin"
+needs_focus = false
+category = "state"
+
+[[request]]
+name = "StatePluginSet"
+namespace = "state.plugin"
+method = "set"
+requires = "state.plugin"
+needs_focus = false
+category = "state"
+
+[[request]]
+name = "StatePluginRemove"
+namespace = "state.plugin"
+method = "remove"
+requires = "state.plugin"
+needs_focus = false
+category = "state"
+
+[[request]]
+name = "StateTrackGet"
+namespace = "state.track"
+method = "get"
+requires = "state.track"
+needs_focus = false
+category = "state"
+
+[[request]]
+name = "StateTrackSet"
+namespace = "state.track"
+method = "set"
+requires = "state.track"
+needs_focus = false
+category = "state"
+
+[[request]]
+name = "StateTrackRemove"
+namespace = "state.track"
+method = "remove"
+requires = "state.track"
+needs_focus = false
+category = "state"
+
+[[request]]
+name = "TimersSetTimeout"
+namespace = "timers"
+method = "set_timeout"
+needs_focus = false
+category = "timers"
+
+[[request]]
+name = "TimersSetInterval"
+namespace = "timers"
+method = "set_interval"
+needs_focus = false
+category = "timers"
+
+[[request]]
+name = "TimersScheduleAtPosition"
+namespace = "timers"
+method = "schedule_at_position"
+needs_focus = false
+category = "timers"
+
+[[request]]
+name = "TimersClear"
+namespace = "timers"
+method = "clear"
+needs_focus = false
+category = "timers"
+
+[[request]]
+name = "DebugProbe"
+namespace = ""
+method = "debug_probe"
+needs_focus = false
+category = "transport"
+
+# ---------------------------------------------------------------------------
+# Events (data-model.md §1.5; contracts/plugin-api-v1.md §4)
+# ---------------------------------------------------------------------------
+
+[[event]]
+name = "ReadyAck"
+payload = ["api", "granted", "capabilities"]
+
+[[event]]
+name = "Unloading"
+payload = ["reason"]
+
+[[event]]
+name = "TrackChanged"
+requires = "playback.observe"
+payload = ["track"]
+
+[[event]]
+name = "Position"
+requires = "playback.observe"
+payload = ["position_ms"]
+
+[[event]]
+name = "PlayStateChanged"
+requires = "playback.observe"
+payload = ["state"]
+
+[[event]]
+name = "QueueChanged"
+requires = "playback.observe"
+payload = ["items"]
+
+[[event]]
+name = "MarkerChanged"
+requires = "markers.read"
+payload = ["actor", "revision"]
+
+[[event]]
+name = "LoopArmed"
+requires = "markers.read"
+payload = ["region", "by"]
+
+[[event]]
+name = "LoopDisarmed"
+requires = "markers.read"
+payload = ["by"]
+
+[[event]]
+name = "LoopWrapped"
+requires = "markers.read"
+payload = ["region", "wraps"]
+
+[[event]]
+name = "EffectChainChanged"
+requires = "audio.effects"
+payload = ["nodes"]
+
+[[event]]
+name = "Meter"
+requires = "audio.meter"
+payload = ["pre", "post", "spectrum"]
+
+[[event]]
+name = "Timer"
+payload = ["handle"]
+
+[[event]]
+name = "PositionReached"
+payload = ["handle", "position_ms"]

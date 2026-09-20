@@ -1,0 +1,17 @@
+identifier  = "org.modplayer.fixture.flood"
+name        = "Flood fixture"
+description = "Requests focus then issues 1000 rapid seek calls, to exercise the transport rate limiter."
+version     = "1.0.0"
+api         = "1.0"
+author      = "ModPlayer project"
+license     = "MIT OR Apache-2.0"
+source      = "fixture"
+entry       = "main.luau"
+
+[[permissions.required]]
+permission    = "playback.observe"
+justification = "Needs play_state_changed(playing) as its one-shot trigger (US2 T083)."
+
+[[permissions.required]]
+permission    = "transport.control"
+justification = "Needs request_focus and seek to flood the transport rate-limit window (US2 T083, G5)."

@@ -14,6 +14,9 @@ modplayer-engine = { path = "../modplayer-engine", version = "0.1.0" }
 modplayer-effects = { path = "../modplayer-effects", version = "0.1.0" }
 modplayer-account = { path = "../modplayer-account", version = "0.1.0" }
 modplayer-secure-store = { path = "../modplayer-secure-store", version = "0.1.0" }
+# `Permission::explanation_key` for the Plugins section's permission
+# summary column (009-plugin-runtime-and-permissions).
+modplayer-capability-gateway = { path = "../modplayer-capability-gateway", version = "0.1.0" }
 eframe.workspace = true
 egui.workspace = true
 fluent-templates.workspace = true

@@ -7,6 +7,8 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use modplayer_effects::catalog::PluginId;
+
 /// How long an `Info` notification stays visible before auto-dismissing.
 pub const INFO_AUTO_DISMISS: Duration = Duration::from_secs(10);
 
@@ -94,6 +96,20 @@ pub const KEY_EFFECT_CHAIN_OVER_BUDGET: &str = "effect-chain-over-budget";
 /// tests ahead of 009.
 pub const KEY_EFFECT_CHAIN_AUTO_BYPASSED: &str = "effect-chain-auto-bypassed";
 
+/// FR-011: a plugin was suspended for a fault (009, contracts/
+/// plugin-host-service.md §5). `{ $plugin }` (name), `{ $cause }`
+/// (localised cause); Restart + Disable actions; deduped by
+/// `"plugin-suspended:<identifier>"` so a repeat suspension replaces
+/// rather than stacks, and it is dismissed on the next successful
+/// `ready()` (L4).
+pub const KEY_PLUGIN_SUSPENDED: &str = "plugin-suspended";
+
+/// FR-011: the third suspension within a session auto-disabled the
+/// plugin (009, contracts/plugin-host-service.md §5). `{ $plugin }`; no
+/// actions; deduped by `"plugin-auto-disabled:<identifier>"`, replacing
+/// that plugin's `plugin-suspended` notice.
+pub const KEY_PLUGIN_AUTO_DISABLED: &str = "plugin-auto-disabled";
+
 /// Notification severity (data-model.md §6.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -116,6 +132,11 @@ pub enum NotificationAction {
     OpenStatusPage,
     RetrySource,
     OpenUpgradePage,
+    /// `plugin-suspended`'s "Restart" (009, contracts/plugin-host-
+    /// service.md §5): calls the façade's `plugin_restart(id)`.
+    RestartPlugin(PluginId),
+    /// `plugin-suspended`'s "Disable" (009): calls `plugin_disable(id)`.
+    DisablePlugin(PluginId),
 }
 
 /// A single raised notification. `message_key` is a Fluent key, never raw
@@ -135,6 +156,11 @@ pub struct Notification {
     pub actions: Vec<NotificationAction>,
     pub created_at: Instant,
     pub dismissed: bool,
+    /// A stable key a later raise or explicit dismiss can target (009
+    /// `raise_keyed`/`dismiss_by_dedupe`, e.g.
+    /// `"plugin-suspended:<identifier>"`); `None` for every notification
+    /// raised through the older `raise*` methods.
+    pub dedupe_key: Option<String>,
 }
 
 /// The most action buttons a single notification renders alongside
@@ -213,6 +239,17 @@ impl NotificationCenter {
         args: Vec<(&'static str, String)>,
         actions: Vec<NotificationAction>,
     ) -> u64 {
+        self.raise_full_keyed(severity, message_key, args, actions, None)
+    }
+
+    fn raise_full_keyed(
+        &mut self,
+        severity: Severity,
+        message_key: &'static str,
+        args: Vec<(&'static str, String)>,
+        actions: Vec<NotificationAction>,
+        dedupe_key: Option<String>,
+    ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         self.items.push_front(Notification {
@@ -224,8 +261,39 @@ impl NotificationCenter {
             actions,
             created_at: Instant::now(),
             dismissed: false,
+            dedupe_key,
         });
         id
+    }
+
+    /// Raise a notification identified by `dedupe_key` (009 L6): any
+    /// existing *visible* notification with the same key is dismissed
+    /// first, so a repeat (e.g. a second `plugin-suspended` for the same
+    /// plugin) replaces rather than stacks. Returns the new
+    /// notification's id.
+    pub fn raise_keyed(
+        &mut self,
+        severity: Severity,
+        message_key: &'static str,
+        args: Vec<(&'static str, String)>,
+        actions: Vec<NotificationAction>,
+        dedupe_key: impl Into<String>,
+    ) -> u64 {
+        let dedupe_key = dedupe_key.into();
+        self.dismiss_by_dedupe(&dedupe_key);
+        self.raise_full_keyed(severity, message_key, args, actions, Some(dedupe_key))
+    }
+
+    /// Dismiss every visible notification whose `dedupe_key` matches
+    /// (009 L4's "dismiss `plugin-suspended:<identifier>` on `Ready`", and
+    /// `raise_keyed`'s own replace-not-stack rule). A no-op when none
+    /// match.
+    pub fn dismiss_by_dedupe(&mut self, dedupe_key: &str) {
+        for item in self.items.iter_mut().filter(|n| !n.dismissed) {
+            if item.dedupe_key.as_deref() == Some(dedupe_key) {
+                item.dismissed = true;
+            }
+        }
     }
 
     /// Age out `Info` notifications older than `INFO_AUTO_DISMISS`.

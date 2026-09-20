@@ -16,6 +16,9 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
 use modplayer_audio_source::TrackId;
+use modplayer_capability_gateway::manifest::PluginIdentifier;
+
+use crate::plugins::PluginIdTable;
 
 use super::model::{
     CueSlot, LoopRegion, MAX_MARKERS, Marker, MarkerId, MarkerKind, Owner, PaletteIndex, RegionId,
@@ -136,6 +139,35 @@ fn default_true() -> bool {
     true
 }
 
+/// 009 FR-024: `Owner::Host` -> `"host"`, `Owner::Plugin(id)` -> the
+/// interned identifier string (falling back to `"host"` for an id the
+/// table somehow doesn't know — defensive; should never happen since
+/// every `Owner::Plugin` in a live `TrackMarkers` came from an id this
+/// same table minted).
+fn owner_to_dto(owner: Owner, ids: &PluginIdTable) -> String {
+    match owner {
+        Owner::Host => default_owner(),
+        Owner::Plugin(id) => ids
+            .identifier_of(id)
+            .map(ToString::to_string)
+            .unwrap_or_else(default_owner),
+    }
+}
+
+/// The inverse of [`owner_to_dto`] (data-model.md §4: "owner strings
+/// found in marker files are interned on load", L2). A malformed or
+/// empty string — including every pre-009 file, which never wrote
+/// anything but the default — is `Owner::Host`.
+fn owner_from_dto(owner: &str, ids: &mut PluginIdTable) -> Owner {
+    if owner.is_empty() || owner == "host" {
+        return Owner::Host;
+    }
+    match PluginIdentifier::parse(owner) {
+        Some(identifier) => Owner::Plugin(ids.intern(identifier)),
+        None => Owner::Host,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MarkerDto {
     id: u32,
@@ -149,7 +181,6 @@ struct MarkerDto {
     #[serde(default)]
     color: u32,
     #[serde(default = "default_owner")]
-    #[allow(dead_code)] // round-tripped for forward compatibility only (FR-024)
     owner: String,
     #[serde(default)]
     transient: bool,
@@ -200,7 +231,7 @@ struct TrackStateFile {
     regions: Vec<RegionDto>,
 }
 
-fn marker_to_dto(marker: &Marker) -> MarkerDto {
+fn marker_to_dto(marker: &Marker, ids: &PluginIdTable) -> MarkerDto {
     let kind = match marker.kind {
         MarkerKind::Point => MarkerKindDto::Point,
         MarkerKind::RegionStart { region } => MarkerKindDto::RegionStart {
@@ -217,7 +248,7 @@ fn marker_to_dto(marker: &Marker) -> MarkerDto {
         position: marker.position,
         name: marker.name.clone(),
         color: u32::from(marker.color.get()),
-        owner: default_owner(),
+        owner: owner_to_dto(marker.owner, ids),
         transient: marker.transient,
         visible: marker.visible,
     }
@@ -236,7 +267,32 @@ fn region_to_dto(region: &LoopRegion) -> RegionDto {
     }
 }
 
-fn to_file(state: &TrackMarkers) -> TrackStateFile {
+/// 009 data-model.md §4: transient markers/regions are never written —
+/// they exist only for the life of the session/plugin that created them
+/// (contracts/plugin-api-v1.md §6: "transient ones vanish on track
+/// change and on the plugin's unload").
+fn to_file(state: &TrackMarkers, ids: &PluginIdTable) -> TrackStateFile {
+    let markers: Vec<&Marker> = state.markers().iter().filter(|m| !m.transient).collect();
+    let retained: HashSet<u32> = markers.iter().map(|m| m.id.raw()).collect();
+    let regions: Vec<&LoopRegion> = state
+        .regions()
+        .iter()
+        .filter(|r| {
+            // A region is transient iff it has at least one endpoint and
+            // every endpoint it has is a transient (filtered-out) marker
+            // — both endpoints always share one owner/transience
+            // (`new_loop_region_owned` sets both together). A region with
+            // *no* endpoints yet (`a`/`b` both `None`) is always the
+            // host's own `new_loop_region()` — the plugin path only ever
+            // creates a region with both endpoints already set — so it is
+            // never transient and must not be dropped here.
+            let has_endpoint = r.a.is_some() || r.b.is_some();
+            !has_endpoint
+                || r.a.is_some_and(|id| retained.contains(&id.raw()))
+                || r.b.is_some_and(|id| retained.contains(&id.raw()))
+        })
+        .collect();
+    let region_ids: HashSet<u32> = regions.iter().map(|r| r.id.raw()).collect();
     TrackStateFile {
         schema_version: SCHEMA_VERSION,
         track_id: state.track().to_string(),
@@ -244,9 +300,15 @@ fn to_file(state: &TrackMarkers) -> TrackStateFile {
         len_frames: state.len_frames(),
         next_marker_id: state.next_marker_id_raw(),
         next_region_id: state.next_region_id_raw(),
-        current_region: state.current_region().map(RegionId::raw),
-        markers: state.markers().iter().map(marker_to_dto).collect(),
-        regions: state.regions().iter().map(region_to_dto).collect(),
+        current_region: state
+            .current_region()
+            .map(RegionId::raw)
+            .filter(|id| region_ids.contains(id)),
+        markers: markers.iter().map(|m| marker_to_dto(m, ids)).collect(),
+        regions: regions.iter().map(|r| region_to_dto(r)).collect(),
+        // (both closures receive `&&_` from iterating a `Vec<&_>`;
+        // `marker_to_dto`/`region_to_dto` take `&_` and Rust reborrows
+        // `&&_` -> `&_` automatically at the call site here.)
     }
 }
 
@@ -254,8 +316,8 @@ fn to_file(state: &TrackMarkers) -> TrackStateFile {
 /// fails: every field is already valid (the mutation API enforces it), so
 /// a `serde_json` encode error here would be a bug, not a runtime
 /// condition — falls back to an empty JSON object rather than panicking.
-pub fn encode(state: &TrackMarkers) -> Vec<u8> {
-    serde_json::to_vec(&to_file(state)).unwrap_or_else(|_| b"{}".to_vec())
+pub fn encode(state: &TrackMarkers, ids: &PluginIdTable) -> Vec<u8> {
+    serde_json::to_vec(&to_file(state, ids)).unwrap_or_else(|_| b"{}".to_vec())
 }
 
 /// `rate` differing from `file_rate` rescales (research R12): `pos *
@@ -273,7 +335,13 @@ fn rescale(pos: u64, file_rate: u32, rate: u32) -> u64 {
 /// [`TrackMarkers`] from a parsed file. `id`/`rate`/`len_frames` are the
 /// *current* track identity/rate/length — the file's own `track_id`/
 /// `sample_rate`/`len_frames` are informational only (§4's last rule).
-fn from_file(file: TrackStateFile, id: &TrackId, rate: u32, len_frames: u64) -> TrackMarkers {
+fn from_file(
+    file: TrackStateFile,
+    id: &TrackId,
+    rate: u32,
+    len_frames: u64,
+    ids: &mut PluginIdTable,
+) -> TrackMarkers {
     let file_rate = file.sample_rate;
     let region_ids: HashSet<u32> = file.regions.iter().map(|r| r.id).collect();
 
@@ -314,7 +382,7 @@ fn from_file(file: TrackStateFile, id: &TrackId, rate: u32, len_frames: u64) -> 
             position,
             name: dto.name.clone(),
             color: PaletteIndex::new(u8::try_from(dto.color).unwrap_or(u8::MAX)),
-            owner: Owner::Host,
+            owner: owner_from_dto(&dto.owner, ids),
             transient: dto.transient,
             visible: dto.visible,
             clamped: rescaled > len_frames,
@@ -387,7 +455,13 @@ fn from_file(file: TrackStateFile, id: &TrackId, rate: u32, len_frames: u64) -> 
 /// otherwise every field-level repair in [`from_file`]. `rate`/
 /// `len_frames` are the *current* track's, used both to clamp/flag
 /// positions (FR-018) and to seed the empty fallback.
-pub fn load(paths: &TrackStatePaths, id: &TrackId, rate: u32, len_frames: u64) -> LoadOutcome {
+pub fn load(
+    paths: &TrackStatePaths,
+    id: &TrackId,
+    rate: u32,
+    len_frames: u64,
+    ids: &mut PluginIdTable,
+) -> LoadOutcome {
     let empty = |warning: Option<LoadWarning>, rewrite_allowed: bool| LoadOutcome {
         state: TrackMarkers::new(id.clone(), rate, len_frames),
         warning,
@@ -420,7 +494,7 @@ pub fn load(paths: &TrackStatePaths, id: &TrackId, rate: u32, len_frames: u64) -
         Err(_) => return empty(Some(LoadWarning::Unreadable), true),
     };
     LoadOutcome {
-        state: from_file(file, id, rate, len_frames),
+        state: from_file(file, id, rate, len_frames, ids),
         warning: None,
         rewrite_allowed: true,
     }

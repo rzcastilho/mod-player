@@ -1,11 +1,19 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! `TrackMarkers` model tests (006, data-model.md §1.5).
+//! `TrackMarkers` model tests (006, data-model.md §1.5; owner/transient
+//! deltas per 009 data-model.md §1.5/§4, FR-024, contracts/plugin-host-
+//! service.md §7).
+
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use modplayer_audio_source::TrackId;
+use modplayer_capability_gateway::manifest::PluginIdentifier;
+use modplayer_core::markers::store::{self, TrackStatePaths};
 use modplayer_core::markers::{
-    CueSlot, MAX_MARKERS, MarkerError, MarkerKind, PaletteIndex, TrackMarkers,
+    CueSlot, MAX_MARKERS, MarkerError, MarkerKind, Owner, PaletteIndex, TrackMarkers,
 };
+use modplayer_core::plugins::PluginIdTable;
+use modplayer_effects::catalog::PluginId;
 use proptest::prelude::*;
 
 const RATE: u32 = 44_100;
@@ -420,6 +428,160 @@ fn delete_cue_frees_slot() {
         .unwrap_or_else(|e| unreachable!("{e}"));
     assert_ne!(new_id, id, "a fresh marker, not the deleted one");
     assert_eq!(m.cue(slot).map(|c| c.position), Some(2_000));
+}
+
+fn temp_paths(tag: &str) -> TrackStatePaths {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "modplayer-markers-model-owner-test-{tag}-{}-{}",
+        std::process::id(),
+        unique
+    ));
+    std::fs::create_dir_all(&dir).unwrap_or_else(|e| unreachable!("create temp dir: {e}"));
+    TrackStatePaths::with_dir(dir)
+}
+
+/// 009 data-model.md §4, FR-024: a plugin-owned marker's owner identifier
+/// string round-trips through `encode`/`load` — the *same* identifier is
+/// recovered on the other side of a fresh `PluginIdTable`, even though
+/// the numeric `PluginId` on each side need not match (L2: interned on
+/// load, in whatever order the file's own ids happen to appear).
+#[test]
+fn owner_roundtrip_in_file() {
+    let paths = temp_paths("roundtrip");
+    let identifier = PluginIdentifier::parse("org.modplayer.fixture.wellbehaved")
+        .unwrap_or_else(|| unreachable!());
+    let mut write_ids = PluginIdTable::new();
+    let plugin = write_ids.intern(identifier.clone());
+
+    let mut m = markers();
+    let marker_id = m
+        .add_point_owned(1_000, Owner::Plugin(plugin), false)
+        .unwrap_or_else(|e| unreachable!("{e}"));
+
+    let bytes = store::encode(&m, &write_ids);
+    std::fs::write(paths.file_for(m.track()), &bytes)
+        .unwrap_or_else(|e| unreachable!("write track-state file: {e}"));
+
+    let mut read_ids = PluginIdTable::new();
+    let outcome = store::load(&paths, m.track(), RATE, LEN, &mut read_ids);
+    assert!(
+        outcome.warning.is_none(),
+        "a file this crate just wrote must load without warning"
+    );
+    let loaded_owner = outcome
+        .state
+        .owner_of(marker_id)
+        .unwrap_or_else(|| unreachable!("the marker must still exist"));
+    match loaded_owner {
+        Owner::Plugin(loaded_id) => assert_eq!(
+            read_ids.identifier_of(loaded_id),
+            Some(&identifier),
+            "the identifier string, not the numeric id, is what must round-trip"
+        ),
+        Owner::Host => unreachable!("a plugin-owned marker must not load as Owner::Host"),
+    }
+}
+
+/// 009 data-model.md §4 ("transient markers/regions are never written"):
+/// a transient marker and a transient loop region (both endpoints share
+/// one owner, `new_loop_region_owned`) are absent from the encoded file
+/// and therefore absent after a reload — only the non-transient marker
+/// survives the round trip.
+#[test]
+fn transient_never_encoded() {
+    let paths = temp_paths("transient");
+    let identifier =
+        PluginIdentifier::parse("org.modplayer.fixture.observer").unwrap_or_else(|| unreachable!());
+    let mut write_ids = PluginIdTable::new();
+    let plugin = write_ids.intern(identifier);
+
+    let mut m = markers();
+    let kept = m.add_point(2_000).unwrap_or_else(|e| unreachable!("{e}"));
+    let transient_point = m
+        .add_point_owned(3_000, Owner::Plugin(plugin), true)
+        .unwrap_or_else(|e| unreachable!("{e}"));
+    let transient_region = m
+        .new_loop_region_owned(4_000, 5_000, Owner::Plugin(plugin), true)
+        .unwrap_or_else(|e| unreachable!("{e}"));
+
+    let bytes = store::encode(&m, &write_ids);
+    std::fs::write(paths.file_for(m.track()), &bytes)
+        .unwrap_or_else(|e| unreachable!("write track-state file: {e}"));
+    let mut read_ids = PluginIdTable::new();
+    let outcome = store::load(&paths, m.track(), RATE, LEN, &mut read_ids);
+    assert!(outcome.warning.is_none());
+
+    assert_eq!(
+        outcome.state.count(),
+        1,
+        "only the non-transient marker survives the round trip"
+    );
+    assert!(
+        outcome.state.marker(kept).is_some(),
+        "the non-transient marker is preserved with its own id"
+    );
+    assert!(
+        outcome.state.marker(transient_point).is_none(),
+        "the transient point must not have been written"
+    );
+    assert!(
+        outcome.state.regions().is_empty(),
+        "the transient region (both endpoints transient) must not have been written"
+    );
+    let _ = transient_region; // only its absence from `regions()` matters here.
+}
+
+/// L7c (contracts/plugin-host-service.md §7): `remove_transient_owned_by`
+/// removes only the transient markers/region-endpoints owned by the
+/// given plugin — a host marker, another plugin's transient marker, and
+/// a *non*-transient marker of the same owner are all left untouched;
+/// a transient region loses both endpoints atomically (`delete`'s own
+/// region-cleanup rule) and is removed entirely.
+#[test]
+fn remove_transient_owned_by() {
+    let mut m = markers();
+    let owner_a = Owner::Plugin(PluginId(1));
+    let owner_b = Owner::Plugin(PluginId(2));
+
+    let host_point = m.add_point(1_000).unwrap_or_else(|e| unreachable!("{e}"));
+    let a_transient = m
+        .add_point_owned(2_000, owner_a, true)
+        .unwrap_or_else(|e| unreachable!("{e}"));
+    let a_permanent = m
+        .add_point_owned(2_500, owner_a, false)
+        .unwrap_or_else(|e| unreachable!("{e}"));
+    let b_transient = m
+        .add_point_owned(3_000, owner_b, true)
+        .unwrap_or_else(|e| unreachable!("{e}"));
+    let region = m
+        .new_loop_region_owned(4_000, 5_000, owner_a, true)
+        .unwrap_or_else(|e| unreachable!("{e}"));
+
+    let removed = m.remove_transient_owned_by(owner_a);
+    assert_eq!(
+        removed, 3,
+        "a's transient point plus both transient region endpoints"
+    );
+
+    assert!(m.marker(host_point).is_some(), "host marker untouched");
+    assert!(
+        m.marker(a_permanent).is_some(),
+        "a's non-transient marker untouched"
+    );
+    assert!(
+        m.marker(b_transient).is_some(),
+        "b's transient marker belongs to a different owner"
+    );
+    assert!(
+        m.marker(a_transient).is_none(),
+        "a's transient point is gone"
+    );
+    assert!(
+        m.region(region).is_none(),
+        "the transient region is removed entirely, both endpoints having been owned by a"
+    );
 }
 
 proptest! {

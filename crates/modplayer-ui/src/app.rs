@@ -14,6 +14,7 @@
 //! `privacy_notice.rs`); `SignIn` still renders a placeholder naming the
 //! step until US2 (Phase 4) lands its screen.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use egui::{Align2, Area, CentralPanel, Id, OpenUrl, Panel, Ui, vec2};
@@ -40,7 +41,7 @@ use crate::sign_in::{self, SignInScreen, TierResult};
 use crate::ticker::Ticker;
 use crate::waveform::WaveformState;
 use crate::welcome::{self, WelcomeScreen};
-use crate::{notifications, now_playing, search_view, settings, theme};
+use crate::{notifications, now_playing, plugins_view, search_view, settings, theme};
 
 /// Upper bound between UI frames while the app is running (≈ 30 Hz).
 const REPAINT_INTERVAL: Duration = Duration::from_millis(33);
@@ -146,6 +147,12 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
         // the permission has to be set here too, from whatever `launch()`
         // already resolved.
         apply_account_permission(&mut controller, &account);
+
+        // 009 US4 (T106, contracts/plugin-host-service.md §1): a plugin
+        // thread's own admitted request wakes the UI promptly by calling
+        // this instead of waiting for the next scheduled repaint.
+        let waker_ctx = cc.egui_ctx.clone();
+        controller.set_waker(Arc::new(move || waker_ctx.request_repaint()));
 
         let ticker = Ticker::spawn(cc.egui_ctx.clone());
 
@@ -274,6 +281,16 @@ impl<B: OutputBackend, H: SourceHost> eframe::App for App<B, H> {
                 }
                 NotificationAction::OpenUpgradePage => {
                     ctx.open_url(OpenUrl::new_tab(UPGRADE_URL));
+                }
+                // 009 US1 (T075)/US4 (T108): `plugin-suspended`'s Restart/
+                // Disable actions.
+                NotificationAction::RestartPlugin(plugin_id) => {
+                    self.controller.notifications_mut().dismiss(id);
+                    self.controller.plugin_restart(plugin_id);
+                }
+                NotificationAction::DisablePlugin(plugin_id) => {
+                    self.controller.notifications_mut().dismiss(id);
+                    self.controller.plugin_disable(plugin_id);
                 }
             }
         }
@@ -509,7 +526,13 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
                 &mut self.artwork,
                 &mut self.waveform,
             ),
-            Section::Plugins => crate::shell::plugins_placeholder(ui),
+            // 009 US4 (T106, contracts/ui-plugins.md §2): a 500 ms repaint
+            // request keeps the live CPU/memory gauges moving while the
+            // section is visible, on top of the global ≥ 30 Hz loop above.
+            Section::Plugins => {
+                ui.ctx().request_repaint_after(Duration::from_millis(500));
+                plugins_view::show(ui, &mut self.controller);
+            }
             Section::Settings => {
                 let (device_check, events) = settings::show(
                     ui,

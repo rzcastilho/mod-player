@@ -1881,3 +1881,94 @@ fn controls_tab_order_is_filter_then_reset_all() {
         "the filter box must precede \"Reset all to defaults\" in the reading/Tab order"
     );
 }
+
+// -- Plugins (009-plugin-runtime-and-permissions, US4, T110; contracts/
+// ui-plugins.md §4) ----------------------------------------------------
+
+/// `MODPLAYER_PLUGIN_FIXTURES`/`MODPLAYER_PLUGIN_STATE_DIR` are process-
+/// global, so every `PlaybackController::new` in this binary that sets
+/// them must be serialized against every other's brief mutation (mirrors
+/// `tests/plugins_view.rs`'s own `PLUGIN_ENV_LOCK`).
+static PLUGIN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A controller that has discovered every `plugins/fixtures/` package,
+/// not yet `launch()`ed (every fixture starts `Disabled`, which is enough
+/// to walk every control the Plugins section renders per row — the
+/// checkbox, the health/permissions/CPU/memory labels — without spawning
+/// any real plugin thread).
+fn fixture_controller_for_a11y(
+    label: &str,
+) -> (PlaybackController<FakeBackend, ScriptedHost>, TempDir) {
+    let (store, dir) = fresh_store(label);
+    let plugin_state_dir = TempDir::new(&format!("{label}-plugin-state"));
+    let controller = {
+        let _guard = PLUGIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Safety: narrowly scopes each mutation to the one synchronous
+        // read `PlaybackController::new` makes of it, serialized against
+        // every other test in this binary via the lock above.
+        unsafe {
+            std::env::set_var("MODPLAYER_PLUGIN_FIXTURES", "1");
+            std::env::set_var("MODPLAYER_PLUGIN_STATE_DIR", plugin_state_dir.path());
+        }
+        let controller =
+            PlaybackController::new(FakeBackend::new(vec![]), ScriptedHost::new(), store);
+        unsafe {
+            std::env::remove_var("MODPLAYER_PLUGIN_FIXTURES");
+            std::env::remove_var("MODPLAYER_PLUGIN_STATE_DIR");
+        }
+        controller
+    };
+    (controller, dir)
+}
+
+/// Every control the Plugins section renders — the per-row enable
+/// `Role::CheckBox` (including the invalid fixture's inert one), the
+/// health/source/CPU/memory `Role::Label`s, and the section's own empty-
+/// state label — exposes a non-empty accessible name, and the checkbox
+/// carries the row's own plugin name rather than a bare "Enable"
+/// (contracts/ui-plugins.md §4).
+#[test]
+fn plugins_section_controls_named() {
+    let (mut controller, _dir) = fixture_controller_for_a11y("plugins-section");
+    let nodes = render_nodes(|ui| modplayer_ui::plugins_view::show(ui, &mut controller));
+
+    let checkboxes: Vec<_> = nodes.iter().filter(|n| n.role == Role::CheckBox).collect();
+    // 8 fixtures (`plugins/bundled/` is empty this slice) => 8 toggles.
+    assert_eq!(
+        checkboxes.len(),
+        8,
+        "expected one toggle per fixture: {nodes:?}"
+    );
+    for checkbox in &checkboxes {
+        let name = checkbox
+            .accessible_name()
+            .expect("every enable toggle must have a non-empty accessible name");
+        assert!(
+            name.starts_with("Enable ") && name.len() > "Enable ".len(),
+            "the toggle's name must carry the plugin's own name, got `{name}`"
+        );
+    }
+    // The invalid fixture's toggle is inert and unchecked; every other
+    // fixture defaults to enabled.
+    let invalid_toggle = checkboxes
+        .iter()
+        .find(|c| {
+            c.accessible_name()
+                .is_some_and(|name| name.contains("org.modplayer.fixture.invalid"))
+        })
+        .unwrap_or_else(|| panic!("invalid fixture's toggle not found: {nodes:?}"));
+    assert!(invalid_toggle.disabled);
+    assert_eq!(invalid_toggle.toggled, Some(Toggled::False));
+
+    // No plugin is `Active` pre-launch, so every health label reads `ok`
+    // (the 7 valid fixtures) — each a real, non-empty accessible name,
+    // never a bare colour dot.
+    let ok_labels = find_all(&nodes, Role::Label, &tr("plugins-health-ok"));
+    assert_eq!(
+        ok_labels.len(),
+        7,
+        "expected 7 `ok` health labels: {nodes:?}"
+    );
+}

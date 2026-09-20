@@ -7,9 +7,10 @@
 //! controller stays a thin adapter and this is fully unit-testable
 //! without a running `Processor`.
 
+use modplayer_capability_gateway::manifest::SuggestedPosition;
 use modplayer_effects::catalog::{
-    self, ModeState, NodeKind, NodeOwner, ParamId, ParamShape, QualityMode, mode_after_user_set,
-    mode_after_value_change,
+    self, ModeState, NodeKind, NodeOwner, ParamId, ParamShape, PluginId, QualityMode,
+    mode_after_user_set, mode_after_value_change,
 };
 use modplayer_effects::consts::MAX_NODES;
 use modplayer_engine::Command;
@@ -24,6 +25,15 @@ impl NodeId {
     #[must_use]
     pub const fn as_u32(self) -> u32 {
         self.0
+    }
+
+    /// Crate-internal: reconstructs a `NodeId` from its cross-boundary
+    /// `u32` form (009 `plugins::apply`'s `SetParam`/`ScheduleParam`/
+    /// `SetBypass`/`RemoveNode`, US2 T086) — never exposed outside the
+    /// crate, since a fresh `NodeId` is otherwise only ever handed out by
+    /// [`ChainModel::add_at`].
+    pub(crate) const fn from_raw(id: u32) -> Self {
+        Self(id)
     }
 }
 
@@ -72,6 +82,11 @@ pub struct ChainModel {
     free_slots: u16,
     next_id: u32,
     source_rate: u32,
+    /// Bumped on add/remove/move/bypass/auto-bypass/orphan/readopt (009
+    /// C3) — the controller compares this against its own last-seen
+    /// value once per `tick()` to decide whether to fan out
+    /// `effect_chain_changed`.
+    revision: u64,
 }
 
 /// `kind`'s catalog position of `id`, or `None` if `kind` has no such
@@ -100,7 +115,14 @@ impl ChainModel {
             free_slots: u16::MAX,
             next_id: 0,
             source_rate,
+            revision: 0,
         }
+    }
+
+    /// Monotonic, bumped on every structural/ownership change (009 C3).
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
     }
 
     fn allocate_slot(&mut self) -> Option<u8> {
@@ -124,10 +146,25 @@ impl ChainModel {
     }
 
     /// G1: `Err(Full)` beyond `MAX_NODES`, model and slot set unchanged.
+    /// Appends at the end — equivalent to `add_at(kind, owner,
+    /// self.nodes().len())`.
     pub fn add(
         &mut self,
         kind: NodeKind,
         owner: NodeOwner,
+    ) -> Result<(NodeId, Vec<Command>), ChainError> {
+        self.add_at(kind, owner, self.nodes.len())
+    }
+
+    /// As [`Self::add`], but inserts at `index` (clamped to the current
+    /// length) instead of always appending — the plugin `create_node`
+    /// path (009 contracts/plugin-api-v1.md §3), via
+    /// [`Self::resolve_position`].
+    pub fn add_at(
+        &mut self,
+        kind: NodeKind,
+        owner: NodeOwner,
+        index: usize,
     ) -> Result<(NodeId, Vec<Command>), ChainError> {
         if self.nodes.len() >= MAX_NODES {
             return Err(ChainError::Full);
@@ -145,23 +182,27 @@ impl ChainModel {
                 mode: QualityMode::Performance,
                 auto_switched: false,
             });
-        let position = self.nodes.len() as u8;
-        self.nodes.push(NodeModel {
-            id,
-            slot,
-            kind,
-            owner,
-            params,
-            bypassed: false,
-            auto_bypassed: false,
-            mode_state,
-            orphaned: false,
-        });
+        let position = index.min(self.nodes.len());
+        self.nodes.insert(
+            position,
+            NodeModel {
+                id,
+                slot,
+                kind,
+                owner,
+                params,
+                bypassed: false,
+                auto_bypassed: false,
+                mode_state,
+                orphaned: false,
+            },
+        );
+        self.revision += 1;
         Ok((
             id,
             vec![Command::ChainInsert {
                 slot,
-                position,
+                position: position as u8,
                 kind,
                 owner,
             }],
@@ -172,6 +213,7 @@ impl ChainModel {
         let idx = self.find(id)?;
         let node = self.nodes.remove(idx);
         self.release_slot(node.slot);
+        self.revision += 1;
         Ok(vec![Command::ChainRemove { slot: node.slot }])
     }
 
@@ -184,6 +226,7 @@ impl ChainModel {
         let node = self.nodes.remove(cur);
         let slot = node.slot;
         self.nodes.insert(target, node);
+        self.revision += 1;
         Ok(vec![Command::ChainMove {
             slot,
             position: target as u8,
@@ -210,6 +253,7 @@ impl ChainModel {
         if !bypassed {
             node.auto_bypassed = false;
         }
+        self.revision += 1;
         Ok(vec![Command::ChainSetBypass {
             slot: node.slot,
             bypassed,
@@ -324,6 +368,89 @@ impl ChainModel {
         if let Some(node) = self.nodes.iter_mut().find(|n| n.slot == slot) {
             node.bypassed = true;
             node.auto_bypassed = true;
+            self.revision += 1;
+        }
+    }
+
+    /// L7e (009 FR-012 order): mark every node `owner` owns as orphaned —
+    /// it keeps running with its last parameters, the RT is untouched.
+    /// Returns the affected ids for the caller's own bookkeeping (e.g.
+    /// deciding whether anything changed).
+    pub fn orphan_owned_by(&mut self, owner: PluginId) -> Vec<NodeId> {
+        let mut affected = Vec::new();
+        for node in &mut self.nodes {
+            if node.owner == NodeOwner::Plugin(owner) && !node.orphaned {
+                node.orphaned = true;
+                affected.push(node.id);
+            }
+        }
+        if !affected.is_empty() {
+            self.revision += 1;
+        }
+        affected
+    }
+
+    /// L4: when `owner` calls `ready()` again, re-adopt every node it
+    /// still owns (ids and owner unchanged — only the `orphaned` flag
+    /// clears; contracts/plugin-api-v1.md §6).
+    pub fn readopt(&mut self, owner: PluginId) -> Vec<NodeId> {
+        let mut affected = Vec::new();
+        for node in &mut self.nodes {
+            if node.owner == NodeOwner::Plugin(owner) && node.orphaned {
+                node.orphaned = false;
+                affected.push(node.id);
+            }
+        }
+        if !affected.is_empty() {
+            self.revision += 1;
+        }
+        affected
+    }
+
+    /// C2: who owns `id`, or `None` if it does not exist.
+    #[must_use]
+    pub fn owned_by(&self, id: NodeId) -> Option<NodeOwner> {
+        self.nodes.iter().find(|n| n.id == id).map(|n| n.owner)
+    }
+
+    /// This kind's wire name, exactly as `plugin.toml`'s `[[effect_nodes]]`
+    /// and `create_node`'s `kind` argument spell it (contracts/
+    /// manifest.md §2, plugin-api-v1.md §3). `pub(crate)`: also
+    /// `PlaybackController::fan_out_revision_events`'s own `NodeInfo.kind`
+    /// projection (US2 T087).
+    #[must_use]
+    pub(crate) const fn wire_name(kind: NodeKind) -> &'static str {
+        match kind {
+            NodeKind::PitchShift => "pitch_shift",
+            NodeKind::TimeStretch => "time_stretch",
+            NodeKind::Gain => "gain",
+            NodeKind::Equalizer => "equalizer",
+            NodeKind::Filter => "filter",
+            NodeKind::StereoTools => "stereo_tools",
+        }
+    }
+
+    /// Resolves a manifest/`create_node` suggested position against the
+    /// *current* chain (data-model.md §1.2): `Index(n)` clamps to
+    /// `0..=len()`; `Before`/`After` match the first node whose kind's
+    /// wire name equals the given string, falling back to the end of the
+    /// chain when no such node exists (the position is only ever a
+    /// suggestion).
+    #[must_use]
+    pub fn resolve_position(&self, suggested: &SuggestedPosition) -> usize {
+        let len = self.nodes.len();
+        match suggested {
+            SuggestedPosition::Index(index) => (*index).min(len),
+            SuggestedPosition::Before(name) => self
+                .nodes
+                .iter()
+                .position(|n| Self::wire_name(n.kind) == name)
+                .unwrap_or(len),
+            SuggestedPosition::After(name) => self
+                .nodes
+                .iter()
+                .position(|n| Self::wire_name(n.kind) == name)
+                .map_or(len, |i| i + 1),
         }
     }
 

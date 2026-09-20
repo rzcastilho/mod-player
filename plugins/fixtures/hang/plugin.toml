@@ -1,0 +1,13 @@
+identifier  = "org.modplayer.fixture.hang"
+name        = "Hang fixture"
+description = "Hangs forever inside its play_state_changed handler."
+version     = "1.0.0"
+api         = "1.0"
+author      = "ModPlayer project"
+license     = "MIT OR Apache-2.0"
+source      = "fixture"
+entry       = "main.luau"
+
+[[permissions.required]]
+permission    = "playback.observe"
+justification = "Needs play_state_changed to hang in (research R18)."

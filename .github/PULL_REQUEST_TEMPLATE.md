@@ -29,3 +29,7 @@ If this PR does not touch the real-time path, write "N/A — no real-time path c
 - [ ] `cargo test --workspace`
 - [ ] `cargo deny check`
 - [ ] `scripts/check-license-headers.sh`
+- [ ] If this PR changes `crates/modplayer-capability-gateway/api/v1.toml`, a written
+      change request is included above (Constitution IX): what changed, why, and — for
+      a removal — the major version bump, 6-month deprecation window, migration guide,
+      and compatibility layer it requires.

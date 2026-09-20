@@ -814,7 +814,11 @@ pub fn refusal_key(error: modplayer_core::markers::MarkerError) -> &'static str 
         modplayer_core::markers::MarkerError::RegionIncomplete => "loop-region-incomplete",
         modplayer_core::markers::MarkerError::RegionTooShort => "loop-region-too-short",
         modplayer_core::markers::MarkerError::NotFound
-        | modplayer_core::markers::MarkerError::NoTrack => "markers-status",
+        | modplayer_core::markers::MarkerError::NoTrack
+        // 009: only a plugin `Request` can hit this (ownership check on a
+        // marker/region it doesn't own) — no host keyboard shortcut can
+        // produce it, but the match must stay exhaustive.
+        | modplayer_core::markers::MarkerError::NotOwner => "markers-status",
     }
 }
 
