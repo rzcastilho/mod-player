@@ -21,7 +21,9 @@ use mlua::{Lua, LuaSerdeExt, Table, Value};
 
 use modplayer_capability_gateway::api::{API_VERSION, HOST_CAPABILITIES, RequestKind};
 use modplayer_capability_gateway::refusal::Refusal;
-use modplayer_capability_gateway::request::{MarkerInfo, NodeInfo, OwnerInfo, Request, Response};
+use modplayer_capability_gateway::request::{
+    MarkerInfo, NodeInfo, OwnerInfo, RegionInfo, Request, Response,
+};
 
 use crate::context::Shared;
 use crate::handle::RpcEnvelope;
@@ -90,6 +92,28 @@ fn marker_info_to_lua(lua: &Lua, info: &MarkerInfo) -> mlua::Result<Table> {
     Ok(table)
 }
 
+/// 012-section-loop-plugin (data-model.md §1.3, contract
+/// plugin-api-v1.3.md §3.3): `a`/`b` absent when `nil` (an incomplete
+/// region), `repeat` a Lua number or the literal string `"infinite"`.
+fn region_info_to_lua(lua: &Lua, info: &RegionInfo) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set("id", info.id.0)?;
+    table.set("owner", owner_to_string(&info.owner))?;
+    table.set("a", info.a.map(|m| m.0))?;
+    table.set("b", info.b.map(|m| m.0))?;
+    table.set(
+        "repeat",
+        match info.repeat {
+            modplayer_capability_gateway::request::RepeatArg::Times(n) => Value::Integer(n.into()),
+            modplayer_capability_gateway::request::RepeatArg::Infinite => {
+                Value::String(lua.create_string("infinite")?)
+            }
+        },
+    )?;
+    table.set("armed", info.armed)?;
+    Ok(table)
+}
+
 fn node_info_to_lua(lua: &Lua, info: &NodeInfo) -> mlua::Result<Table> {
     let table = lua.create_table()?;
     table.set("id", info.id.0)?;
@@ -110,7 +134,11 @@ pub fn response_to_lua(lua: &Lua, response: Response) -> mlua::Result<Value> {
         Response::MarkerId(id) => Value::Integer(i64::from(id.0)),
         Response::RegionId(id) => Value::Integer(i64::from(id.0)),
         Response::NodeId(id) => Value::Integer(i64::from(id.0)),
-        Response::Markers { markers, armed } => {
+        Response::Markers {
+            markers,
+            armed,
+            regions,
+        } => {
             let table = lua.create_table()?;
             let list = lua.create_table()?;
             for (i, marker) in markers.iter().enumerate() {
@@ -118,6 +146,17 @@ pub fn response_to_lua(lua: &Lua, response: Response) -> mlua::Result<Value> {
             }
             table.set("markers", list)?;
             table.set("armed", armed.map(|r| i64::from(r.0)))?;
+            let region_list = lua.create_table()?;
+            for (i, region) in regions.iter().enumerate() {
+                region_list.set(i + 1, region_info_to_lua(lua, region)?)?;
+            }
+            table.set("regions", region_list)?;
+            Value::Table(table)
+        }
+        Response::LoopEndpoint { region, marker } => {
+            let table = lua.create_table()?;
+            table.set("region", region.0)?;
+            table.set("marker", marker.0)?;
             Value::Table(table)
         }
         Response::Chain(nodes) => {
@@ -264,6 +303,7 @@ pub fn dispatch(
             Ok(Response::Markers {
                 markers: snapshot.markers.clone(),
                 armed: snapshot.armed_region,
+                regions: snapshot.regions.clone(),
             })
         }
         RequestKind::ListChain => {

@@ -542,9 +542,13 @@ fn policy_combo_persists_selection() {
     assert_eq!(controller.focus_policy(), FocusPolicy::FirstRequestWins);
 }
 
-/// With no plugin discovered at all, the panel shows the empty state and
-/// the holder label reads "host" (contracts/ui-transport-panel.md §2
-/// "empty state").
+/// With no fixture discovered and Section Loop — the only bundled
+/// package, and (012) the only one that ever requests
+/// `transport.control` here — disabled, the panel shows the empty state
+/// and the holder label reads "host" (contracts/ui-transport-panel.md §2
+/// "empty state"). Section Loop discovers and goes `Active` regardless of
+/// fixtures (research R5), so with it left enabled the panel always lists
+/// its row; disabling it is the only way to reach this state now.
 #[test]
 fn empty_state_when_no_eligible_plugin() {
     let (store, _dir) = fresh_store("empty-state");
@@ -558,6 +562,13 @@ fn empty_state_when_no_eligible_plugin() {
         PlaybackController::new(FakeBackend::new(vec![]), ScriptedHost::new(), store)
     };
     controller.launch();
+
+    let section_loop = controller_plugin_id(&mut controller, "org.modplayer.section-loop");
+    assert!(
+        wait_active(&mut controller, section_loop),
+        "Section Loop must reach Active before it can be disabled"
+    );
+    controller.plugin_disable(section_loop);
 
     let ctx = Context::default();
     ctx.enable_accesskit();

@@ -31,7 +31,7 @@ use modplayer_capability_gateway::event::{HostEvent, PlayState, TrackInfo, Unloa
 use modplayer_capability_gateway::request::{
     MarkerId as GatewayMarkerId, MarkerInfo as GatewayMarkerInfo, NodeId as GatewayNodeId,
     NodeInfo as GatewayNodeInfo, OwnerInfo, QueueItemId as GatewayQueueItemId, QueueItemInfo,
-    RegionId as GatewayRegionId,
+    RegionId as GatewayRegionId, RegionInfo as GatewayRegionInfo, RepeatArg as GatewayRepeatArg,
 };
 use modplayer_effects::catalog::{NodeKind, NodeOwner, ParamId, QualityMode};
 use modplayer_engine::{
@@ -155,6 +155,36 @@ fn marker_info(
         transient: marker.transient,
         region,
         slot,
+    }
+}
+
+/// `region`, as a plugin sees it via `markers.list().regions`
+/// (012-section-loop-plugin, data-model.md §1.3/§2.5, contract
+/// plugin-api-v1.3.md §3.3): owner of `a`, else of `b` (both endpoints of
+/// a region always share an owner, research R2), falling back to `Host`
+/// for the theoretical empty region (no endpoint yet — never actually
+/// observable outside the model, since `new_loop_region` alone is never
+/// exposed to a plugin).
+fn region_info(
+    region: &markers::LoopRegion,
+    model: &TrackMarkers,
+    ids: &crate::plugins::PluginIdTable,
+) -> GatewayRegionInfo {
+    let owner = region
+        .a
+        .or(region.b)
+        .and_then(|id| model.owner_of(id))
+        .unwrap_or(markers::Owner::Host);
+    GatewayRegionInfo {
+        id: GatewayRegionId(region.id.raw()),
+        owner: owner_info(owner, ids),
+        a: region.a.map(|id| GatewayMarkerId(id.raw())),
+        b: region.b.map(|id| GatewayMarkerId(id.raw())),
+        repeat: match region.repeat {
+            RepeatCount::Infinite => GatewayRepeatArg::Infinite,
+            RepeatCount::Times(n) => GatewayRepeatArg::Times(n),
+        },
+        armed: region.armed,
     }
 }
 
@@ -2039,7 +2069,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         }
 
         let ids = self.plugins.id_table();
-        let (markers, armed_region) = match &self.markers {
+        let (markers, armed_region, regions) = match &self.markers {
             Some(m) => {
                 let rate = m.sample_rate();
                 let markers = m
@@ -2050,9 +2080,10 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
                 let armed = m
                     .armed_region()
                     .map(|region| GatewayRegionId(region.id.raw()));
-                (markers, armed)
+                let regions = m.regions().iter().map(|r| region_info(r, m, ids)).collect();
+                (markers, armed, regions)
             }
-            None => (Vec::new(), None),
+            None => (Vec::new(), None, Vec::new()),
         };
         let chain: Vec<GatewayNodeInfo> = self
             .chain
@@ -2083,6 +2114,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.markers = markers;
             guard.armed_region = armed_region;
+            guard.regions = regions;
             guard.chain = chain;
             guard.queue = queue_items.clone();
             guard.marker_revision = marker_revision;
@@ -2476,6 +2508,30 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
             .new_loop_region_owned(a, b, owner, transient)?;
         self.last_marker_actor = owner;
         Ok(id)
+    }
+
+    /// `plugins::apply`'s own `SetLoopEndpoint` handler (012-section-
+    /// loop-plugin, data-model.md §2.2, contract plugin-api-v1.3.md §3.1):
+    /// the plugin-side twin of the host's `I`/`O` — `region = None` starts
+    /// a fresh caller-owned region holding only `which_a`; `Some(region)`
+    /// creates or moves that endpoint on an already-owned region (ownership
+    /// itself is `apply.rs::require_owner`'s job, checked before this is
+    /// ever called). An armed region whose endpoint moves re-commits
+    /// without resetting wraps, exactly like the host's own edit path.
+    pub(crate) fn plugin_set_loop_endpoint(
+        &mut self,
+        region: Option<RegionId>,
+        which_a: bool,
+        position_ms: u64,
+        owner: crate::markers::Owner,
+    ) -> Result<(RegionId, MarkerId), MarkerError> {
+        let frames = self.ms_to_frames(u32::try_from(position_ms).unwrap_or(u32::MAX));
+        let (region_id, marker_id) = self
+            .current_markers_mut()?
+            .set_loop_endpoint_owned(region, which_a, frames, owner)?;
+        self.recommit_if_armed(region_id);
+        self.last_marker_actor = owner;
+        Ok((region_id, marker_id))
     }
 
     // -- 011-plugin-ui-contributions: the controller façade for the five
@@ -3953,6 +4009,17 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
     /// `QueueChanged` (row 3's "any `QueueChange`").
     fn fan_out_plugin_playback_events(&mut self, is_queue_changed: bool) {
         let now = self.now();
+        // 012-section-loop-plugin (FR-007): `api.playback.state()`'s local
+        // dispatch (`PlaybackState`) reads this same atomic snapshot's own
+        // `source_rate`/`intent` fields — kept in sync with the real
+        // transport here on every tick (cheap atomic stores) rather than
+        // only when a `PlayStateChanged` event happens to fire below, so a
+        // plugin's very first `playback.state()` call (before any change
+        // has ever fanned out) already sees the real rate/intent instead
+        // of their `0`/`Stopped` defaults.
+        self.plugins
+            .playback_snapshot()
+            .set_source_rate(self.source_sample_rate);
         let current_track_id = self.queue.current().map(|item| item.track.id.clone());
         if current_track_id != self.plugin_last_track {
             self.plugin_last_track = current_track_id;
@@ -3989,6 +4056,13 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
                 Intent::Paused => PlayState::Paused,
                 Intent::Stopped => PlayState::Stopped,
             };
+            self.plugins
+                .playback_snapshot()
+                .set_intent(match self.plugin_last_intent {
+                    Intent::Playing => modplayer_plugin_runtime::events::PlaySnapshotState::Playing,
+                    Intent::Paused => modplayer_plugin_runtime::events::PlaySnapshotState::Paused,
+                    Intent::Stopped => modplayer_plugin_runtime::events::PlaySnapshotState::Stopped,
+                });
             self.plugins
                 .fan_out(&HostEvent::PlayStateChanged { state }, now);
         }

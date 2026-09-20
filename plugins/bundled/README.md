@@ -21,10 +21,14 @@ time via `include_str!` (`crates/modplayer-core/src/plugins/bundled.rs`);
 there is no runtime filesystem read and no install/uninstall action —
 `can_uninstall` is always `false` for a bundled plugin (FR-013).
 
-This slice (009-plugin-runtime-and-permissions) ships **no production
-plugin** here — Section Loop and Key & Tempo are 001-mvp/012 and 013 and
-will be added as sibling folders once built against the public API this
-slice defines. Until then this directory holds only this README.
+Packages currently shipped here:
+
+- `org.modplayer.section-loop` — Section Loop (012-section-loop-plugin):
+  A/B loop marking, gapless repeat, and cue navigation for hands-free
+  drilling of a track section.
+
+Key & Tempo (013) will be added as a sibling folder once built against
+the public API this slice defines.
 
 The eight test-only fixture packages used to exercise and demonstrate
 this slice live under `../fixtures/` instead (discovered only when

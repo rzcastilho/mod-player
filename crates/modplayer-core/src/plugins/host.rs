@@ -116,7 +116,20 @@ fn build_records(
     if fixtures_enabled {
         packages.extend(bundled::fixtures());
     }
+    records_from_packages(packages, ids, log)
+}
 
+/// The package-parsing half of [`build_records`], taking the package
+/// list directly rather than deriving it from [`bundled::packages`] /
+/// [`bundled::fixtures`] — 012-section-loop-plugin (research R5): lets
+/// [`PluginHost::discover_packages`] exercise the zero-package empty
+/// state without needing an actually-empty `bundled::packages()`, which
+/// now always yields at least Section Loop.
+fn records_from_packages(
+    packages: Vec<BundledPackage>,
+    ids: &mut PluginIdTable,
+    log: &mut PluginLog,
+) -> Vec<PluginRecord> {
     let mut records: Vec<PluginRecord> = packages
         .into_iter()
         .filter_map(|package| {
@@ -199,6 +212,29 @@ impl PluginHost {
         let mut ids = PluginIdTable::new();
         let mut log = PluginLog::new();
         let records = build_records(fixtures_enabled, &mut ids, &mut log);
+        Self::from_records(records, ids, log, fixtures_enabled)
+    }
+
+    /// Test-only discovery entry point (012-section-loop-plugin, research
+    /// R5): parses exactly the given `packages`, bypassing
+    /// [`bundled::packages`]/[`bundled::fixtures`] entirely. Exists so the
+    /// zero-row empty state (009 FR-023) stays exercised now that the real
+    /// `bundled::packages()` always yields at least Section Loop — pass
+    /// `Vec::new()` for that case. Not used by any non-test caller.
+    #[must_use]
+    pub fn discover_packages(packages: Vec<BundledPackage>) -> Self {
+        let mut ids = PluginIdTable::new();
+        let mut log = PluginLog::new();
+        let records = records_from_packages(packages, &mut ids, &mut log);
+        Self::from_records(records, ids, log, false)
+    }
+
+    fn from_records(
+        records: Vec<PluginRecord>,
+        ids: PluginIdTable,
+        log: PluginLog,
+        fixtures_enabled: bool,
+    ) -> Self {
         let (requests_tx, requests_rx) = std::sync::mpsc::sync_channel(256);
         let (events_tx, events_rx) = std::sync::mpsc::sync_channel(1024);
         Self {

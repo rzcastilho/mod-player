@@ -140,6 +140,52 @@ fn notify_refused_at_validation_still_counts() {
     assert_eq!(err.reason, "rate_limited");
 }
 
+// -- 012-section-loop-plugin: loop endpoint/repeat requests (contract
+// plugin-api-v1.3.md §7) ---------------------------------------------------
+
+#[test]
+fn set_loop_endpoint_requires_markers_write() {
+    let mut gw = gateway_with(None, FocusToken::new());
+    let err = gw
+        .admit(RequestKind::SetLoopEndpoint, Instant::now())
+        .unwrap_err();
+    assert_eq!(err.reason, "not_granted");
+
+    let mut gw = gateway_with(Some(Permission::MarkersWrite), FocusToken::new());
+    gw.admit(RequestKind::SetLoopEndpoint, Instant::now())
+        .expect("granted, no focus needed");
+}
+
+#[test]
+fn set_loop_repeat_requires_markers_write() {
+    let mut gw = gateway_with(None, FocusToken::new());
+    let err = gw
+        .admit(RequestKind::SetLoopRepeat, Instant::now())
+        .unwrap_err();
+    assert_eq!(err.reason, "not_granted");
+
+    let mut gw = gateway_with(Some(Permission::MarkersWrite), FocusToken::new());
+    gw.admit(RequestKind::SetLoopRepeat, Instant::now())
+        .expect("granted, no focus needed");
+}
+
+#[test]
+fn loop_endpoint_calls_never_need_focus() {
+    // Unlike `TransportArmLoop`/`TransportDisarmLoop`, these are region
+    // metadata edits (like `move`/`set_cue`) — no focus token is ever
+    // consulted, and neither call is refused `no_focus`.
+    assert!(!RequestKind::SetLoopEndpoint.needs_focus());
+    assert!(!RequestKind::SetLoopRepeat.needs_focus());
+
+    let focus = FocusToken::new();
+    let mut gw = gateway_with(Some(Permission::MarkersWrite), focus);
+    // Focus is not held by anyone, yet both calls are still admitted.
+    gw.admit(RequestKind::SetLoopEndpoint, Instant::now())
+        .expect("no_focus never produced");
+    gw.admit(RequestKind::SetLoopRepeat, Instant::now())
+        .expect("no_focus never produced");
+}
+
 #[test]
 fn ui_category_101st_in_window() {
     let gw_focus = FocusToken::new();

@@ -10,14 +10,20 @@ use std::time::Duration;
 use modplayer_audio_io::{FakeBackend, FakeDevice};
 use modplayer_audio_source::{Availability, SourceCommand, SourceEvent, TrackId, TrackRef};
 use modplayer_audio_source_synthetic::{ScriptedHost, ScriptedHostHandle};
+use modplayer_capability_gateway::refusal::{Refusal, RefusalCode};
+use modplayer_capability_gateway::request::{
+    LoopEndpoint, MarkerId as GatewayMarkerId, RegionInfo as GatewayRegionInfo, RepeatArg, Request,
+    Response,
+};
 use modplayer_core::PlaybackController;
 use modplayer_core::markers::store::{TrackStatePaths, load};
 use modplayer_core::markers::{RegionId, RepeatCount, TrackMarkers};
 use modplayer_core::notifications::{KEY_TRACK_STATE_NEWER_VERSION, KEY_TRACK_STATE_UNREADABLE};
-use modplayer_core::plugins::PluginIdTable;
+use modplayer_core::plugins::{PluginId, PluginIdTable, to_gateway_id};
 use modplayer_core::settings::SettingsStore;
 use modplayer_core::transport::Intent;
 use modplayer_engine::{BufferPreset, DeviceId, FrameCount, SampleRate};
+use modplayer_plugin_runtime::handle::RpcEnvelope;
 
 /// A track's default duration in source-rate frames (`track()`'s
 /// `180_000` ms at `fake_device`'s 44.1 kHz).
@@ -216,6 +222,35 @@ fn arm_small_region_with_repeat(
     controller.seek_frames(a);
     let _ = controller.backend_mut().render_buffers(1); // let the setters/commit/seek land
     (region, a)
+}
+
+/// 012-section-loop-plugin (data-model.md §2.3, contract
+/// plugin-api-v1.3.md §7): submits `request` from `plugin` straight to
+/// `drain_plugin_requests()` (C1), bypassing the gateway's own admission
+/// entirely — mirrors `controller_plugins_permissions.rs`'s own `call()`,
+/// for `plugins::apply`'s `SetLoopEndpoint`/`SetLoopRepeat` ownership
+/// logic and the regions snapshot, both reachable with no real Lua thread
+/// on either side.
+fn call(
+    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+    plugin: PluginId,
+    request: Request,
+) -> Result<Response, Refusal> {
+    let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+    let envelope = RpcEnvelope {
+        plugin: to_gateway_id(plugin),
+        request,
+        reply: reply_tx,
+    };
+    controller
+        .plugins_mut()
+        .debug_requests_sender()
+        .send(envelope)
+        .unwrap_or_else(|_| unreachable!("the request channel must accept a synthetic envelope"));
+    controller.tick();
+    reply_rx
+        .try_recv()
+        .unwrap_or_else(|_| unreachable!("drain_plugin_requests must always reply (C1)"))
 }
 
 /// `arm_loop` derives and pushes the engine's setters + `LoopCommit`
@@ -745,4 +780,268 @@ fn warnings_raised_once_per_load() {
         1,
         "track b's own (different) warning, also raised exactly once"
     );
+}
+
+// -- 012-section-loop-plugin (data-model.md §2.2/§2.3/§2.5, contract
+// plugin-api-v1.3.md §3, §7) -------------------------------------------
+
+/// `apply.rs`'s `SetLoopEndpoint` arm (data-model.md §2.3): a region
+/// created by one plugin (`region = None`) refuses a second plugin's
+/// attempt to complete it with `permission_denied`/`not_owner` — existence
+/// and ownership stay separate checks (C2), exactly as every other owned
+/// mutation.
+#[test]
+fn plugin_endpoint_not_owner() {
+    let (mut controller, _handle, _dir) = ready_controller();
+    controller.set_playback_permitted(true, None);
+    controller.queue_replace(vec![track("a")]);
+    controller.play();
+    controller.tick();
+
+    let plugin_a = PluginId(1);
+    let plugin_b = PluginId(2);
+
+    let response = call(
+        &mut controller,
+        plugin_a,
+        Request::SetLoopEndpoint {
+            region: None,
+            which: LoopEndpoint::A,
+            position_ms: 0,
+        },
+    )
+    .unwrap_or_else(|e| unreachable!("plugin_a's own region create must succeed: {e:?}"));
+    let region = match response {
+        Response::LoopEndpoint { region, .. } => region,
+        other => unreachable!("expected Response::LoopEndpoint, got {other:?}"),
+    };
+
+    let err = call(
+        &mut controller,
+        plugin_b,
+        Request::SetLoopEndpoint {
+            region: Some(region),
+            which: LoopEndpoint::B,
+            position_ms: 1,
+        },
+    )
+    .expect_err("a different plugin must not complete another plugin's region");
+    assert_eq!(err.code, RefusalCode::PermissionDenied);
+    assert_eq!(err.reason, "not_owner");
+
+    // And a `SetLoopRepeat` on the same region from the non-owner refuses
+    // the same way.
+    let err2 = call(
+        &mut controller,
+        plugin_b,
+        Request::SetLoopRepeat {
+            region,
+            repeat: RepeatArg::Times(4),
+        },
+    )
+    .expect_err("a different plugin must not set another plugin's repeat count");
+    assert_eq!(err2.code, RefusalCode::PermissionDenied);
+    assert_eq!(err2.reason, "not_owner");
+}
+
+/// `apply.rs`'s `SetLoopEndpoint` arm, `region = None` path (data-model.md
+/// §2.3): creating a brand-new endpoint at the 64-marker limit refuses
+/// `invalid_state`/`marker_limit` — moving is never refused (contract
+/// plugin-api-v1.3.md §3.1's refusal table), only tested at the model
+/// layer (`markers_model.rs::set_loop_endpoint_owned_moves_existing`).
+#[test]
+fn plugin_endpoint_marker_limit() {
+    let (mut controller, _handle, _dir) = ready_controller();
+    controller.set_playback_permitted(true, None);
+    controller.queue_replace(vec![track("a")]);
+    controller.play();
+    controller.tick();
+
+    for i in 0..64 {
+        controller
+            .add_point_marker()
+            .unwrap_or_else(|e| unreachable!("point {i}: {e}"));
+    }
+    assert_eq!(controller.markers().map(|m| m.count()), Some(64));
+
+    let plugin = PluginId(1);
+    let err = call(
+        &mut controller,
+        plugin,
+        Request::SetLoopEndpoint {
+            region: None,
+            which: LoopEndpoint::A,
+            position_ms: 0,
+        },
+    )
+    .expect_err("creating a new endpoint at the limit must refuse");
+    assert_eq!(err.code, RefusalCode::InvalidState);
+    assert_eq!(err.reason, "marker_limit");
+}
+
+/// `SetLoopRepeat` on an armed, plugin-owned region re-commits at the next
+/// buffer boundary without resetting the wrap count (contract
+/// plugin-api-v1.3.md §3.2, mirrors the host's own `edit_armed_region_
+/// recommits_without_resetting_wraps`).
+#[test]
+fn plugin_repeat_recommits_armed_without_wrap_reset() {
+    let (mut controller, _handle, _dir) = ready_controller();
+    controller.set_playback_permitted(true, None);
+    controller.queue_replace(vec![track("a")]);
+    controller.play();
+    controller.tick();
+
+    let plugin = PluginId(1);
+    call(
+        &mut controller,
+        plugin,
+        Request::RequestFocus { interaction: true },
+    )
+    .unwrap_or_else(|e| unreachable!("request_focus: {e:?}"));
+
+    let r1 = call(
+        &mut controller,
+        plugin,
+        Request::SetLoopEndpoint {
+            region: None,
+            which: LoopEndpoint::A,
+            position_ms: 0,
+        },
+    )
+    .unwrap_or_else(|e| unreachable!("set A: {e:?}"));
+    let region = match r1 {
+        Response::LoopEndpoint { region, .. } => region,
+        other => unreachable!("expected Response::LoopEndpoint, got {other:?}"),
+    };
+    call(
+        &mut controller,
+        plugin,
+        Request::SetLoopEndpoint {
+            region: Some(region),
+            which: LoopEndpoint::B,
+            position_ms: 1,
+        },
+    )
+    .unwrap_or_else(|e| unreachable!("set B: {e:?}"));
+    call(&mut controller, plugin, Request::ArmLoop { region })
+        .unwrap_or_else(|e| unreachable!("arm_loop: {e:?}"));
+
+    let mut wraps_before = 0;
+    for _ in 0..200 {
+        let _ = controller.backend_mut().render_buffers(1);
+        wraps_before = controller.shared().loop_wraps();
+        if wraps_before >= 3 {
+            break;
+        }
+    }
+    assert!(wraps_before >= 3, "wraps_before={wraps_before}");
+
+    call(
+        &mut controller,
+        plugin,
+        Request::SetLoopRepeat {
+            region,
+            repeat: RepeatArg::Times(50),
+        },
+    )
+    .unwrap_or_else(|e| unreachable!("set_loop_repeat: {e:?}"));
+    let _ = controller.backend_mut().render_buffers(1);
+
+    assert!(
+        controller.shared().loop_wraps() >= wraps_before,
+        "an edit-while-armed must not reset the wrap count"
+    );
+    assert_ne!(
+        controller.shared().loop_state(),
+        0,
+        "still armed after the edit"
+    );
+}
+
+/// `markers.list()`'s `regions` field (data-model.md §2.5, contract
+/// plugin-api-v1.3.md §3.3): the published `PluginSnapshot.regions`
+/// tracks a plugin-owned region's completeness, arm state and repeat
+/// count as each changes.
+#[test]
+fn snapshot_regions_track_arm_and_repeat() {
+    let (mut controller, _handle, _dir) = ready_controller();
+    controller.set_playback_permitted(true, None);
+    controller.queue_replace(vec![track("a")]);
+    controller.play();
+    controller.tick();
+
+    let plugin = PluginId(1);
+    call(
+        &mut controller,
+        plugin,
+        Request::RequestFocus { interaction: true },
+    )
+    .unwrap_or_else(|e| unreachable!("request_focus: {e:?}"));
+
+    let r1 = call(
+        &mut controller,
+        plugin,
+        Request::SetLoopEndpoint {
+            region: None,
+            which: LoopEndpoint::A,
+            position_ms: 0,
+        },
+    )
+    .unwrap_or_else(|e| unreachable!("set A: {e:?}"));
+    let (region, a_marker) = match r1 {
+        Response::LoopEndpoint { region, marker } => (region, marker),
+        other => unreachable!("expected Response::LoopEndpoint, got {other:?}"),
+    };
+
+    fn regions_snapshot(
+        controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+    ) -> Vec<GatewayRegionInfo> {
+        controller
+            .plugins_mut()
+            .snapshot()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .regions
+            .clone()
+    }
+
+    let after_a = regions_snapshot(&mut controller);
+    let entry = after_a
+        .iter()
+        .find(|r| r.id == region)
+        .unwrap_or_else(|| unreachable!("the A-only region must be in the snapshot"));
+    assert_eq!(entry.a, Some(GatewayMarkerId(a_marker.0)));
+    assert_eq!(entry.b, None, "incomplete: no B yet");
+    assert!(!entry.armed);
+
+    call(
+        &mut controller,
+        plugin,
+        Request::SetLoopEndpoint {
+            region: Some(region),
+            which: LoopEndpoint::B,
+            position_ms: 1,
+        },
+    )
+    .unwrap_or_else(|e| unreachable!("set B: {e:?}"));
+    call(&mut controller, plugin, Request::ArmLoop { region })
+        .unwrap_or_else(|e| unreachable!("arm_loop: {e:?}"));
+    call(
+        &mut controller,
+        plugin,
+        Request::SetLoopRepeat {
+            region,
+            repeat: RepeatArg::Times(7),
+        },
+    )
+    .unwrap_or_else(|e| unreachable!("set_loop_repeat: {e:?}"));
+
+    let after = regions_snapshot(&mut controller);
+    let entry = after
+        .iter()
+        .find(|r| r.id == region)
+        .unwrap_or_else(|| unreachable!("the region must still be in the snapshot"));
+    assert!(entry.b.is_some(), "now complete");
+    assert!(entry.armed, "now armed");
+    assert_eq!(entry.repeat, RepeatArg::Times(7));
 }

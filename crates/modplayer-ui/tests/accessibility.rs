@@ -1936,14 +1936,16 @@ fn plugins_section_controls_named() {
     let nodes = render_nodes(|ui| modplayer_ui::plugins_view::show(ui, &mut controller));
 
     let checkboxes: Vec<_> = nodes.iter().filter(|n| n.role == Role::CheckBox).collect();
-    // 16 fixtures (`plugins/bundled/` is empty this slice;
-    // 010-transport-focus adds `focus-a`/`focus-b`; 011-plugin-ui-
-    // contributions adds `ui-panel`/`ui-shortcuts`/`ui-overlay`/
-    // `ui-icons`/`ui-settings`/`ui-notify`, T115) => 16 toggles.
+    // 16 fixtures (010-transport-focus adds `focus-a`/`focus-b`;
+    // 011-plugin-ui-contributions adds `ui-panel`/`ui-shortcuts`/
+    // `ui-overlay`/`ui-icons`/`ui-settings`/`ui-notify`, T115) + 1
+    // bundled package (012-section-loop-plugin: Section Loop discovers
+    // regardless of `MODPLAYER_PLUGIN_FIXTURES`, research R5) => 17
+    // toggles.
     assert_eq!(
         checkboxes.len(),
-        16,
-        "expected one toggle per fixture: {nodes:?}"
+        17,
+        "expected one toggle per fixture/bundled package: {nodes:?}"
     );
     for checkbox in &checkboxes {
         let name = checkbox
@@ -1967,13 +1969,13 @@ fn plugins_section_controls_named() {
     assert_eq!(invalid_toggle.toggled, Some(Toggled::False));
 
     // No plugin is `Active` pre-launch, so every health label reads `ok`
-    // (the 15 valid fixtures) — each a real, non-empty accessible name,
-    // never a bare colour dot.
+    // (the 15 valid fixtures + Section Loop, the one bundled package) —
+    // each a real, non-empty accessible name, never a bare colour dot.
     let ok_labels = find_all(&nodes, Role::Label, &tr("plugins-health-ok"));
     assert_eq!(
         ok_labels.len(),
-        15,
-        "expected 15 `ok` health labels: {nodes:?}"
+        16,
+        "expected 16 `ok` health labels: {nodes:?}"
     );
 }
 
@@ -2266,8 +2268,12 @@ fn transport_panel_controls_expose_accessible_names_and_states() {
 }
 
 /// The empty state (contracts/ui-transport-panel.md §2: "no plugin can
-/// hold transport focus") when no fixture is discovered at all — its own
-/// non-empty accessible name.
+/// hold transport focus") when no fixture is discovered and Section
+/// Loop — the only bundled package, and (012) the only one that ever
+/// requests `transport.control` here — is disabled: its own non-empty
+/// accessible name. Section Loop discovers and goes `Active` regardless
+/// of fixtures (research R5), so with it left enabled `view.rows` is
+/// never empty; disabling it is the only way to reach this state now.
 #[test]
 fn transport_panel_empty_state_exposes_its_accessible_name() {
     let (store, _dir) = fresh_store("transport-panel-empty");
@@ -2284,6 +2290,13 @@ fn transport_panel_empty_state_exposes_its_accessible_name() {
         PlaybackController::new(FakeBackend::new(vec![]), ScriptedHost::new(), store)
     };
     controller.launch();
+
+    let section_loop = plugin_id_by_identifier(&mut controller, "org.modplayer.section-loop");
+    assert!(
+        wait_plugin_active(&mut controller, section_loop),
+        "Section Loop must reach Active before it can be disabled"
+    );
+    controller.plugin_disable(section_loop);
 
     let nodes = render_nodes(|ui| modplayer_ui::transport_view::show(ui, &mut controller));
     let empty = find_one(&nodes, Role::Label, &tr("transport-empty"));

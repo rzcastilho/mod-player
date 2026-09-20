@@ -18,8 +18,8 @@ use modplayer_capability_gateway::focus::{FocusToken, PluginId};
 use modplayer_capability_gateway::grants::Grants;
 use modplayer_capability_gateway::manifest::{self, ApiRange};
 use modplayer_capability_gateway::request::{
-    MarkerId as GatewayMarkerId, NodeId as GatewayNodeId, RegionId as GatewayRegionId, Request,
-    Response,
+    LoopEndpoint, MarkerId as GatewayMarkerId, NodeId as GatewayNodeId, OwnerInfo,
+    RegionId as GatewayRegionId, RegionInfo, RepeatArg, Request, Response,
 };
 use modplayer_capability_gateway::state::PluginStatePaths;
 use modplayer_engine::RtShared;
@@ -97,6 +97,48 @@ fn spawn_test_plugin(
         requests: requests_tx,
         events: events_tx,
         snapshot: Arc::new(Mutex::new(PluginSnapshot::default())),
+        writer: None,
+        paths: None::<PluginStatePaths>,
+    };
+    (PluginHandle::spawn(config, deps), events_rx, requests_rx)
+}
+
+/// Like [`spawn_test_plugin`], but seeds the shared `PluginSnapshot` up
+/// front — for `list_markers_exposes_regions`, which reads `markers.
+/// list()`'s locally-served `regions` field with no RPC in flight.
+#[allow(clippy::type_complexity)]
+fn spawn_test_plugin_with_snapshot(
+    entry_source: &str,
+    grants: Grants,
+    snapshot: PluginSnapshot,
+) -> (
+    PluginHandle,
+    Receiver<(PluginId, RuntimeEvent)>,
+    Receiver<RpcEnvelope>,
+) {
+    let (requests_tx, requests_rx) = std::sync::mpsc::sync_channel::<RpcEnvelope>(64);
+    let (events_tx, events_rx) = std::sync::mpsc::sync_channel(256);
+    let focus = FocusToken::new();
+    focus.set_holder(Some(PluginId(1)));
+    let config = SpawnConfig {
+        id: PluginId(1),
+        identifier: "org.modplayer.test.bindings".to_string(),
+        entry_source: entry_source.to_string(),
+        api_range: ApiRange {
+            major: 1,
+            min_minor: 0,
+        },
+        grants,
+        budgets: Budgets::DEFAULT,
+        focus,
+        fixtures_enabled: false,
+    };
+    let deps = RuntimeDeps {
+        shared: Arc::new(RtShared::new()),
+        playback: Arc::new(PlaybackSnapshot::new()),
+        requests: requests_tx,
+        events: events_tx,
+        snapshot: Arc::new(Mutex::new(snapshot)),
         writer: None,
         paths: None::<PluginStatePaths>,
     };
@@ -366,7 +408,7 @@ fn identity_fields_have_the_contract_shape() {
         logs.contains(&"granted:playback.observe,state.plugin".to_string()),
         "logs: {logs:?}"
     );
-    assert!(logs.contains(&"version:1.2".to_string()), "logs: {logs:?}");
+    assert!(logs.contains(&"version:1.3".to_string()), "logs: {logs:?}");
     assert!(
         logs.contains(&"capabilities_has_timers:true".to_string()),
         "logs: {logs:?}"
@@ -617,6 +659,164 @@ fn ready_is_true_once_then_false_with_refusal() {
     );
     assert!(
         logs.contains(&"second:nil:table".to_string()),
+        "logs: {logs:?}"
+    );
+}
+
+// -- 012-section-loop-plugin (contract plugin-api-v1.3.md §7) --------------
+
+/// `which` is validated on the plugin thread, before the RPC (data-model.md
+/// §1.2/§3): a bad value never reaches the RPC channel and comes back
+/// `nil, { code = "invalid_state", reason = "invalid_argument" }`, while a
+/// good `"a"`/`"b"` does cross as `Request::SetLoopEndpoint`.
+#[test]
+fn set_loop_endpoint_which_validated() {
+    let entry = r#"
+        api.on("ready_ack", function(_event)
+            local ok, err = api.markers.set_loop_endpoint(nil, "x", 62000)
+            api.log.info("bad:" .. tostring(ok) .. ":" .. tostring(err.code) .. "/" .. tostring(err.reason))
+
+            local r, err2 = api.markers.set_loop_endpoint(nil, "a", 62000)
+            api.log.info("good:" .. tostring(r ~= nil) .. ":" .. tostring(err2))
+        end)
+        api.ready()
+    "#;
+    let (_handle, events, requests) = spawn_test_plugin(entry, grants_with(&["markers.write"]));
+    wait_for_ready(&events);
+
+    // The bad call never touches the RPC channel at all.
+    let envelope = requests
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap_or_else(|e| unreachable!("the valid call never reached the RPC channel: {e}"));
+    assert!(
+        matches!(
+            envelope.request,
+            Request::SetLoopEndpoint {
+                which: LoopEndpoint::A,
+                ..
+            }
+        ),
+        "expected Request::SetLoopEndpoint{{which: A, ..}}, got {:?}",
+        envelope.request
+    );
+    let _ = envelope.reply.send(Ok(Response::LoopEndpoint {
+        region: GatewayRegionId(3),
+        marker: GatewayMarkerId(7),
+    }));
+    assert!(
+        requests.try_recv().is_err(),
+        "the bad `which` call must never reach the RPC channel"
+    );
+
+    let logs = drain_logs(&events, Duration::from_secs(1));
+    assert!(
+        logs.contains(&"bad:nil:invalid_state/invalid_argument".to_string()),
+        "logs: {logs:?}"
+    );
+    assert!(
+        logs.contains(&"good:true:nil".to_string()),
+        "logs: {logs:?}"
+    );
+}
+
+/// `repeat` is exact — `1..=1000` or `"infinite"`, never clamped
+/// (data-model.md §1.2, contract §3.2): `0`, `1001`, a fraction and any
+/// other string are all refused on the plugin thread before any RPC.
+#[test]
+fn set_loop_repeat_range_exact() {
+    let entry = r#"
+        api.on("ready_ack", function(_event)
+            local function bad(v)
+                local ok, err = api.markers.set_loop_repeat(1, v)
+                api.log.info("bad:" .. tostring(v) .. ":" .. tostring(ok) .. ":" .. tostring(err.code) .. "/" .. tostring(err.reason))
+            end
+            bad(0)
+            bad(1001)
+            bad(2.5)
+            bad("forever")
+
+            local ok1 = api.markers.set_loop_repeat(1, 4)
+            api.log.info("times:" .. tostring(ok1))
+            local ok2 = api.markers.set_loop_repeat(1, "infinite")
+            api.log.info("infinite:" .. tostring(ok2))
+        end)
+        api.ready()
+    "#;
+    let (_handle, events, requests) = spawn_test_plugin(entry, grants_with(&["markers.write"]));
+    wait_for_ready(&events);
+
+    for _ in 0..2 {
+        let envelope = requests
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or_else(|e| unreachable!("a valid repeat call never reached the RPC: {e}"));
+        assert!(
+            matches!(envelope.request, Request::SetLoopRepeat { .. }),
+            "expected Request::SetLoopRepeat, got {:?}",
+            envelope.request
+        );
+        let _ = envelope.reply.send(Ok(Response::Ok));
+    }
+    assert!(
+        requests.try_recv().is_err(),
+        "the four invalid `repeat` calls must never reach the RPC channel"
+    );
+
+    let logs = drain_logs(&events, Duration::from_secs(1));
+    for v in ["0", "1001", "2.5", "forever"] {
+        let expected = format!("bad:{v}:nil:invalid_state/invalid_argument");
+        assert!(logs.contains(&expected), "logs: {logs:?}");
+    }
+    assert!(logs.contains(&"times:true".to_string()), "logs: {logs:?}");
+    assert!(
+        logs.contains(&"infinite:true".to_string()),
+        "logs: {logs:?}"
+    );
+}
+
+/// `markers.list()`'s `regions` array (contract §3.3): served locally from
+/// the plugin snapshot, no RPC, with `a`/`b` absent for an incomplete
+/// region and `repeat` a number or `"infinite"`.
+#[test]
+fn list_markers_exposes_regions() {
+    let snapshot = PluginSnapshot {
+        regions: vec![
+            RegionInfo {
+                id: GatewayRegionId(3),
+                owner: OwnerInfo::Plugin("org.modplayer.section-loop".to_string()),
+                a: Some(GatewayMarkerId(7)),
+                b: None,
+                repeat: RepeatArg::Infinite,
+                armed: false,
+            },
+            RegionInfo {
+                id: GatewayRegionId(9),
+                owner: OwnerInfo::Host,
+                a: Some(GatewayMarkerId(1)),
+                b: Some(GatewayMarkerId(2)),
+                repeat: RepeatArg::Times(4),
+                armed: true,
+            },
+        ],
+        ..PluginSnapshot::default()
+    };
+    let entry = r#"
+        local m = api.markers.list()
+        api.log.info("count:" .. tostring(#m.regions))
+        local r1 = m.regions[1]
+        api.log.info("r1:" .. r1.id .. "," .. r1.owner .. "," .. tostring(r1.a) .. "," .. tostring(r1.b) .. "," .. tostring(r1["repeat"]) .. "," .. tostring(r1.armed))
+        local r2 = m.regions[2]
+        api.log.info("r2:" .. r2.id .. "," .. r2.owner .. "," .. tostring(r2.a) .. "," .. tostring(r2.b) .. "," .. tostring(r2["repeat"]) .. "," .. tostring(r2.armed))
+    "#;
+    let (_handle, events, _requests) =
+        spawn_test_plugin_with_snapshot(entry, grants_with(&["markers.read"]), snapshot);
+    let logs = drain_logs(&events, Duration::from_secs(1));
+    assert!(logs.contains(&"count:2".to_string()), "logs: {logs:?}");
+    assert!(
+        logs.contains(&"r1:3,org.modplayer.section-loop,7,nil,infinite,false".to_string()),
+        "logs: {logs:?}"
+    );
+    assert!(
+        logs.contains(&"r2:9,host,1,2,4,true".to_string()),
         "logs: {logs:?}"
     );
 }

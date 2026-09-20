@@ -16,7 +16,7 @@ use modplayer_capability_gateway::grants::Grants;
 use modplayer_capability_gateway::manifest::ApiRange;
 use modplayer_capability_gateway::refusal::Refusal;
 use modplayer_capability_gateway::request::{
-    MarkerInfo, NodeInfo, QueueItemInfo, Request, Response,
+    MarkerInfo, NodeInfo, QueueItemInfo, RegionInfo, Request, Response,
 };
 use modplayer_capability_gateway::state::PluginStatePaths;
 use modplayer_capability_gateway::state::writer::WriteJob;
@@ -76,6 +76,9 @@ pub enum Inbound {
 pub struct PluginSnapshot {
     pub markers: Vec<MarkerInfo>,
     pub armed_region: Option<modplayer_capability_gateway::request::RegionId>,
+    /// 012-section-loop-plugin (data-model.md §1.3): every loop region on
+    /// the current track, all owners, served locally like `markers`.
+    pub regions: Vec<RegionInfo>,
     pub chain: Vec<NodeInfo>,
     pub queue: Vec<QueueItemInfo>,
     pub marker_revision: u64,

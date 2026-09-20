@@ -41,10 +41,26 @@ pub fn fixtures_enabled() -> bool {
 }
 
 /// Every bundled package (FR-001) — always loaded, regardless of
-/// fixtures. Empty this slice.
+/// fixtures. 012-section-loop-plugin (data-model.md §2.6, research R5):
+/// the first (and this slice's only) real bundled package.
 #[must_use]
 pub fn packages() -> Vec<BundledPackage> {
-    Vec::new()
+    vec![section_loop()]
+}
+
+/// 012-section-loop-plugin: Section Loop, the reference bundled plugin —
+/// mark A/B and drill a passage hands-free (data-model.md §2.6/§3).
+fn section_loop() -> BundledPackage {
+    BundledPackage {
+        identifier: "org.modplayer.section-loop",
+        manifest_toml: include_str!(
+            "../../../../plugins/bundled/org.modplayer.section-loop/plugin.toml"
+        ),
+        entry: include_str!("../../../../plugins/bundled/org.modplayer.section-loop/main.luau"),
+        readme: include_str!("../../../../plugins/bundled/org.modplayer.section-loop/README.md"),
+        fixture: false,
+        resources: &[],
+    }
 }
 
 /// Every fixture package (research R8/R18) — loaded only when
@@ -322,6 +338,24 @@ mod tests {
                 manifest.err()
             );
         }
+    }
+
+    /// 012-section-loop-plugin (contract P2): the bundled Section Loop
+    /// package's manifest is well-formed and catalog-valid, `api = "1.3"`,
+    /// and carries exactly the 7 required + 1 optional permissions
+    /// data-model.md §3.1 lists.
+    #[test]
+    fn section_loop_manifest_is_valid() {
+        let package = section_loop();
+        assert_eq!(package.identifier, "org.modplayer.section-loop");
+        assert!(!package.fixture);
+        let manifest = manifest::parse_and_validate(package.manifest_toml, true)
+            .unwrap_or_else(|e| unreachable!("section-loop manifest must validate: {e}"));
+        assert_eq!(manifest.identifier.as_str(), "org.modplayer.section-loop");
+        assert_eq!(manifest.api.major, 1);
+        assert_eq!(manifest.api.min_minor, 3);
+        assert_eq!(manifest.required.len(), 7);
+        assert_eq!(manifest.optional.len(), 1);
     }
 
     /// US2 T082 (contracts/manifest.md rule 4, §5 `fixture_packages_

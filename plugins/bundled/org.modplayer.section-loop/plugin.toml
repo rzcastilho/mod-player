@@ -1,0 +1,97 @@
+identifier    = "org.modplayer.section-loop"
+name          = "Section Loop"
+description   = "Drop A and B around a passage and drill it hands-free."
+version       = "1.0.0"
+api           = "1.3"
+author        = "ModPlayer project"
+license       = "MIT OR Apache-2.0"
+source        = "bundled"
+entry         = "main.luau"
+default_locale = "en-US"
+
+[[permissions.required]]
+permission    = "playback.observe"
+justification = "Reads the playhead position to set A/B and cues at the current position, and to keep Status current."
+
+[[permissions.required]]
+permission    = "transport.control"
+justification = "Requests transport focus before arming the loop or jumping to a cue (FR-008); arms/disarms the loop it owns."
+
+[[permissions.required]]
+permission    = "markers.read"
+justification = "Lists markers and regions (its own and the host's) to rebuild its panel, marker list and overlays after every change."
+
+[[permissions.required]]
+permission    = "markers.write"
+justification = "Creates/moves the A/B endpoints and repeat count of its loop region, and sets/clears its own cue markers."
+
+[[permissions.required]]
+permission    = "ui.panel"
+justification = "Registers the Section Loop panel: Set A, Set B, Loop, Repeat, marker list, Snap note and Status."
+
+[[permissions.required]]
+permission    = "ui.overlay"
+justification = "Draws the A/B lines, the loop region, and cue dots/labels on the waveform."
+
+[[permissions.required]]
+permission    = "ui.shortcuts"
+justification = "Registers its 23 trigger actions: Set A/B, Loop toggle, nudge earlier/later, 8 set-cue, 8 jump-cue, clear markers and the inert snap toggle."
+
+[[permissions.optional]]
+permission    = "analysis.read"
+justification = "Reserved for beat snapping in a later update; not called."
+
+[strings.en-US]
+panel_title = "Section Loop"
+set_a = "Set A"
+set_b = "Set B"
+loop = "Loop"
+repeat = "Repeat"
+markers = "Markers"
+snap = "Snap to beat"
+snap_note = "Beat snap"
+snap_note_text = "Needs beat analysis — coming in a later update"
+status = "Status"
+status_no_region = "Set A and B in Section Loop first"
+status_no_focus = "Needs transport focus — give Section Loop focus in the Transport panel (T)"
+status_cue_owned_1 = "Cue 1 belongs to the host — move or delete it in the Markers panel"
+status_cue_owned_2 = "Cue 2 belongs to the host — move or delete it in the Markers panel"
+status_cue_owned_3 = "Cue 3 belongs to the host — move or delete it in the Markers panel"
+status_cue_owned_4 = "Cue 4 belongs to the host — move or delete it in the Markers panel"
+status_cue_owned_5 = "Cue 5 belongs to the host — move or delete it in the Markers panel"
+status_cue_owned_6 = "Cue 6 belongs to the host — move or delete it in the Markers panel"
+status_cue_owned_7 = "Cue 7 belongs to the host — move or delete it in the Markers panel"
+status_cue_owned_8 = "Cue 8 belongs to the host — move or delete it in the Markers panel"
+label_a = "A"
+label_b = "B"
+cue_label_1 = "Cue 1"
+cue_label_2 = "Cue 2"
+cue_label_3 = "Cue 3"
+cue_label_4 = "Cue 4"
+cue_label_5 = "Cue 5"
+cue_label_6 = "Cue 6"
+cue_label_7 = "Cue 7"
+cue_label_8 = "Cue 8"
+action_set_a = "Set A"
+action_set_b = "Set B"
+action_toggle_loop = "Toggle Loop"
+action_nudge_earlier = "Nudge Earlier"
+action_nudge_later = "Nudge Later"
+action_set_cue_1 = "Set Cue 1"
+action_set_cue_2 = "Set Cue 2"
+action_set_cue_3 = "Set Cue 3"
+action_set_cue_4 = "Set Cue 4"
+action_set_cue_5 = "Set Cue 5"
+action_set_cue_6 = "Set Cue 6"
+action_set_cue_7 = "Set Cue 7"
+action_set_cue_8 = "Set Cue 8"
+action_jump_cue_1 = "Jump to Cue 1"
+action_jump_cue_2 = "Jump to Cue 2"
+action_jump_cue_3 = "Jump to Cue 3"
+action_jump_cue_4 = "Jump to Cue 4"
+action_jump_cue_5 = "Jump to Cue 5"
+action_jump_cue_6 = "Jump to Cue 6"
+action_jump_cue_7 = "Jump to Cue 7"
+action_jump_cue_8 = "Jump to Cue 8"
+action_toggle_snap = "Toggle Snap to Beat"
+action_clear_markers = "Clear Markers"

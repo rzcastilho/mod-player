@@ -935,3 +935,103 @@ fn header_attribution() {
         "the header must carry a named icon (real asset or generic-glyph fallback): {nodes:?}"
     );
 }
+
+// -- 012-section-loop-plugin (User Story 1, SC-006) ------------------------
+
+const SECTION_LOOP: &str = "org.modplayer.section-loop";
+
+/// As `fixture_controller`, but without `MODPLAYER_PLUGIN_FIXTURES` — the
+/// bundled Section Loop package always discovers regardless (research
+/// R5), so this controller's only plugin is Section Loop.
+fn bundled_only_controller(
+    label: &str,
+) -> (
+    PlaybackController<FakeBackend, ScriptedHost>,
+    TempDir,
+    TempDir,
+    TempDir,
+) {
+    let (store, dir) = fresh_store(label);
+    let plugin_state_dir = TempDir::new(&format!("{label}-plugin-state"));
+    let track_state_dir = TempDir::new(&format!("{label}-track-state"));
+    let controller = {
+        let _guard = PLUGIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // Safety: as `fixture_controller`'s own identical block.
+        unsafe {
+            std::env::set_var("MODPLAYER_PLUGIN_STATE_DIR", plugin_state_dir.path());
+            std::env::set_var("MODPLAYER_TRACK_STATE_DIR", track_state_dir.path());
+        }
+        let controller =
+            PlaybackController::new(FakeBackend::new(vec![]), ScriptedHost::new(), store);
+        unsafe {
+            std::env::remove_var("MODPLAYER_PLUGIN_STATE_DIR");
+            std::env::remove_var("MODPLAYER_TRACK_STATE_DIR");
+        }
+        controller
+    };
+    (controller, dir, plugin_state_dir, track_state_dir)
+}
+
+/// As `launch_ui_panel`, for the bundled Section Loop package: spawned,
+/// `Active`, and its "main" panel already registered.
+fn launch_section_loop(
+    label: &str,
+) -> (
+    PlaybackController<FakeBackend, ScriptedHost>,
+    TempDir,
+    TempDir,
+    TempDir,
+    PluginId,
+) {
+    let (mut controller, dir, psd, tsd) = bundled_only_controller(label);
+    let id = fixture_id(&mut controller, SECTION_LOOP);
+    let shared = Arc::clone(controller.shared());
+    controller.plugins_mut().spawn(id, &shared);
+    assert!(
+        pump_until(&mut controller, Duration::from_secs(2), |c| is_active(
+            c, id
+        )),
+        "Section Loop must reach Active on its own"
+    );
+    assert!(
+        pump_until(&mut controller, Duration::from_secs(2), |c| {
+            !c.plugin_panels_view().docked.is_empty()
+        }),
+        "Section Loop's ready_ack handler must have registered its panel"
+    );
+    (controller, dir, psd, tsd, id)
+}
+
+/// SC-006: every control Section Loop's panel introduces is reachable and
+/// operable by keyboard alone with a correct accessible name (contract
+/// G1, data-model.md §3.3) — the same generic `ui.panel` widget rendering
+/// every fixture's own test above already pins, exercised here as this
+/// plugin's own acceptance.
+#[test]
+fn section_loop_panel_keyboard_and_names() {
+    let (mut controller, _dir, _psd, _tsd, _id) = launch_section_loop("keyboard-and-names");
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+    let nodes = render_dock(&ctx, &mut controller);
+
+    find_one(&nodes, Role::Button, "Set A");
+    find_one(&nodes, Role::Button, "Set B");
+    let loop_toggle = find_one(&nodes, Role::CheckBox, "Loop");
+    assert_eq!(loop_toggle.toggled, Some(Toggled::False));
+    find_one(&nodes, Role::Slider, "Repeat");
+    find_one(&nodes, Role::Label, "Markers");
+    let snap = find_one(&nodes, Role::CheckBox, "Snap to beat");
+    assert_eq!(snap.toggled, Some(Toggled::False));
+    find_one(
+        &nodes,
+        Role::Label,
+        "Needs beat analysis — coming in a later update",
+    );
+
+    // Every one of those controls is `Tab`-reachable in the dock (SC-006).
+    for name in ["Set A", "Set B", "Loop", "Repeat", "Snap to beat"] {
+        tab_focus_named(&ctx, &mut controller, name);
+    }
+}

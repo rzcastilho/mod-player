@@ -627,21 +627,64 @@ impl TrackMarkers {
         Ok(id)
     }
 
-    fn set_loop_endpoint(
+    /// The single body behind the host's `set_loop_a`/`set_loop_b` *and*
+    /// 012-section-loop-plugin's `markers.set_loop_endpoint` (data-model.md
+    /// §2.1, research R2): on `region` (or a fresh one when `None`, I8),
+    /// creates the named endpoint (I1) if absent, subject to the
+    /// [`MAX_MARKERS`] limit, or moves it if present (I3, I4); a new
+    /// marker's owner is `owner`, its `transient` is always `false`
+    /// (FR-013), and it is named by [`Self::default_name_for`] like every
+    /// other host-created endpoint. Runs the same swap (I3) and
+    /// `current_region` (I8) side effects as the host path, so the host's
+    /// own `L` can arm a plugin-owned region (Constitution X user
+    /// override).
+    ///
+    /// `region = Some(id)` for a region this call does not already own
+    /// (empty) is `NotFound` if `id` names no region on this track; an
+    /// owner mismatch is the caller's job to check first (`apply.rs::
+    /// require_owner`) — this method never inspects the existing
+    /// endpoints' owner.
+    ///
+    /// ```
+    /// use modplayer_audio_source::TrackId;
+    /// use modplayer_core::markers::{Owner, TrackMarkers};
+    ///
+    /// let track = TrackId::new("spotify:track:4uLU6hMCjMI75M1A2tKUQC").unwrap();
+    /// let mut markers = TrackMarkers::new(track, 44_100, 44_100 * 180);
+    /// // A caller-owned, A-only region (`region = None` allocates one).
+    /// let (region, a) = markers
+    ///     .set_loop_endpoint_owned(None, true, 44_100 * 10, Owner::Host)
+    ///     .unwrap();
+    /// assert_eq!(markers.regions()[0].a, Some(a));
+    /// assert_eq!(markers.regions()[0].b, None);
+    /// // Completing it: `b` created on the same region.
+    /// let (region2, _b) = markers
+    ///     .set_loop_endpoint_owned(Some(region), false, 44_100 * 20, Owner::Host)
+    ///     .unwrap();
+    /// assert_eq!(region, region2);
+    /// ```
+    pub fn set_loop_endpoint_owned(
         &mut self,
+        region: Option<RegionId>,
+        which_a: bool,
         pos: u64,
-        is_a: bool,
+        owner: Owner,
     ) -> Result<(RegionId, MarkerId), MarkerError> {
         let pos = pos.min(self.len_frames);
-        let region_id = match self.current_region {
-            Some(id) => id,
+        let region_id = match region {
+            Some(id) => {
+                if !self.regions.iter().any(|r| r.id == id) {
+                    return Err(MarkerError::NotFound);
+                }
+                id
+            }
             None => self.new_loop_region(),
         };
         let existing = self
             .regions
             .iter()
             .find(|r| r.id == region_id)
-            .and_then(|r| if is_a { r.a } else { r.b });
+            .and_then(|r| if which_a { r.a } else { r.b });
 
         let marker_id = if let Some(id) = existing {
             if let Some(m) = self.marker_mut(id) {
@@ -654,7 +697,7 @@ impl TrackMarkers {
                 return Err(MarkerError::LimitReached);
             }
             let id = self.alloc_marker_id();
-            let kind = if is_a {
+            let kind = if which_a {
                 MarkerKind::RegionStart { region: region_id }
             } else {
                 MarkerKind::RegionEnd { region: region_id }
@@ -666,13 +709,13 @@ impl TrackMarkers {
                 position: pos,
                 name,
                 color: PaletteIndex::new(0),
-                owner: Owner::Host,
+                owner,
                 transient: false,
                 visible: true,
                 clamped: false,
             });
             if let Some(r) = self.region_mut(region_id) {
-                if is_a {
+                if which_a {
                     r.a = Some(id);
                 } else {
                     r.b = Some(id);
@@ -690,14 +733,17 @@ impl TrackMarkers {
     }
 
     /// On `current_region` (creating one if none: I8); creates the `A`
-    /// endpoint (I1) or moves it; I3, I4 (FR-006).
+    /// endpoint (I1) or moves it; I3, I4 (FR-006). Delegates to
+    /// [`Self::set_loop_endpoint_owned`] with `Owner::Host` so the host's
+    /// own behaviour is byte-for-byte what it was before 012-section-
+    /// loop-plugin generalised this body (research R2).
     pub fn set_loop_a(&mut self, pos: u64) -> Result<(RegionId, MarkerId), MarkerError> {
-        self.set_loop_endpoint(pos, true)
+        self.set_loop_endpoint_owned(self.current_region, true, pos, Owner::Host)
     }
 
     /// As [`Self::set_loop_a`], for the `B` endpoint.
     pub fn set_loop_b(&mut self, pos: u64) -> Result<(RegionId, MarkerId), MarkerError> {
-        self.set_loop_endpoint(pos, false)
+        self.set_loop_endpoint_owned(self.current_region, false, pos, Owner::Host)
     }
 
     /// An empty, incomplete region becomes current; no marker is created

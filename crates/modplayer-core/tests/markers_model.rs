@@ -10,7 +10,7 @@ use modplayer_audio_source::TrackId;
 use modplayer_capability_gateway::manifest::PluginIdentifier;
 use modplayer_core::markers::store::{self, TrackStatePaths};
 use modplayer_core::markers::{
-    CueSlot, MAX_MARKERS, MarkerError, MarkerKind, Owner, PaletteIndex, TrackMarkers,
+    CueSlot, MAX_MARKERS, MarkerError, MarkerKind, Owner, PaletteIndex, RegionId, TrackMarkers,
 };
 use modplayer_core::plugins::PluginIdTable;
 use modplayer_effects::catalog::PluginId;
@@ -582,6 +582,171 @@ fn remove_transient_owned_by() {
         m.region(region).is_none(),
         "the transient region is removed entirely, both endpoints having been owned by a"
     );
+}
+
+// -- 012-section-loop-plugin (data-model.md §2.1, research R2, contract
+// plugin-api-v1.3.md §7) ---------------------------------------------------
+
+/// `region = None` creates a caller-owned region holding only the named
+/// endpoint — no B exists yet, the marker is named/coloured like every
+/// other host endpoint, is never transient (FR-013), and `current_region`
+/// follows it (I8). A `Some(region)` naming a region that no longer
+/// exists is `NotFound`.
+#[test]
+fn set_loop_endpoint_owned_creates_a_only_region() {
+    let mut m = markers();
+    let plugin = Owner::Plugin(PluginId(9));
+    let (region, a_id) = m
+        .set_loop_endpoint_owned(None, true, 1_000, plugin)
+        .unwrap_or_else(|e| unreachable!("{e}"));
+    let r = m.region(region).unwrap_or_else(|| unreachable!());
+    assert_eq!(r.a, Some(a_id));
+    assert_eq!(r.b, None);
+    assert!(!r.is_complete());
+    let marker = m.marker(a_id).unwrap_or_else(|| unreachable!());
+    assert_eq!(marker.owner, plugin);
+    assert!(
+        !marker.transient,
+        "FR-013: a plugin-created endpoint is never transient"
+    );
+    assert_eq!(marker.name, "");
+    assert_eq!(marker.color, PaletteIndex::new(0));
+    assert_eq!(
+        m.current_region(),
+        Some(region),
+        "I8: a region endpoint sets current_region"
+    );
+
+    m.delete(a_id).unwrap_or_else(|e| unreachable!("{e}"));
+    assert!(
+        m.region(region).is_none(),
+        "the only endpoint's deletion removes the empty region"
+    );
+    assert_eq!(
+        m.set_loop_endpoint_owned(Some(region), false, 2_000, plugin),
+        Err(MarkerError::NotFound),
+        "a region id that no longer exists is NotFound"
+    );
+}
+
+/// Completing an A-only region with B keeps the same region id, and the
+/// swap rule (I3) still applies when the second endpoint lands before the
+/// first.
+#[test]
+fn set_loop_endpoint_owned_completes_and_swaps() {
+    let mut m = markers();
+    let plugin = Owner::Plugin(PluginId(9));
+    let (region, a_id) = m
+        .set_loop_endpoint_owned(None, true, 5_000, plugin)
+        .unwrap_or_else(|e| unreachable!("{e}"));
+    let (region2, b_id) = m
+        .set_loop_endpoint_owned(Some(region), false, 1_000, plugin)
+        .unwrap_or_else(|e| unreachable!("{e}"));
+    assert_eq!(region, region2, "the region id is unchanged by the swap");
+
+    let r = m.region(region).unwrap_or_else(|| unreachable!());
+    assert!(r.is_complete());
+    // B (1_000) landed before A (5_000): roles swap, ids keep their
+    // positions (FR-007) — the marker at the lower position is now A.
+    assert_eq!(r.a, Some(b_id));
+    assert_eq!(r.b, Some(a_id));
+    assert_eq!(m.position_of(b_id), Some(1_000));
+    assert_eq!(m.position_of(a_id), Some(5_000));
+}
+
+/// Moving an existing endpoint never checks the 64-marker limit, keeps
+/// the same marker id, and leaves the region id unchanged — even sitting
+/// exactly at the limit (mirrors `move_paths_never_hit_limit` for the host
+/// path).
+#[test]
+fn set_loop_endpoint_owned_moves_existing() {
+    let mut m = markers();
+    let plugin = Owner::Plugin(PluginId(9));
+    let (region, a_id) = m
+        .set_loop_endpoint_owned(None, true, 1_000, plugin)
+        .unwrap_or_else(|e| unreachable!("{e}"));
+    for i in 0..(MAX_MARKERS - 1) {
+        m.add_point(10_000 + i as u64)
+            .unwrap_or_else(|e| unreachable!("point {i}: {e}"));
+    }
+    assert_eq!(m.count(), MAX_MARKERS);
+
+    let (region2, a_id2) = m
+        .set_loop_endpoint_owned(Some(region), true, 2_000, plugin)
+        .unwrap_or_else(|e| unreachable!("moving at the limit must not refuse: {e}"));
+    assert_eq!(region, region2);
+    assert_eq!(a_id, a_id2, "the same marker moved, not a new one");
+    assert_eq!(m.position_of(a_id), Some(2_000));
+    assert_eq!(m.count(), MAX_MARKERS, "a move creates no new marker");
+
+    // A genuinely new endpoint still refuses at the limit.
+    assert_eq!(
+        m.set_loop_endpoint_owned(Some(region), false, 3_000, plugin),
+        Err(MarkerError::LimitReached)
+    );
+}
+
+/// research R2's regression net: `set_loop_a`/`set_loop_b` — now
+/// delegating to `set_loop_endpoint_owned` — still produce `Owner::Host`,
+/// non-transient markers, sharing one region id, exactly as before the
+/// refactor.
+#[test]
+fn host_set_loop_a_b_unchanged() {
+    let mut m = markers();
+    let (region, a_id) = m.set_loop_a(1_000).unwrap_or_else(|e| unreachable!("{e}"));
+    let (region2, b_id) = m.set_loop_b(2_000).unwrap_or_else(|e| unreachable!("{e}"));
+    assert_eq!(region, region2);
+    for id in [a_id, b_id] {
+        let marker = m.marker(id).unwrap_or_else(|| unreachable!());
+        assert_eq!(marker.owner, Owner::Host);
+        assert!(!marker.transient);
+    }
+    assert_eq!(m.current_region(), Some(region));
+}
+
+proptest! {
+    /// data-model.md §2.1's invariants (Constitution VIII "marker/loop
+    /// arithmetic"): after any sequence of `set_loop_endpoint_owned` calls
+    /// against one region, `a.pos <= b.pos` whenever both exist, both
+    /// endpoints of a region always share an owner, the marker count never
+    /// exceeds `MAX_MARKERS`, every position stays `<= len_frames`, and
+    /// the region id — once allocated — never changes.
+    #[test]
+    fn endpoint_owned_proptest(
+        ops in prop::collection::vec((any::<bool>(), 0u64..LEN), 1..50),
+        len in 1u64..LEN,
+    ) {
+        let track_id = TrackId::new("spotify:track:proptest-endpoint-owned")
+            .unwrap_or_else(|_| unreachable!());
+        let mut m = TrackMarkers::new(track_id, RATE, len);
+        let owner = Owner::Plugin(PluginId(1));
+        let mut region: Option<RegionId> = None;
+
+        for (which_a, pos) in ops {
+            if let Ok((r, _marker)) = m.set_loop_endpoint_owned(region, which_a, pos, owner) {
+                if let Some(prev) = region {
+                    prop_assert_eq!(prev, r, "the region id must be stable across calls");
+                }
+                region = Some(r);
+            }
+
+            if let Some(r) = region
+                && let Some(reg) = m.region(r)
+                && let (Some(a_id), Some(b_id)) = (reg.a, reg.b)
+            {
+                let pos_a = m.position_of(a_id).unwrap_or_else(|| unreachable!());
+                let pos_b = m.position_of(b_id).unwrap_or_else(|| unreachable!());
+                prop_assert!(pos_a <= pos_b, "a.pos <= b.pos once both endpoints exist");
+                let owner_a = m.owner_of(a_id).unwrap_or_else(|| unreachable!());
+                let owner_b = m.owner_of(b_id).unwrap_or_else(|| unreachable!());
+                prop_assert_eq!(owner_a, owner_b, "both endpoints share an owner");
+            }
+            prop_assert!(m.markers().len() <= MAX_MARKERS, "I1: over the limit");
+            for marker in m.markers() {
+                prop_assert!(marker.position <= len, "I4: position beyond len_frames");
+            }
+        }
+    }
 }
 
 proptest! {

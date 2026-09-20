@@ -25,7 +25,7 @@ refusal_codes = [
 
 [api_version]
 major = 1
-minor = 2
+minor = 3
 
 # ---------------------------------------------------------------------------
 # Permission catalog (25 entries; data-model.md §1.1, FR-015)
@@ -367,6 +367,22 @@ category = "markers"
 name = "SetCue"
 namespace = "markers"
 method = "set_cue"
+requires = "markers.write"
+needs_focus = false
+category = "markers"
+
+[[request]]
+name = "SetLoopEndpoint"
+namespace = "markers"
+method = "set_loop_endpoint"
+requires = "markers.write"
+needs_focus = false
+category = "markers"
+
+[[request]]
+name = "SetLoopRepeat"
+namespace = "markers"
+method = "set_loop_repeat"
 requires = "markers.write"
 needs_focus = false
 category = "markers"

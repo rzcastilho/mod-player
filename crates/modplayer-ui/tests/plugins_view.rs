@@ -20,7 +20,7 @@ use modplayer_capability_gateway::budgets::Budgets;
 use modplayer_capability_gateway::event::{HostEvent, PlayState};
 use modplayer_core::notifications::{NotificationAction, NotificationCenter, Severity};
 use modplayer_core::settings::SettingsStore;
-use modplayer_core::{Lifecycle, PlaybackController, PluginId, tr, tr_args};
+use modplayer_core::{Lifecycle, PlaybackController, PluginHost, PluginId, tr, tr_args};
 use modplayer_ui::{notifications, plugins_view};
 
 struct TempDir(PathBuf);
@@ -268,9 +268,39 @@ fn click_at(
 
 // -----------------------------------------------------------------------
 
+/// 012-section-loop-plugin (research R5): `plugins/bundled/` now always
+/// ships Section Loop, so a controller discovered with no fixtures shows
+/// its one row (and enable checkbox), not the empty state.
 #[test]
-fn empty_state_without_fixtures() {
+fn section_loop_row_without_fixtures() {
+    let (mut controller, _dir) = plain_controller("section-loop-row");
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+
+    let nodes = render_plugins(&ctx, &mut controller);
+
+    assert!(
+        nodes
+            .iter()
+            .all(|n| n.accessible_name() != Some(&tr("plugins-empty"))),
+        "the empty-state label must not render once Section Loop is discovered: {nodes:?}"
+    );
+    let checkbox_count = nodes.iter().filter(|n| n.role == Role::CheckBox).count();
+    assert_eq!(
+        checkbox_count, 1,
+        "exactly one plugin row (Section Loop) must render with no fixtures discovered: {nodes:?}"
+    );
+}
+
+/// 012-section-loop-plugin (research R5): the 009 FR-023 zero-row empty
+/// state is still implemented even though the real `bundled::packages()`
+/// can no longer produce it — exercised here by replacing the
+/// controller's `PluginHost` with one built from an explicit empty
+/// package list.
+#[test]
+fn empty_state_with_explicit_empty_host() {
     let (mut controller, _dir) = plain_controller("empty-state");
+    *controller.plugins_mut() = PluginHost::discover_packages(Vec::new());
     let ctx = Context::default();
     ctx.enable_accesskit();
 
@@ -279,7 +309,7 @@ fn empty_state_without_fixtures() {
     find_one(&nodes, Role::Label, &tr("plugins-empty"));
     assert!(
         nodes.iter().all(|n| n.role != Role::CheckBox),
-        "no plugin row (and so no enable checkbox) may render with no fixtures discovered: {nodes:?}"
+        "no plugin row (and so no enable checkbox) may render with an explicit empty package list: {nodes:?}"
     );
 }
 
@@ -305,17 +335,18 @@ fn rows_show_every_column_sorted_by_name() {
         find_one(&nodes, Role::Label, &tr(key));
     }
 
-    // Every one of the 16 fixtures (`plugins/bundled/` is empty this
-    // slice; 010-transport-focus adds `focus-a`/`focus-b`;
-    // 011-plugin-ui-contributions US1 adds `ui-panel` (T060), US2 adds
-    // `ui-shortcuts` (T079), US3 adds `ui-overlay` and `ui-icons` (T092),
-    // US4 adds `ui-settings` (T106), US5 adds `ui-notify` (T115)), sorted
-    // case-insensitively by name — already alphabetical for this fixture
-    // set. The invalid fixture's manifest never parses into a `Manifest`
-    // (only a `ManifestError`), so its row falls back to its raw
-    // identifier (`plugins/view.rs::row`, mirrors `plugins/host.rs::
-    // record_sort_key`'s own fallback) rather than the `name` its TOML
-    // never validated into.
+    // Every one of the 16 fixtures (010-transport-focus adds `focus-a`/
+    // `focus-b`; 011-plugin-ui-contributions US1 adds `ui-panel` (T060),
+    // US2 adds `ui-shortcuts` (T079), US3 adds `ui-overlay` and
+    // `ui-icons` (T092), US4 adds `ui-settings` (T106), US5 adds
+    // `ui-notify` (T115)) plus 012-section-loop-plugin's own bundled
+    // "Section Loop" (always discovered, `plugins/bundled/`'s one real
+    // package), sorted case-insensitively by name — already alphabetical
+    // for this fixture set. The invalid fixture's manifest never parses
+    // into a `Manifest` (only a `ManifestError`), so its row falls back
+    // to its raw identifier (`plugins/view.rs::row`, mirrors `plugins/
+    // host.rs::record_sort_key`'s own fallback) rather than the `name`
+    // its TOML never validated into.
     let expected_order = [
         "Flood fixture",
         "Focus fixture A",
@@ -325,6 +356,7 @@ fn rows_show_every_column_sorted_by_name() {
         "Never-ready fixture",
         "Observer fixture",
         "org.modplayer.fixture.invalid",
+        "Section Loop",
         "Throw fixture",
         "UI Icons fixture",
         "UI notify fixture",
@@ -379,12 +411,13 @@ fn rows_show_every_column_sorted_by_name() {
         "expected flood and focus-b to share the same two-permission explanation: {nodes:?}"
     );
 
-    // Every non-invalid fixture is `Disabled` pre-launch, so its health is
-    // `Ok` and its CPU/memory are both the dash (not yet `Active`).
+    // Every non-invalid fixture, plus Section Loop, is `Disabled`
+    // pre-launch, so its health is `Ok` and its CPU/memory are both the
+    // dash (not yet `Active`).
     assert_eq!(
         find_all(&nodes, Role::Label, &tr("plugins-health-ok")).len(),
-        15,
-        "15 valid fixtures must all read `ok` before any is launched: {nodes:?}"
+        16,
+        "15 valid fixtures plus Section Loop must all read `ok` before any is launched: {nodes:?}"
     );
 }
 

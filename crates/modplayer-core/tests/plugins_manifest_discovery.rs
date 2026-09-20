@@ -62,16 +62,24 @@ fn discover(fixtures_enabled: bool) -> (PluginHost, TempDir) {
     (host, dir)
 }
 
-/// L1: fixture packages exist only when `fixtures_enabled` — `plugins/
-/// bundled/` is empty this slice, so `discover(false)` must list nothing
-/// at all, and `discover(true)` must list every one of the seven fixtures
-/// landed so far (US1's four plus US2's three).
+/// L1: fixture packages exist only when `fixtures_enabled` — 012-
+/// section-loop-plugin (research R5): `plugins/bundled/` now ships
+/// exactly one real package, Section Loop, always present regardless of
+/// the env var, so `discover(false)` must list exactly it and nothing
+/// else, and `discover(true)` must additionally list every one of the
+/// fixtures landed so far.
 #[test]
 fn fixtures_only_with_env() {
     let (without, _dir) = discover(false);
-    assert!(
-        without.records().is_empty(),
-        "no bundled packages ship this slice, and fixtures must be gated off"
+    let without_identifiers: Vec<&str> = without
+        .records()
+        .iter()
+        .map(|r| r.identifier.as_str())
+        .collect();
+    assert_eq!(
+        without_identifiers,
+        vec!["org.modplayer.section-loop"],
+        "without fixtures, exactly the bundled Section Loop package must be discovered"
     );
 
     let (with, _dir2) = discover(true);
@@ -94,6 +102,30 @@ fn fixtures_only_with_env() {
             "{expected} must be discovered with fixtures enabled, got {identifiers:?}"
         );
     }
+}
+
+/// 012-section-loop-plugin (research R5): the 009 FR-023 zero-row empty
+/// state is still implemented even though the real `bundled::packages()`
+/// can no longer produce it — exercised here through
+/// `PluginHost::discover_packages(Vec::new())`, an explicit empty package
+/// list, rather than through `discover()`.
+#[test]
+fn discover_packages_empty_list_is_empty_state() {
+    let dir = TempDir::new();
+    let host = {
+        let _guard = PLUGIN_STATE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // Safety: mirrors `discover()`'s own narrowly-scoped mutation.
+        unsafe { std::env::set_var("MODPLAYER_PLUGIN_STATE_DIR", dir.path()) };
+        let host = PluginHost::discover_packages(Vec::new());
+        unsafe { std::env::remove_var("MODPLAYER_PLUGIN_STATE_DIR") };
+        host
+    };
+    assert!(
+        host.records().is_empty(),
+        "an explicit empty package list must produce zero records"
+    );
 }
 
 /// L1 (contracts/manifest.md §3): the `invalid` fixture's unknown

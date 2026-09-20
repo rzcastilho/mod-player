@@ -71,6 +71,39 @@ pub struct MarkerInfo {
     pub slot: Option<u8>,
 }
 
+/// Which endpoint of a loop region `markers.set_loop_endpoint` targets
+/// (contract plugin-api-v1.3.md §3.1). Wire: `"a"` | `"b"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopEndpoint {
+    A,
+    B,
+}
+
+/// A region's repeat count (contract plugin-api-v1.3.md §3.2). Wire:
+/// an integer `1..=1000`, or the string `"infinite"`. `#[serde(untagged)]`
+/// so `Times(n)` serialises as a bare number and `Infinite` as the
+/// literal string, matching `RepeatCount`'s existing host-side domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum RepeatArg {
+    Times(u16),
+    Infinite,
+}
+
+/// One loop region (both endpoints, if present, plus its repeat count
+/// and arm state), as reported to a plugin (contract plugin-api-v1.3.md
+/// §3.3 `markers.list().regions`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RegionInfo {
+    pub id: RegionId,
+    /// Owner of `a`, else of `b` (both endpoints always share an owner).
+    pub owner: OwnerInfo,
+    pub a: Option<MarkerId>,
+    pub b: Option<MarkerId>,
+    pub repeat: RepeatArg,
+    pub armed: bool,
+}
+
 /// One effect node, as reported to a plugin (contract §3 `effects.
 /// list_chain`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -173,6 +206,17 @@ pub enum Request {
     SetCue {
         slot: u8,
         position_ms: u64,
+    },
+    /// `region = None` creates a new caller-owned region holding only
+    /// `which` (data-model.md §1.2, contract plugin-api-v1.3.md §3.1).
+    SetLoopEndpoint {
+        region: Option<RegionId>,
+        which: LoopEndpoint,
+        position_ms: u64,
+    },
+    SetLoopRepeat {
+        region: RegionId,
+        repeat: RepeatArg,
     },
 
     // -- audio.effects ------------------------------------------------------
@@ -285,6 +329,12 @@ pub enum Response {
     Markers {
         markers: Vec<MarkerInfo>,
         armed: Option<RegionId>,
+        regions: Vec<RegionInfo>,
+    },
+    /// `set_loop_endpoint`'s `region, marker` result (data-model.md §1.3).
+    LoopEndpoint {
+        region: RegionId,
+        marker: MarkerId,
     },
     Chain(Vec<NodeInfo>),
     Queue(Vec<QueueItemInfo>),

@@ -15,8 +15,9 @@ use modplayer_audio_io::OutputBackend;
 use modplayer_audio_source::{SourceHost, TrackId};
 use modplayer_capability_gateway::refusal::Refusal;
 use modplayer_capability_gateway::request::{
-    MarkerId as GatewayMarkerId, NodeId as GatewayNodeId, QueueItemId as GatewayQueueItemId,
-    RegionId as GatewayRegionId, Request, Response,
+    LoopEndpoint as GatewayLoopEndpoint, MarkerId as GatewayMarkerId, NodeId as GatewayNodeId,
+    QueueItemId as GatewayQueueItemId, RegionId as GatewayRegionId, RepeatArg as GatewayRepeatArg,
+    Request, Response,
 };
 use modplayer_effects::catalog::{NodeKind, NodeOwner, ParamId};
 use modplayer_plugin_runtime::handle::Control;
@@ -25,6 +26,7 @@ use crate::PlaybackController;
 use crate::effects::{ChainError, ChainModel, NodeId as CoreNodeId};
 use crate::markers::{
     CueSlot, MarkerError, MarkerId as CoreMarkerId, Owner, PaletteIndex, RegionId as CoreRegionId,
+    RepeatCount,
 };
 use crate::queue::QueueItemId as CoreQueueItemId;
 use crate::transport::Intent;
@@ -482,6 +484,42 @@ fn dispatch<B: OutputBackend, H: SourceHost>(
             Ok(Response::RegionId(GatewayRegionId(id.raw())))
         }
 
+        // -- 012-section-loop-plugin (data-model.md §2.3, contract
+        // plugin-api-v1.3.md §3.1-§3.2): the plugin-side twins of the
+        // host's `I`/`O`/repeat-slider edits, gated by ownership on an
+        // existing region or by `require_track` on a brand new one.
+        Request::SetLoopEndpoint {
+            region,
+            which,
+            position_ms,
+        } => {
+            let core_region = region.map(|r| CoreRegionId::from_raw(r.0));
+            match core_region {
+                Some(id) => require_owner(region_owner(controller, id), plugin)?,
+                None => require_track(controller)?,
+            }
+            let which_a = matches!(which, GatewayLoopEndpoint::A);
+            let (region_id, marker_id) = controller
+                .plugin_set_loop_endpoint(core_region, which_a, position_ms, Owner::Plugin(plugin))
+                .map_err(marker_refusal)?;
+            Ok(Response::LoopEndpoint {
+                region: GatewayRegionId(region_id.raw()),
+                marker: GatewayMarkerId(marker_id.raw()),
+            })
+        }
+        Request::SetLoopRepeat { region, repeat } => {
+            let core_region = CoreRegionId::from_raw(region.0);
+            require_owner(region_owner(controller, core_region), plugin)?;
+            let repeat_count = match repeat {
+                GatewayRepeatArg::Infinite => RepeatCount::Infinite,
+                GatewayRepeatArg::Times(n) => RepeatCount::Times(n),
+            };
+            controller
+                .set_loop_repeat(core_region, repeat_count)
+                .map_err(marker_refusal)?;
+            Ok(Response::Ok)
+        }
+
         // -- fixture-only debug probe (L10), forwarded to the plugin's own
         // thread as `Control::Probe` — used by the host-driven manual/test
         // path only: a plugin's own `api.debug_probe(name)` is answered
@@ -574,11 +612,15 @@ fn dispatch<B: OutputBackend, H: SourceHost>(
         // -- ui.panel `update_widget` (US1 T045/T051, FR-007): the
         // gateway's `validate_update` needs the widget's already-declared
         // shape, so it is looked up first; `not_found` covers an unknown
-        // panel/widget path either way.
+        // panel/widget path either way. 012-section-loop-plugin (data-
+        // model.md §2.4, research R9): a `WidgetValue::Text` value is
+        // resolved against this plugin's own manifest strings exactly
+        // like `RegisterPanel`'s labels — a host-produced `message`
+        // (never `@`-prefixed) simply passes through unchanged.
         Request::UpdateWidget {
             panel,
             widget,
-            value,
+            mut value,
         } => {
             let Some(spec) = controller
                 .plugins_mut()
@@ -589,6 +631,16 @@ fn dispatch<B: OutputBackend, H: SourceHost>(
             else {
                 return Err(Refusal::not_found());
             };
+            if let modplayer_capability_gateway::ui::WidgetValue::Text(s) = &value {
+                let resolved = controller
+                    .plugins_mut()
+                    .record(plugin)
+                    .and_then(|r| r.manifest.as_ref().ok())
+                    .map(|manifest| resolve_string(manifest, s));
+                if let Some(resolved) = resolved {
+                    value = modplayer_capability_gateway::ui::WidgetValue::Text(resolved);
+                }
+            }
             modplayer_capability_gateway::ui::validate_update(&spec, &value)?;
             controller
                 .plugins_mut()
@@ -626,7 +678,7 @@ fn dispatch<B: OutputBackend, H: SourceHost>(
         // access of its own, design note 2) — a `Package` glyph ref
         // outside it is `invalid_value` before the registry ever sees the
         // batch.
-        Request::AddOverlays { primitives } => {
+        Request::AddOverlays { mut primitives } => {
             let Some(manifest) = controller
                 .plugins_mut()
                 .record(plugin)
@@ -637,6 +689,17 @@ fn dispatch<B: OutputBackend, H: SourceHost>(
                     "This plugin has no valid manifest.",
                 ));
             };
+            // 012-section-loop-plugin (data-model.md §2.4, research R9): a
+            // `Label` primitive's `text` is resolved against this
+            // plugin's own manifest strings, exactly like every other
+            // `ui.*` registration's text.
+            for primitive in &mut primitives {
+                if let modplayer_capability_gateway::ui::OverlayPrimitive::Label { text, .. } =
+                    primitive
+                {
+                    *text = resolve_string(manifest, text);
+                }
+            }
             let glyph_keys: std::collections::BTreeSet<String> =
                 manifest.glyphs.keys().cloned().collect();
             modplayer_capability_gateway::ui::validate_primitives(&primitives, &glyph_keys)?;

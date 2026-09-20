@@ -67,10 +67,11 @@ mod tests {
     }
 
     #[test]
-    fn api_version_is_one_dot_two() {
-        // 011-plugin-ui-contributions (research R1, Constitution IX): the
-        // minor bump that gates the `ui.*` namespace.
+    fn api_version_is_one_dot_three() {
+        // 012-section-loop-plugin (research R1, Constitution IX): the
+        // minor bump that adds `markers.set_loop_endpoint`/
+        // `markers.set_loop_repeat`.
         assert_eq!(API_VERSION.major, 1);
-        assert_eq!(API_VERSION.minor, 2);
+        assert_eq!(API_VERSION.minor, 3);
     }
 }
