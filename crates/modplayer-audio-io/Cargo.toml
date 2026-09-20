@@ -1,0 +1,21 @@
+[package]
+name = "modplayer-audio-io"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+modplayer-engine = { path = "../modplayer-engine", version = "0.1.0" }
+# `OutputBackend::open` is generic over `AudioSource` (003-streaming-
+# playback-and-queue, contracts/transport-and-queue.md §1: `Processor`
+# stays generic over whichever `SourceHost::Rt` is in play, not just the
+# built-in synthetic source) — no longer dev-only.
+modplayer-audio-source = { path = "../modplayer-audio-source", version = "0.1.0" }
+modplayer-audio-source-synthetic = { path = "../modplayer-audio-source-synthetic", version = "0.1.0" }
+cpal.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+rtrb.workspace = true

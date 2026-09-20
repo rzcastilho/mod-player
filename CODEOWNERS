@@ -1,0 +1,10 @@
+# Real-time engine changes require the engine maintainer's sign-off
+# (Constitution: "engine changes need area-maintainer sign-off").
+/crates/modplayer-engine/ @rzcastilho
+
+# Security-sensitive credential storage adapter (Constitution VI).
+/crates/modplayer-secure-store/ @rzcastilho
+
+# Sole importer of librespot-* / the Connect protocol (Constitution IV);
+# receiver maintainer sign-off.
+/crates/modplayer-audio-source-connect/ @rzcastilho

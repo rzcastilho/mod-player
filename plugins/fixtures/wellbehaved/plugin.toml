@@ -1,0 +1,45 @@
+identifier  = "org.modplayer.fixture.wellbehaved"
+name        = "Well-behaved fixture"
+description = "Holds every operable permission and drives one full observe/act cycle end to end, to exercise the happy path."
+version     = "1.0.0"
+api         = "1.0"
+author      = "ModPlayer project"
+license     = "MIT OR Apache-2.0"
+source      = "fixture"
+entry       = "main.luau"
+
+[[permissions.required]]
+permission    = "playback.observe"
+justification = "Subscribes to position at 30/s and reads play state (US3 T091)."
+
+[[permissions.required]]
+permission    = "transport.control"
+justification = "Requests transport focus, then arms its own loop region (US3 T091)."
+
+[[permissions.required]]
+permission    = "queue.write"
+justification = "Reads the current queue as part of its full behavior cycle (US3 T091)."
+
+[[permissions.required]]
+permission    = "markers.read"
+justification = "Reads markers/loop state back after creating its own loop region (US3 T091)."
+
+[[permissions.required]]
+permission    = "markers.write"
+justification = "Creates and arms its own loop region (US3 T091)."
+
+[[permissions.required]]
+permission    = "audio.effects"
+justification = "Creates a pitch_shift node before time_stretch and sets one of its parameters (US3 T091)."
+
+[[permissions.required]]
+permission    = "audio.meter"
+justification = "Receives meter events at the UI's cadence as part of its full cycle (US3 T091)."
+
+[[permissions.required]]
+permission    = "state.plugin"
+justification = "Exercises plugin-scoped storage alongside per-track storage (US3 T091)."
+
+[[permissions.required]]
+permission    = "state.track"
+justification = "Writes per-track state and schedules a position timer (US3 T091)."

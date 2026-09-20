@@ -1,0 +1,25 @@
+[package]
+name = "modplayer"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+modplayer-ui = { path = "../modplayer-ui", version = "0.1.0" }
+modplayer-core = { path = "../modplayer-core", version = "0.1.0" }
+modplayer-audio-io = { path = "../modplayer-audio-io", version = "0.1.0" }
+modplayer-account = { path = "../modplayer-account", version = "0.1.0" }
+modplayer-secure-store = { path = "../modplayer-secure-store", version = "0.1.0" }
+# Sole dependent (Constitution IV); receiver crate is independently
+# versioned, so pinned with a caret range rather than `workspace = true`.
+modplayer-audio-source-connect = { path = "../modplayer-audio-source-connect", version = "0.1.0" }
+eframe.workspace = true
+anyhow.workspace = true
+# The one process-wide `log::Log` install, stderr at Info level
+# (009-plugin-runtime-and-permissions, research R19).
+log.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

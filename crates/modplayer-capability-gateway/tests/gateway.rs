@@ -1,0 +1,199 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
+
+//! `Gateway::admit` tests (Constitution VIII, contracts/gateway-and-
+//! runtime.md §4 — G2, G5).
+
+use std::time::{Duration, Instant};
+
+use modplayer_capability_gateway::api::{Permission, RequestKind};
+use modplayer_capability_gateway::focus::{FocusToken, PluginId};
+use modplayer_capability_gateway::gateway::Gateway;
+use modplayer_capability_gateway::grants::Grants;
+use modplayer_capability_gateway::limiter::LIMIT;
+use modplayer_capability_gateway::manifest;
+use modplayer_capability_gateway::ui::limits::{NOTIFY_LIMIT, UI_LIMIT};
+
+/// Build a `Gateway` for `PluginId(0)` granting `permission` (if any),
+/// sharing `focus` with the caller so tests can acquire/release it.
+fn gateway_with(permission: Option<Permission>, focus: FocusToken) -> Gateway {
+    let mut grants = Grants::none();
+    if let Some(p) = permission {
+        let toml = format!(
+            r#"
+identifier = "org.modplayer.test.gw"
+name = "t"
+version = "1.0.0"
+api = "1.0"
+author = "t"
+license = "MIT"
+source = "bundled"
+
+[[permissions.required]]
+permission = "{}"
+justification = "test"
+"#,
+            p.name()
+        );
+        let dto = manifest::parse(&toml).expect("parse");
+        let manifest = manifest::validate(dto, true).expect("validate");
+        grants = Grants::from_bundled(&manifest);
+    }
+    Gateway::new(PluginId(0), grants, focus)
+}
+
+#[test]
+fn admit_checks_permission_before_focus() {
+    let mut gw = gateway_with(None, FocusToken::new());
+    let err = gw
+        .admit(RequestKind::TransportSeek, Instant::now())
+        .unwrap_err();
+    assert_eq!(err.reason, "not_granted");
+}
+
+#[test]
+fn admit_checks_focus_before_rate() {
+    let mut gw = gateway_with(Some(Permission::TransportControl), FocusToken::new());
+    let err = gw
+        .admit(RequestKind::TransportSeek, Instant::now())
+        .unwrap_err();
+    assert_eq!(err.reason, "no_focus");
+}
+
+#[test]
+fn refused_calls_consume_no_quota() {
+    let focus = FocusToken::new();
+    let mut gw = gateway_with(Some(Permission::TransportControl), focus.clone());
+    let now = Instant::now();
+    // Focus isn't held yet: every one of these is `no_focus` and must not
+    // touch the rate limiter's quota (G2: refused calls consume none).
+    for _ in 0..200 {
+        let err = gw.admit(RequestKind::TransportSeek, now).unwrap_err();
+        assert_eq!(err.reason, "no_focus");
+    }
+    focus.set_holder(Some(gw.plugin()));
+    // If any of the 200 refusals above had consumed quota, fewer than
+    // `LIMIT` calls would succeed here.
+    for _ in 0..LIMIT {
+        gw.admit(RequestKind::TransportSeek, now).expect("ok");
+    }
+}
+
+#[test]
+fn rate_limit_101st_in_window() {
+    let focus = FocusToken::new();
+    let mut gw = gateway_with(Some(Permission::TransportControl), focus.clone());
+    focus.set_holder(Some(gw.plugin()));
+    let now = Instant::now();
+    for _ in 0..LIMIT {
+        gw.admit(RequestKind::TransportSeek, now).expect("ok");
+    }
+    let err = gw.admit(RequestKind::TransportSeek, now).unwrap_err();
+    assert_eq!(err.reason, "rate_limited");
+}
+
+#[test]
+fn rate_limit_window_slides() {
+    let focus = FocusToken::new();
+    let mut gw = gateway_with(Some(Permission::TransportControl), focus.clone());
+    focus.set_holder(Some(gw.plugin()));
+    let now = Instant::now();
+    for _ in 0..LIMIT {
+        gw.admit(RequestKind::TransportSeek, now).expect("ok");
+    }
+    let later = now + Duration::from_millis(1_001);
+    assert!(gw.admit(RequestKind::TransportSeek, later).is_ok());
+}
+
+// -- 011-plugin-ui-contributions: `ui`/`notify` rate buckets (R2, FR-020,
+// FR-020a) ---------------------------------------------------------------
+
+#[test]
+fn notify_window_six_per_minute() {
+    let gw_focus = FocusToken::new();
+    let mut gw = gateway_with(Some(Permission::UiNotify), gw_focus);
+    let now = Instant::now();
+    for _ in 0..NOTIFY_LIMIT {
+        gw.admit(RequestKind::Notify, now).expect("ok");
+    }
+    let err = gw.admit(RequestKind::Notify, now).unwrap_err();
+    assert_eq!(err.reason, "rate_limited");
+}
+
+#[test]
+fn notify_refused_at_validation_still_counts() {
+    // FR-020: admission consumes the notify window's slot the moment the
+    // call is admitted — whether core's own `validate_notify` later
+    // refuses this exact call's level/text makes no difference, since
+    // that check runs only *after* the slot is already gone. Only a
+    // `permission_denied`/`rate_limited` call (refused here, at
+    // admission) consumes nothing.
+    let gw_focus = FocusToken::new();
+    let mut gw = gateway_with(Some(Permission::UiNotify), gw_focus);
+    let now = Instant::now();
+    for _ in 0..NOTIFY_LIMIT {
+        // Every one of these is admitted regardless of payload shape —
+        // the gateway crate never inspects `level`/`text` itself.
+        gw.admit(RequestKind::Notify, now).expect("admitted");
+    }
+    let err = gw.admit(RequestKind::Notify, now).unwrap_err();
+    assert_eq!(err.reason, "rate_limited");
+}
+
+// -- 012-section-loop-plugin: loop endpoint/repeat requests (contract
+// plugin-api-v1.3.md §7) ---------------------------------------------------
+
+#[test]
+fn set_loop_endpoint_requires_markers_write() {
+    let mut gw = gateway_with(None, FocusToken::new());
+    let err = gw
+        .admit(RequestKind::SetLoopEndpoint, Instant::now())
+        .unwrap_err();
+    assert_eq!(err.reason, "not_granted");
+
+    let mut gw = gateway_with(Some(Permission::MarkersWrite), FocusToken::new());
+    gw.admit(RequestKind::SetLoopEndpoint, Instant::now())
+        .expect("granted, no focus needed");
+}
+
+#[test]
+fn set_loop_repeat_requires_markers_write() {
+    let mut gw = gateway_with(None, FocusToken::new());
+    let err = gw
+        .admit(RequestKind::SetLoopRepeat, Instant::now())
+        .unwrap_err();
+    assert_eq!(err.reason, "not_granted");
+
+    let mut gw = gateway_with(Some(Permission::MarkersWrite), FocusToken::new());
+    gw.admit(RequestKind::SetLoopRepeat, Instant::now())
+        .expect("granted, no focus needed");
+}
+
+#[test]
+fn loop_endpoint_calls_never_need_focus() {
+    // Unlike `TransportArmLoop`/`TransportDisarmLoop`, these are region
+    // metadata edits (like `move`/`set_cue`) — no focus token is ever
+    // consulted, and neither call is refused `no_focus`.
+    assert!(!RequestKind::SetLoopEndpoint.needs_focus());
+    assert!(!RequestKind::SetLoopRepeat.needs_focus());
+
+    let focus = FocusToken::new();
+    let mut gw = gateway_with(Some(Permission::MarkersWrite), focus);
+    // Focus is not held by anyone, yet both calls are still admitted.
+    gw.admit(RequestKind::SetLoopEndpoint, Instant::now())
+        .expect("no_focus never produced");
+    gw.admit(RequestKind::SetLoopRepeat, Instant::now())
+        .expect("no_focus never produced");
+}
+
+#[test]
+fn ui_category_101st_in_window() {
+    let gw_focus = FocusToken::new();
+    let mut gw = gateway_with(Some(Permission::UiPanel), gw_focus);
+    let now = Instant::now();
+    for _ in 0..UI_LIMIT {
+        gw.admit(RequestKind::RegisterPanel, now).expect("ok");
+    }
+    let err = gw.admit(RequestKind::RegisterPanel, now).unwrap_err();
+    assert_eq!(err.reason, "rate_limited");
+}

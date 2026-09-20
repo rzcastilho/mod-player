@@ -1,0 +1,17 @@
+/target/
+**/*.rs.bk
+*.pdb
+
+# Editor/OS cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# Local settings-file overrides used during manual testing
+/.modplayer-config/
+
+# Logs and local env files
+*.log
+.env*

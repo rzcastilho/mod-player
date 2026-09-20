@@ -1,0 +1,17 @@
+identifier  = "org.modplayer.fixture.ui-overlay"
+name        = "UI Overlay fixture"
+description = "Draws one primitive of every kind on the waveform on each track_changed, and drives the overlay_limit/invalid_value refusal probes (US3 T090)."
+version     = "1.0.0"
+api         = "1.2"
+author      = "ModPlayer project"
+license     = "MIT OR Apache-2.0"
+source      = "fixture"
+entry       = "main.luau"
+
+[[permissions.required]]
+permission    = "ui.overlay"
+justification = "Draws one line/region/label/glyph primitive on every track_changed (US3 T090)."
+
+[[permissions.required]]
+permission    = "playback.observe"
+justification = "Needs track_changed to know when to (re-)draw its overlay set (US3 T090)."

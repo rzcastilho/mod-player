@@ -1,0 +1,4 @@
+-- org.modplayer.fixture.noready (research R18): a minimal entry script
+-- that registers no handler and never calls api.ready(), to exercise
+-- RT5's 5 s grace period -> SuspendCause::DidNotStart (no `unloading`
+-- handler runs for this cause, since the plugin was never ready).

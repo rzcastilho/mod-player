@@ -1,0 +1,23 @@
+[package]
+name = "modplayer-capability-gateway"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+# `build.rs` (T014, Phase 2 Schema work) parses `api/v1.toml` into
+# `OUT_DIR/generated.rs`; Cargo auto-detects it once it exists.
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+directories.workspace = true
+
+[build-dependencies]
+toml.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

@@ -1,0 +1,13 @@
+identifier  = "org.modplayer.fixture.leak"
+name        = "Leak fixture"
+description = "Appends a 1 MB string to a table on every position event."
+version     = "1.0.0"
+api         = "1.0"
+author      = "ModPlayer project"
+license     = "MIT OR Apache-2.0"
+source      = "fixture"
+entry       = "main.luau"
+
+[[permissions.required]]
+permission    = "playback.observe"
+justification = "Needs position events to leak memory on (research R18)."

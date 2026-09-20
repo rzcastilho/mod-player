@@ -1,0 +1,13 @@
+identifier  = "org.modplayer.fixture.invalid"
+name        = "Invalid fixture"
+description = "Names a permission outside the 25-entry catalog, to exercise manifest validation rejection."
+version     = "1.0.0"
+api         = "1.0"
+author      = "ModPlayer project"
+license     = "MIT OR Apache-2.0"
+source      = "fixture"
+entry       = "main.luau"
+
+[[permissions.required]]
+permission    = "teleport.everywhere"
+justification = "Deliberately outside the permission catalog (US2 T082, contracts/manifest.md rule 4)."

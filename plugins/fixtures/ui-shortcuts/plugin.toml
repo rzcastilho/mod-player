@@ -1,0 +1,13 @@
+identifier  = "org.modplayer.fixture.ui-shortcuts"
+name        = "UI Shortcuts fixture"
+description = "Registers three ui.shortcuts actions to exercise host-vs-plugin and plugin-vs-plugin conflicts, a continuous action, and a rejected default binding (US2 T077)."
+version     = "1.0.0"
+api         = "1.2"
+author      = "ModPlayer project"
+license     = "MIT OR Apache-2.0"
+source      = "fixture"
+entry       = "main.luau"
+
+[[permissions.required]]
+permission    = "ui.shortcuts"
+justification = "Registers 'take_over' (L, collides with the host's loop toggle for M5), 'nudge' (continuous, Shift+K, collides with ui-panel's focus_me for M6) and 'tab_bound' (Tab, a rejected default, G10)."

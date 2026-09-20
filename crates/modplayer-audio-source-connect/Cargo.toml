@@ -1,0 +1,42 @@
+[package]
+name = "modplayer-audio-source-connect"
+# Independently versioned per Constitution IV / A-11 — NOT `workspace = true`.
+# Bumped on its own cadence; only `crates/modplayer` depends on it.
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+modplayer-audio-source = { path = "../modplayer-audio-source", version = "0.1.0" }
+librespot-core.workspace = true
+librespot-connect.workspace = true
+librespot-playback.workspace = true
+librespot-audio.workspace = true
+librespot-metadata.workspace = true
+librespot-protocol.workspace = true
+protobuf.workspace = true
+http.workspace = true
+# 004-search-and-library-browse: opaque wire-safe encoding for
+# `LibraryPage.next_page` (research R3's collection2v2 pagination token),
+# already a workspace dependency (modplayer-account, `002`).
+base64.workspace = true
+tokio.workspace = true
+rtrb.workspace = true
+thiserror.workspace = true
+getrandom.workspace = true
+# 004-search-and-library-browse: parses the mercury `searchview` JSON body
+# (research R2/R13) — already a workspace dependency (`modplayer-core`'s
+# persistence, research R13), this crate is simply a new in-workspace user.
+serde_json.workspace = true
+# Below-normal priority for the decode-ahead thread (005, research R9).
+thread-priority.workspace = true
+# Direct symphonia use for exact `SeekedTo::actual_ts`/packet `ts` (005,
+# research R3); librespot-playback already resolves the same version in the
+# dependency tree with the same feature set, so this names no new
+# transitive surface (research R16).
+symphonia = { version = "0.5.5", default-features = false, features = ["ogg", "vorbis", "mp3"] }
+
+[dev-dependencies]
+assert_no_alloc.workspace = true

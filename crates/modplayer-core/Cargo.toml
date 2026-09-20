@@ -1,0 +1,48 @@
+[package]
+name = "modplayer-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+modplayer-engine = { path = "../modplayer-engine", version = "0.1.0" }
+modplayer-effects = { path = "../modplayer-effects", version = "0.1.0" }
+modplayer-audio-io = { path = "../modplayer-audio-io", version = "0.1.0" }
+modplayer-audio-source = { path = "../modplayer-audio-source", version = "0.1.0" }
+modplayer-audio-source-synthetic = { path = "../modplayer-audio-source-synthetic", version = "0.1.0" }
+# Plugin host (009-plugin-runtime-and-permissions): the Capability
+# Gateway's types (manifest, grants, requests, events, state store) and
+# the runtime's `PluginHandle`.
+modplayer-capability-gateway = { path = "../modplayer-capability-gateway", version = "0.1.0" }
+modplayer-plugin-runtime = { path = "../modplayer-plugin-runtime", version = "0.1.0" }
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+directories.workspace = true
+fluent-templates.workspace = true
+thiserror.workspace = true
+rtrb.workspace = true
+# Seeds the in-crate xorshift RNG for `Queue::set_shuffle` (research: "no
+# `rand` dependency"); the actual shuffling algorithm stays hand-rolled.
+getrandom.workspace = true
+# `formatting`/`parsing`: `[disclosure].acknowledged_at`'s RFC 3339
+# timestamp (002-first-launch-and-sign-in, DM-27).
+time = { workspace = true, features = ["formatting", "parsing"] }
+# Below-normal priority for the analysis thread (005, research R9).
+thread-priority.workspace = true
+# sha256 of `TrackId` for the on-disk waveform cache filename (005, research R7).
+sha2.workspace = true
+# Plugin console: `log` façade entries tagged `plugin:<identifier>`
+# (009-plugin-runtime-and-permissions, research R19).
+log.workspace = true
+# Plugin icon/glyph assets: PNG-only, decoded once at discovery
+# (011-plugin-ui-contributions, research R11; Constitution X — no new
+# crate, `image` is already a workspace dependency for `modplayer-ui`'s
+# artwork cache, gains the `png` feature beside `jpeg`, T002).
+image.workspace = true
+
+[dev-dependencies]
+# SC-011: queue operation-sequence proptests (research: Dependency additions).
+proptest.workspace = true

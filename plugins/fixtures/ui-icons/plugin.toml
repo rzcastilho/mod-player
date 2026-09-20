@@ -1,0 +1,19 @@
+identifier     = "org.modplayer.fixture.ui-icons"
+name           = "UI Icons fixture"
+description    = "Declares a manifest icon and two glyphs, one deliberately over the per-glyph size cap, to prove asset degrade-gracefully (US3 T091, FR-014a)."
+version        = "1.0.0"
+api            = "1.2"
+author         = "ModPlayer project"
+license        = "MIT OR Apache-2.0"
+source         = "fixture"
+entry          = "main.luau"
+icon           = "icon.png"
+default_locale = "en-US"
+
+[[permissions.required]]
+permission    = "ui.overlay"
+justification = "Draws one glyph primitive naming each declared glyph key, so a manual/automated run can see both render (or degrade) on the waveform (US3 T091)."
+
+[glyphs]
+ok  = "glyphs/ok.png"
+big = "glyphs/big.png"

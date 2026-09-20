@@ -1,0 +1,97 @@
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    # ttf-parser (pulled in transitively via ab_glyph -> sctk-adwaita ->
+    # winit, Linux-only window-decoration text rendering) has no maintained
+    # replacement upstream ("No safe upgrade is available!"); not on the
+    # real-time audio path, so accepted until eframe/winit move off it.
+    "RUSTSEC-2026-0192",
+
+    # The following (003-streaming-playback-and-queue, T097) are all pulled
+    # in transitively through `librespot-core` 0.8.0's own pinned
+    # dependency tree (research R1: `librespot-{core,connect,playback,
+    # audio}` 0.8, `default-features = false`, feature
+    # `rustls-tls-webpki-roots`). None can be bumped by `cargo update`
+    # alone: librespot-core 0.8.0 requires `quick-xml = "^0.38"` and pulls
+    # `hyper-proxy2` -> `hyper-rustls` 0.26 -> `rustls` 0.22.4, both of
+    # which reject the patched versions the advisories name. Revisit when
+    # librespot-core moves past 0.8.0.
+    #
+    # quick-xml 0.38.4 (librespot-core's XML parsing, e.g. login5/AP
+    # resolver responses): O(N^2) duplicate-attribute check and an
+    # unbounded namespace-declaration allocation, both remote-DoS-shaped
+    # against a malicious/compromised server response rather than
+    # exploitable by a third party over ModPlayer's own attack surface.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+    # rsa 0.9.10 (librespot-core's own login crypto): the Marvin Attack
+    # timing side-channel. "No safe upgrade is available!" upstream as of
+    # this advisory (RustCrypto/RSA#626 tracks a fix); mitigating it here
+    # would mean librespot-core dropping/replacing its own `rsa` dependency.
+    "RUSTSEC-2023-0071",
+    # rustls-pemfile 2.2.0 (via rustls-native-certs, pulled in by
+    # hyper-rustls 0.26 for `hyper-proxy2`'s TLS-over-proxy support):
+    # unmaintained, "No safe upgrade is available!" — its replacement API
+    # lives in `rustls-pki-types`, which would be an upstream librespot
+    # change, not a version bump.
+    "RUSTSEC-2025-0134",
+    # rustls-webpki 0.102.8 (via rustls 0.22.4, same hyper-proxy2 path
+    # above): four advisories, all in certificate-revocation-list/name-
+    # constraint handling that ModPlayer's own use of librespot (streaming
+    # over Spotify's AP connections, no user-supplied CRLs or certificates)
+    # does not exercise. `rustls` 0.22.4 requires `rustls-webpki = "^0.102"`,
+    # so the patched 0.103.x line isn't reachable without hyper-rustls/
+    # rustls moving first.
+    "RUSTSEC-2026-0049",
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
+]
+# 005-now-playing-waveform T002 (research R9/R16): `cargo deny check` run
+# after T001 added `thread-priority` 3.1.1 (MIT) to `modplayer-core` /
+# `modplayer-audio-source-connect` and `symphonia` 0.5.5 (MPL-2.0, features
+# `ogg`, `vorbis`, `mp3`) as a direct dependency of
+# `modplayer-audio-source-connect` — no new advisory surfaced by either
+# (`advisories ok, bans ok, licenses ok, sources ok`); symphonia's MPL-2.0
+# is covered by the existing MPL-2.0 allow entry below (see its comment).
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",           # also: ring, part of its "Apache-2.0 AND ISC" expression (via ureq/rustls)
+    "Apache-2.0 WITH LLVM-exception",
+    "Unicode-3.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    # Pulled in transitively by the eframe/egui/cpal stack (not our own
+    # crates, which all stay MIT OR Apache-2.0 per workspace.package):
+    "BSL-1.0",      # clipboard-win, error-code (via arboard, Windows clipboard)
+    "ISC",          # libloading (via wgpu-hal/ash and friends); also ring (via ureq/rustls)
+    "MPL-2.0",      # option-ext (via directories/dirs-sys, weak/file-level copyleft, unmodified);
+                    # also symphonia 0.5.5 + its symphonia-{core,bundle-flac,
+                    # bundle-mp3,codec-vorbis,format-ogg,metadata,utils-xiph}
+                    # crates (005-now-playing-waveform T001/T002, R16/R9):
+                    # unmodified upstream crate, same file-level-copyleft terms
+
+    "OFL-1.1",      # epaint_default_fonts' bundled Ubuntu font glyphs
+    "Ubuntu-font-1.0", # epaint_default_fonts' bundled Ubuntu font glyphs
+    "CDLA-Permissive-2.0", # webpki-roots (via ureq/rustls, Mozilla root certificate list)
+]
+# 009-plugin-runtime-and-permissions T007: `mlua`/`mlua-sys`/`luau0-src`
+# (MIT, the Luau scripting VM, research R1) and `log` (MIT OR Apache-2.0,
+# the process-wide logging façade) are both already covered by the "MIT"
+# and "Apache-2.0" entries above — no new allow-list entry needed.
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

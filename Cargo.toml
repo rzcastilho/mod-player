@@ -1,0 +1,66 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+cpal = "0.18"
+rtrb = "0.4"
+eframe = { version = "0.36", features = ["accesskit"] }
+egui = "0.36"
+fluent-templates = "0.15"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+directories = "6"
+thiserror = "2"
+anyhow = "1"
+assert_no_alloc = "1.1"
+keyring = "4.2"
+ureq = "3.4"
+serde_json = "1"
+sha2 = "0.10"
+base64 = "0.22"
+getrandom = "0.3"
+time = "0.3"
+# modplayer-ui only (004-search-and-library-browse, research R13): decode
+# artwork fetched from the public CDN. JPEG for CDN artwork; PNG for
+# plugin-provided icons/glyphs (011-plugin-ui-contributions, research R11).
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+# Dev-only: Constitution VIII state-serialization proptests (modplayer-account).
+proptest = "1"
+# Receiver crate only (modplayer-audio-source-connect): Connect protocol
+# implementation (research R1). No default features; TLS via rustls with
+# webpki bundled roots to match the rest of the workspace's TLS stack.
+librespot-core = { version = "0.8", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-connect = { version = "0.8", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-playback = { version = "0.8", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-audio = { version = "0.8", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-metadata = { version = "0.8", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-protocol = "0.8"
+protobuf = "3.7"
+# Receiver crate only (004-search-and-library-browse, research R3):
+# `http::Method`/`HeaderMap` for the hand-encoded `/collection/v2/paging`
+# POST — already resolved in the dependency tree (`hyper::Method` is a
+# re-export of the same `http::Method`, used internally by librespot-core's
+# own `spclient`), so this names no new transitive surface.
+http = "1"
+# Required by librespot's Session/Spirc/Player, confined to the receiver
+# crate's dedicated worker thread (research R1).
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+# Below-normal priority for the decode-ahead (modplayer-audio-source-connect)
+# and analysis (modplayer-core) threads (005-now-playing-waveform, research R9).
+thread-priority = "3.1.1"
+# Plugin runtime only (009-plugin-runtime-and-permissions, research R1): the
+# Luau scripting VM. `luau` vendors and builds Luau's C++ via `cc`; `send`
+# makes `Lua` values `Send` for the one-thread-per-plugin model (R3);
+# `serialize` gives the `serde_json::Value` <-> `LuaValue` conversion used
+# for state and event payloads. No `luau-jit`.
+mlua = { version = "0.12", features = ["luau", "send", "serialize"] }
+# modplayer-core (plugin console) and modplayer-plugin-runtime (log.*
+# binding); modplayer's main.rs installs the one process-wide logger
+# (009-plugin-runtime-and-permissions, research R19).
+log = "0.4"
