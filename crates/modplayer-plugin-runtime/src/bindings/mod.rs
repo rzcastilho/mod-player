@@ -26,6 +26,7 @@ use modplayer_capability_gateway::request::{
 };
 
 use crate::context::Shared;
+use crate::events::RuntimeEvent;
 use crate::handle::RpcEnvelope;
 
 /// Every namespace's functions lock this once per call — never a real
@@ -208,15 +209,16 @@ pub fn response_to_lua(lua: &Lua, response: Response) -> mlua::Result<Value> {
 /// gateway's RPC timeout). Must be called with `shared` **not** locked —
 /// nothing else on this thread needs it while blocked, but holding the
 /// lock across a blocking wait is needless coupling.
-fn rpc(shared: &SharedHandle, request: Request) -> Result<Response, Refusal> {
+fn rpc(shared: &SharedHandle, kind: RequestKind, request: Request) -> Result<Response, Refusal> {
     let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
-    let (plugin, sender, timeout, budget) = {
+    let (plugin, sender, timeout, budget, events) = {
         let guard = lock(shared);
         (
             guard.gateway.plugin(),
             guard.deps.requests.clone(),
             guard.budgets.rpc_timeout,
             Arc::clone(&guard.budget),
+            guard.deps.events.clone(),
         )
     };
     if sender
@@ -231,10 +233,26 @@ fn rpc(shared: &SharedHandle, request: Request) -> Result<Response, Refusal> {
     }
     let wait_start = Instant::now();
     let outcome = reply_rx.recv_timeout(timeout);
-    budget.extend_deadline_for_wait(wait_start.elapsed());
+    let waited = wait_start.elapsed();
+    budget.extend_deadline_for_wait(waited);
     match outcome {
         Ok(inner) => inner,
-        Err(_) => Err(Refusal::host_busy()),
+        Err(_) => {
+            // The host did not answer within the RPC budget. Not every
+            // plugin logs its refusals, so record it in the console here:
+            // a `host_busy` on a one-shot registration is otherwise a
+            // silently missing panel/action.
+            let _ = events.send((
+                plugin,
+                RuntimeEvent::Log {
+                    level: ::log::Level::Warn,
+                    message: format!(
+                        "rpc {kind:?} timed out after {waited:?} waiting for the host (host_busy)"
+                    ),
+                },
+            ));
+            Err(Refusal::host_busy())
+        }
     }
 }
 
@@ -373,7 +391,7 @@ pub fn dispatch(
         )),
 
         // -- Everything else is an RPC to core (RT7) -------------------------
-        _ => rpc(shared, request),
+        _ => rpc(shared, kind, request),
     }
 }
 

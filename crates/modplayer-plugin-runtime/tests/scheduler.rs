@@ -362,7 +362,17 @@ fn rpc_timeout_is_host_busy() {
         state: modplayer_capability_gateway::event::PlayState::Playing,
     });
     // `_requests` is intentionally never drained — the RPC is left to
-    // time out on its own.
+    // time out on its own. The runtime reports the timeout to the
+    // console first (not every plugin logs its refusals), then the
+    // plugin's own handler sees the `host_busy` refusal.
+    let runtime_line = wait_for_log(&events, Duration::from_secs(1));
+    assert!(
+        runtime_line
+            .as_deref()
+            .is_some_and(|m| m.starts_with("rpc TransportPlay timed out after")
+                && m.ends_with("(host_busy)")),
+        "runtime must report the timed-out RPC in the console: {runtime_line:?}"
+    );
     let message = wait_for_log(&events, Duration::from_secs(1));
     assert_eq!(message.as_deref(), Some("refusal:host_busy"));
 }

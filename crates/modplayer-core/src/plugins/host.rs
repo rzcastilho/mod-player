@@ -15,7 +15,7 @@ use modplayer_capability_gateway::manifest::{self, PluginIdentifier};
 use modplayer_capability_gateway::request::OwnerInfo;
 use modplayer_capability_gateway::state::{PluginStatePaths, StateWriter};
 use modplayer_engine::RtShared;
-use modplayer_plugin_runtime::events::{PlaybackSnapshot, RuntimeEvent, SuspendCause};
+use modplayer_plugin_runtime::events::{AbortCause, PlaybackSnapshot, RuntimeEvent, SuspendCause};
 use modplayer_plugin_runtime::handle::{
     Control, PluginHandle, PluginSnapshot, RpcEnvelope, RuntimeDeps, SpawnConfig,
 };
@@ -614,6 +614,20 @@ impl PluginHost {
                     }
                     if let Some(identifier) = &identifier {
                         log::error!(target: "plugin", "[{identifier}] handler aborted: {cause:?}");
+                    }
+                    // A handler abort reports itself to the console from
+                    // the runtime (with its cost figures); the restore
+                    // path is the one abort that never runs a handler, so
+                    // it is recorded here.
+                    if matches!(cause, AbortCause::RestoreTimeout)
+                        && let Some(identifier) = identifier
+                    {
+                        self.log.push(
+                            identifier,
+                            log::Level::Error,
+                            "track-state restore refused: the per-track file is over the storage cap"
+                                .to_string(),
+                        );
                     }
                 }
                 RuntimeEvent::Log { level, message } => {

@@ -368,14 +368,41 @@ fn run_and_account(
     // leak into the next handler's diagnostics.
     let cpu = budget.handler_cpu_used();
     budget.clear_deadline();
-    let _ = budget.take_rpc_wait();
+    let wall = start.elapsed();
+    let rpc_wait = budget.take_rpc_wait();
     let now = Instant::now();
+
+    // Every abort/suspension also lands in the plugin's own console
+    // (`RuntimeEvent::Log`, which core keeps in `PluginLog`): the user
+    // sees *why* their plugin misbehaved, and a test's failure message
+    // can quote it. The figures are the handler's cost as accounted —
+    // thread CPU, wall, and how much of the wall was spent waiting on
+    // host RPC replies.
+    let cost = |sum: Option<Duration>| {
+        let share_part = sum.map_or(String::new(), |sum| {
+            format!(", trailing-{window:?} cpu={sum:?} of {share:?}")
+        });
+        format!("cpu={cpu:?} wall={wall:?} rpc_wait={rpc_wait:?}{share_part}")
+    };
+    let console = |message: String| {
+        let _ = events.send((
+            plugin,
+            RuntimeEvent::Log {
+                level: log::Level::Error,
+                message,
+            },
+        ));
+    };
 
     match result {
         Ok(()) => {
             let sum = budget.record_sample(cpu, now, window);
             budget.publish_share_gauge(sum, share);
             if sum > share {
+                console(format!(
+                    "suspended (cpu share) after handler '{handler_name}': {}",
+                    cost(Some(sum))
+                ));
                 Some(SuspendCause::CpuShare)
             } else {
                 None
@@ -383,6 +410,10 @@ fn run_and_account(
         }
         Err(err) if is_memory_error(&err) => {
             log::error!(target: "plugin", "handler '{handler_name}' hit the memory limit");
+            console(format!(
+                "suspended (memory limit) in handler '{handler_name}': {}",
+                cost(None)
+            ));
             Some(SuspendCause::Memory)
         }
         Err(err) => {
@@ -400,7 +431,7 @@ fn run_and_account(
             ));
             let sum = budget.record_sample(cpu, now, window);
             budget.publish_share_gauge(sum, share);
-            if sum > share {
+            let suspend = if sum > share {
                 Some(if matches!(cause, AbortCause::Deadline) {
                     SuspendCause::Hang
                 } else {
@@ -408,7 +439,22 @@ fn run_and_account(
                 })
             } else {
                 None
-            }
+            };
+            let what = match &cause {
+                AbortCause::Deadline => "deadline".to_string(),
+                AbortCause::Exception(text) => format!("exception: {text}"),
+                AbortCause::RestoreTimeout => "restore timeout".to_string(),
+            };
+            let tail = match suspend {
+                Some(SuspendCause::Hang) => "; suspended (hang)",
+                Some(_) => "; suspended (cpu share)",
+                None => "",
+            };
+            console(format!(
+                "handler '{handler_name}' aborted ({what}): {}{tail}",
+                cost(Some(sum))
+            ));
+            suspend
         }
     }
 }
