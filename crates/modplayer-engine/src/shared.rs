@@ -49,6 +49,14 @@ pub struct RtShared {
     /// time-stretch stage. Part of the same seqlock-protected snapshot as
     /// the rest of the anchor.
     anchor_advance_rate_bits: AtomicU32,
+    /// The last position (in source frames) `PositionClock::now` handed
+    /// out, shared by every reader. Extrapolation can run up to
+    /// `anchor_buffer_frames * 2` ahead of the anchor; when the render
+    /// thread then publishes its (late) anchor, the true position is
+    /// *behind* what was already reported, and without this the clock
+    /// would visibly step backwards. Written only by readers (never by
+    /// `render`), so it costs the audio thread nothing.
+    last_reported_frames: AtomicU64,
     /// Wraps of the armed loop region so far (006, contracts/engine-
     /// loop.md §3); written after every wrap and on `LoopCommit`/
     /// `LoopDisarm`. Session-only mirror the UI reads for "wraps
@@ -129,6 +137,7 @@ impl RtShared {
             anchor_playing: AtomicBool::new(false),
             anchor_buffer_frames: AtomicU32::new(0),
             anchor_advance_rate_bits: AtomicU32::new(1.0f32.to_bits()),
+            last_reported_frames: AtomicU64::new(0),
             loop_wraps: AtomicU32::new(0),
             loop_state: AtomicU8::new(0),
             node_cost_bits: std::array::from_fn(|_| AtomicU32::new(0)),
@@ -172,6 +181,31 @@ impl RtShared {
         self.anchor_advance_rate_bits
             .store(advance_rate.to_bits(), Ordering::Relaxed);
         self.anchor_generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// `PositionClock`'s monotonicity guard (see `last_reported_frames`):
+    /// returns the value to report for `computed`, holding the previous
+    /// report whenever `computed` regresses by no more than `hold_within`
+    /// frames (the extrapolation overshoot a late anchor can undo), and
+    /// letting any larger regression — a seek, a track change — through.
+    pub fn monotonic_position(&self, computed: u64, hold_within: u64) -> u64 {
+        let mut last = self.last_reported_frames.load(Ordering::Relaxed);
+        loop {
+            let report = if computed < last && last - computed <= hold_within {
+                last
+            } else {
+                computed
+            };
+            match self.last_reported_frames.compare_exchange_weak(
+                last,
+                report,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return report,
+                Err(current) => last = current,
+            }
+        }
     }
 
     /// Read the position anchor with a seqlock retry loop. Called from the
