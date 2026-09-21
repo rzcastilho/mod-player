@@ -124,6 +124,19 @@ fn active_controller(
     ScriptedHostHandle,
     TestDirs,
 ) {
+    active_controller_with(label, |_| {})
+}
+
+/// `active_controller` with a hook that runs on the constructed
+/// controller *before* `launch()`.
+fn active_controller_with(
+    label: &str,
+    before_launch: impl FnOnce(&mut PlaybackController<FakeBackend, ScriptedHost>),
+) -> (
+    PlaybackController<FakeBackend, ScriptedHost>,
+    ScriptedHostHandle,
+    TestDirs,
+) {
     let (store, dir) = fresh_store(label);
     let track_state_dir = TempDir::new(&format!("{label}-track-state"));
     let host = ScriptedHost::new();
@@ -141,6 +154,7 @@ fn active_controller(
         unsafe { std::env::remove_var("MODPLAYER_TRACK_STATE_DIR") };
         controller
     };
+    before_launch(&mut controller);
     controller.launch();
     controller.confirm_device(
         DeviceId::new("dev-1").unwrap_or_else(|| unreachable!()),
@@ -151,16 +165,15 @@ fn active_controller(
     (controller, handle, TestDirs(dir, track_state_dir))
 }
 
-/// `active_controller` with every bundled plugin disabled before it can
-/// touch the chain. The tempo-step tests below add their own
-/// `TimeStretch` node and assert on it, but `tempo_step` acts on the
-/// chain's *first* time-stretch node — and Key & Tempo (013), launched
-/// by `launch()`, creates its own pitch/stretch pair asynchronously from
-/// `ready_ack`. Whichever node lands first wins, which made those tests
-/// timing-dependent. Disabling the plugins stops their threads; any node
-/// a plugin already managed to create is *orphaned* by that teardown
-/// (chain.md L7e), not removed, so the drain removes whatever is left
-/// once no plugin can add more, and returns with an empty chain.
+/// `active_controller`, but with every bundled plugin left un-launched.
+/// The tempo-step tests below add their own `TimeStretch` node and
+/// assert on it, while `tempo_step` acts on the chain's *first*
+/// time-stretch node — and Key & Tempo (013), launched by `launch()`,
+/// creates its own pitch/stretch pair asynchronously from `ready_ack`.
+/// Whichever node landed first won, which made those tests
+/// timing-dependent. `launch()` only spawns records flagged `enabled`,
+/// so clearing the flag first means no plugin thread ever exists here:
+/// nothing to race, nothing to drain.
 fn active_controller_without_bundled_plugins(
     label: &str,
 ) -> (
@@ -168,48 +181,19 @@ fn active_controller_without_bundled_plugins(
     ScriptedHostHandle,
     TestDirs,
 ) {
-    let (mut controller, handle, dirs) = active_controller(label);
-    let ids: Vec<PluginId> = controller
-        .plugins_mut()
-        .records()
-        .iter()
-        .map(|r| r.id)
-        .collect();
-    for id in ids {
-        controller.plugin_disable(id);
-    }
-    // A plugin's `chain_add_node` RPC can already be queued when its
-    // thread is stopped and still be applied on a later tick, so keep
-    // removing until the chain has stayed empty across several ticks
-    // with every plugin down.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut quiet_ticks = 0;
-    loop {
-        controller.tick();
-        let leftovers: Vec<_> = controller.chain().nodes().iter().map(|n| n.id).collect();
-        for id in leftovers {
-            let _ = controller.chain_remove_node(id);
-        }
-        let all_down = controller
+    active_controller_with(label, |controller| {
+        let ids: Vec<PluginId> = controller
             .plugins_mut()
             .records()
             .iter()
-            .all(|r| !matches!(r.lifecycle, Lifecycle::Loading | Lifecycle::Active));
-        if all_down && controller.chain().nodes().is_empty() {
-            quiet_ticks += 1;
-            if quiet_ticks >= 5 {
-                break;
+            .map(|r| r.id)
+            .collect();
+        for id in ids {
+            if let Some(record) = controller.plugins_mut().record_mut(id) {
+                record.enabled = false;
             }
-        } else {
-            quiet_ticks = 0;
         }
-        assert!(
-            Instant::now() < deadline,
-            "bundled plugins must go down and leave the chain empty"
-        );
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    (controller, handle, dirs)
+    })
 }
 
 fn default_input() -> RawInput {
