@@ -70,3 +70,17 @@ log = "0.4"
 # crates are already in the tree transitively.
 libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Performance", "Win32_System_Threading", "Win32_System_WindowsProgramming"] }
+
+# The Luau VM is C++ compiled by `cc`, which follows the cargo profile —
+# `-O0` under `dev`/`test`. The plugin budgets (4 ms per handler, 100 ms/1 s
+# share; capability-gateway `Budgets::DEFAULT`) are calibrated for the
+# optimised interpreter, so an unoptimised one makes every test run 5-10x
+# closer to aborting well-behaved plugins (Key & Tempo's `ready_ack` was
+# aborted on the macOS CI runner). Keep the VM and its bindings optimised in
+# every profile; the workspace's own crates stay unoptimised for debugging.
+[profile.dev.package.luau0-src]
+opt-level = 3
+[profile.dev.package.mlua-sys]
+opt-level = 3
+[profile.dev.package.mlua]
+opt-level = 3
