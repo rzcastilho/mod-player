@@ -12,8 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use modplayer_audio_source::TrackId;
 use modplayer_core::markers::store::{
-    LoadWarning, PersistJob, StoreEvent, TrackStatePaths, decode_track_id, encode, encode_track_id,
-    load, spawn_writer,
+    LoadWarning, TrackStatePaths, decode_track_id, encode, encode_track_id, load,
 };
 use modplayer_core::markers::{
     CueSlot, MarkerId, MarkerKind, PaletteIndex, RegionId, RepeatCount, TrackMarkers,
@@ -480,6 +479,7 @@ fn dangling_region_refs_are_repaired() {
 #[cfg(unix)]
 #[test]
 fn writer_reports_save_failed_and_leaves_previous_file() {
+    use modplayer_core::markers::store::{PersistJob, StoreEvent, spawn_writer};
     use std::os::unix::fs::PermissionsExt;
 
     let paths = temp_paths("writer-fail");
