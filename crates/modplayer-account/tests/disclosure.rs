@@ -12,7 +12,11 @@ use sha2::{Digest, Sha256};
 #[test]
 fn disclosure_text_is_pinned_to_bundle_version() {
     let mut hasher = Sha256::new();
-    hasher.update(DISCLOSURE_EN_US_SOURCE.as_bytes());
+    // The pin is over LF line endings. `.gitattributes` keeps the checkout
+    // LF everywhere, but a CRLF working copy (a Windows clone predating
+    // it, `core.autocrlf=true` overriding) must not read as "the text
+    // changed": line endings carry no disclosure substance.
+    hasher.update(DISCLOSURE_EN_US_SOURCE.replace("\r\n", "\n").as_bytes());
     let hash = format!("{:x}", hasher.finalize());
 
     assert_eq!(
