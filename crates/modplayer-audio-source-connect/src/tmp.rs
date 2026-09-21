@@ -113,7 +113,10 @@ mod tests {
         let stale_dir = base.join(format!("{PREFIX}{stale_pid}"));
         let _ = fs::create_dir_all(&stale_dir);
         let old = SystemTime::now() - Duration::from_secs(25 * 60 * 60);
-        let _ = filetime_backdate(&stale_dir, old);
+        assert!(
+            filetime_backdate(&stale_dir, old).is_ok(),
+            "backdating the stale sibling's mtime must succeed"
+        );
 
         let own_pid = unique_pid();
         let dir = prepare(own_pid);
@@ -122,12 +125,27 @@ mod tests {
         purge(&dir);
     }
 
-    /// Best-effort mtime backdate without an extra dependency: on
-    /// platforms where this fails, the stale-purge test still exercises
-    /// the code path, it just may not observe removal (accepted — this is
-    /// a best-effort hygiene feature, not a correctness one).
+    /// mtime backdate without an extra dependency, so the stale-purge
+    /// test really observes a removal on every platform.
     fn filetime_backdate(path: &Path, when: SystemTime) -> std::io::Result<()> {
-        let file = fs::File::open(path)?;
+        let file = open_dir(path)?;
         file.set_modified(when)
+    }
+
+    #[cfg(not(windows))]
+    fn open_dir(path: &Path) -> std::io::Result<fs::File> {
+        fs::File::open(path)
+    }
+
+    /// Windows refuses a plain `File::open` on a directory; a handle for
+    /// `set_modified` needs `FILE_FLAG_BACKUP_SEMANTICS`.
+    #[cfg(windows)]
+    fn open_dir(path: &Path) -> std::io::Result<fs::File> {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
     }
 }
