@@ -24,7 +24,7 @@ use modplayer_capability_gateway::ui::WidgetValue;
 
 use crate::bindings::{self, SharedHandle, lock, node_info_to_lua};
 use crate::budget::BudgetState;
-use crate::context::{PluginContext, Shared};
+use crate::context::{PluginContext, RECENT_TRACK_FLUSHES, Shared};
 use crate::events::{AbortCause, RuntimeEvent, SuspendCause};
 use crate::handle::{Control, Inbound, RuntimeDeps, SpawnConfig};
 use crate::pump::Subscriptions;
@@ -125,6 +125,7 @@ fn run_inner(
         last_seen_position_epoch: initial_position_epoch,
         settings_schema: None,
         in_interaction_handler: false,
+        recent_track_flushes: VecDeque::new(),
     }));
 
     let created_at = Instant::now();
@@ -361,10 +362,13 @@ fn run_and_account(
     let start = Instant::now();
     budget.start_handler(start, handler_budget);
     let result: mlua::Result<()> = handler.call(payload);
+    // The sample is the thread's own CPU time over the call (RT4): wall
+    // time spent descheduled or blocked on an RPC reply is not the
+    // plugin's cost. The accumulated RPC wait is drained so it does not
+    // leak into the next handler's diagnostics.
+    let cpu = budget.handler_cpu_used();
     budget.clear_deadline();
-    let elapsed = start.elapsed();
-    let rpc_wait = budget.take_rpc_wait();
-    let cpu = elapsed.saturating_sub(rpc_wait);
+    let _ = budget.take_rpc_wait();
     let now = Instant::now();
 
     match result {
@@ -679,12 +683,18 @@ fn event_to_lua(lua: &mlua::Lua, event: &HostEvent) -> mlua::Result<(&'static st
 }
 
 /// RT11: flush the previous track scope if dirty, then load (or clear)
-/// the new one before the `track_changed` handler runs. The load itself
-/// (disk read + decode) is bounded to `budgets.handler` (4 ms): an
-/// overrun discards whatever was read, leaves the new track's scope
-/// empty rather than populated, and reports `HandlerAborted{
-/// RestoreTimeout}` — `track_changed` is still delivered right after this
-/// returns, regardless.
+/// the new one before the `track_changed` handler runs — `track_changed`
+/// is delivered right after this returns, regardless.
+///
+/// The bytes come from `recent_track_flushes` when the track was flushed
+/// by this thread recently (the writer is asynchronous, so the file on
+/// disk may not have caught up yet), else from disk. A file larger than
+/// `budgets.storage` cannot have been written by the store (which
+/// enforces that cap) and would only cost an unbounded decode, so it is
+/// refused unread: the scope stays empty and `HandlerAborted{
+/// RestoreTimeout}` is reported. A read that merely took a while is
+/// *not* discarded after the fact — the time is already spent, and
+/// throwing the bytes away would only lose the plugin's state.
 #[allow(clippy::too_many_arguments)]
 fn restore_track_state(
     shared: &SharedHandle,
@@ -699,21 +709,34 @@ fn restore_track_state(
     }
     match track {
         Some(info) => {
-            let start = Instant::now();
-            let bytes = guard.deps.paths.as_ref().and_then(|paths| {
-                std::fs::read(paths.track_file(&guard.identifier, &info.id)).ok()
-            });
-            let overrun = start.elapsed() > budgets.handler;
-            let _ = guard.store.load_track(
-                &info.id,
-                if overrun {
-                    &[]
-                } else {
-                    bytes.as_deref().unwrap_or(&[])
-                },
-            );
+            let cached = guard
+                .recent_track_flushes
+                .iter()
+                .find(|(id, _)| *id == info.id)
+                .map(|(_, bytes)| bytes.clone());
+            let (bytes, oversized) = match cached {
+                Some(bytes) => (bytes, false),
+                None => {
+                    let path = guard
+                        .deps
+                        .paths
+                        .as_ref()
+                        .map(|paths| paths.track_file(&guard.identifier, &info.id));
+                    let oversized = path.as_ref().is_some_and(|path| {
+                        std::fs::metadata(path).is_ok_and(|m| m.len() > budgets.storage as u64)
+                    });
+                    let bytes = if oversized {
+                        Vec::new()
+                    } else {
+                        path.and_then(|path| std::fs::read(path).ok())
+                            .unwrap_or_default()
+                    };
+                    (bytes, oversized)
+                }
+            };
+            let _ = guard.store.load_track(&info.id, &bytes);
             drop(guard);
-            if overrun {
+            if oversized {
                 let _ = events.send((
                     plugin,
                     RuntimeEvent::HandlerAborted {
@@ -756,6 +779,16 @@ fn flush_scope(guard: &mut MutexGuard<'_, Shared>, scope: Scope, ack: Option<Syn
             }
         },
     };
+    let writer = writer.clone();
+    if scope == Scope::Track
+        && let Some(track_id) = guard.store.current_track().map(str::to_string)
+    {
+        guard.recent_track_flushes.retain(|(id, _)| *id != track_id);
+        guard
+            .recent_track_flushes
+            .push_front((track_id, bytes.clone()));
+        guard.recent_track_flushes.truncate(RECENT_TRACK_FLUSHES);
+    }
     let _ = writer.send(WriteJob::Save { path, bytes, ack });
 }
 

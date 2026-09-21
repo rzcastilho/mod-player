@@ -944,13 +944,87 @@ fn track_state_restored_before_track_changed() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// RT11: when loading the new track's per-track scope overruns its 4 ms
-/// deadline, the partial load is discarded (an empty scope, not
-/// whatever was read so far), `HandlerAborted{RestoreTimeout}` is
-/// reported, and `track_changed` is still delivered right afterward
-/// regardless. A large (deliberately slow-to-parse) seed file is the
-/// portable way to force a real overrun without relying on an injected
-/// clock RT11 has no seam for.
+/// RT11, the write race: the previous track's scope is flushed to the
+/// writer thread *asynchronously*, so a `TrackChanged` straight back to
+/// that track must not depend on the file having landed yet. Here the
+/// writer never runs at all (its channel is held but never drained), so
+/// nothing ever reaches disk — the value set on track `a` must still
+/// come back on the return to `a`, from the scheduler's own record of
+/// what it just flushed.
+#[test]
+fn track_state_survives_immediate_return_before_write_lands() {
+    let dir = temp_state_dir("restore-race");
+    let paths = PluginStatePaths::with_dir(dir.clone());
+    // Held for the test's duration and never read from: every flush is
+    // queued, none is written.
+    let (writer_tx, _writer_rx) = std::sync::mpsc::channel();
+
+    let entry = r#"
+        local visits = 0
+        api.on("track_changed", function(event)
+            if event.track.id == "spotify:track:a" then
+                visits = visits + 1
+                if visits == 1 then
+                    api.state.track.set("k", "va")
+                    api.log.info("set")
+                else
+                    api.log.info("k=" .. tostring(api.state.track.get("k")))
+                end
+            else
+                api.log.info("other")
+            end
+        end)
+        api.ready()
+    "#;
+    let (handle, events, _requests, _shared, _playback, _focus) = spawn_test_plugin_ex(
+        entry,
+        grants_with(&["playback.observe", "state.track"]),
+        Budgets::DEFAULT,
+        Some(writer_tx),
+        Some(paths.clone()),
+    );
+    wait_for_ready(&events);
+
+    let track = |id: &str| HostEvent::TrackChanged {
+        track: Some(TrackInfo {
+            id: format!("spotify:track:{id}"),
+            title: id.to_uppercase(),
+            artists: vec!["Artist".to_string()],
+            duration_ms: 180_000,
+        }),
+    };
+    assert!(handle.send_event(track("a")));
+    assert_eq!(
+        wait_for_log(&events, Duration::from_secs(1)).as_deref(),
+        Some("set")
+    );
+    assert!(handle.send_event(track("b")));
+    assert_eq!(
+        wait_for_log(&events, Duration::from_secs(1)).as_deref(),
+        Some("other")
+    );
+    assert!(handle.send_event(track("a")));
+    assert_eq!(
+        wait_for_log(&events, Duration::from_secs(1)).as_deref(),
+        Some("k=va"),
+        "the value set on track a must survive an immediate return even though its write never landed"
+    );
+    assert!(
+        !paths
+            .track_file("org.modplayer.test.scheduler", "spotify:track:a")
+            .exists(),
+        "sanity: the writer really never ran"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// RT11: a per-track file larger than `budgets.storage` cannot have been
+/// written by the store (which enforces that cap) and would only cost an
+/// unbounded decode, so it is refused unread: the scope stays empty,
+/// `HandlerAborted{RestoreTimeout}` is reported, and `track_changed` is
+/// still delivered right afterward regardless. The seed file here is
+/// ~26 MB against the 10 MB default cap.
 #[test]
 fn restore_timeout_delivers_event_anyway() {
     let dir = temp_state_dir("restore-timeout");
@@ -1014,7 +1088,7 @@ fn restore_timeout_delivers_event_anyway() {
     });
     assert!(
         aborted.is_some(),
-        "a 300k-entry seed file must overrun the 4ms restore deadline"
+        "a seed file over the storage cap must be refused as RestoreTimeout"
     );
 
     let track_changed = wait_for_log(&events, Duration::from_secs(1));
@@ -1027,7 +1101,7 @@ fn restore_timeout_delivers_event_anyway() {
     assert_eq!(
         discarded.as_deref(),
         Some("k0=nil"),
-        "the overrun load must be discarded, not partially applied"
+        "the refused load must leave the scope empty, not partially applied"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

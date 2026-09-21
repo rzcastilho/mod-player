@@ -64,3 +64,9 @@ mlua = { version = "0.12", features = ["luau", "send", "serialize"] }
 # binding); modplayer's main.rs installs the one process-wide logger
 # (009-plugin-runtime-and-permissions, research R19).
 log = "0.4"
+# modplayer-plugin-runtime only: per-thread CPU clock for the handler and
+# aggregate-share budgets (FR-009/FR-011 are CPU budgets, so a plugin thread
+# that is merely descheduled or blocked on IO must not be charged). Both
+# crates are already in the tree transitively.
+libc = "0.2"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
