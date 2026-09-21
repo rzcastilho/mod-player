@@ -69,4 +69,4 @@ log = "0.4"
 # that is merely descheduled or blocked on IO must not be charged). Both
 # crates are already in the tree transitively.
 libc = "0.2"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Performance", "Win32_System_Threading", "Win32_System_WindowsProgramming"] }

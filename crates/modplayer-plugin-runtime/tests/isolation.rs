@@ -153,9 +153,18 @@ fn infinite_loop_handler_aborts_within_budget() {
         let cause = wait_for_abort(&events);
         let elapsed = start.elapsed();
         assert_eq!(cause, Some(AbortCause::Deadline));
+        // The budget is thread CPU time; on Windows that comes from the
+        // thread's cycle counter scaled by a one-shot calibration, which
+        // frequency scaling can put off by a fair fraction, so the slack
+        // there is wider.
+        let slack = if cfg!(windows) {
+            Duration::from_millis(6)
+        } else {
+            Duration::from_millis(2)
+        };
         assert!(
-            elapsed <= Duration::from_millis(4) + Duration::from_millis(2),
-            "handler abort took {elapsed:?}, expected <= 4ms + 2ms slack"
+            elapsed <= Duration::from_millis(4) + slack,
+            "handler abort took {elapsed:?}, expected <= 4ms + {slack:?} slack"
         );
     }
 }

@@ -45,38 +45,68 @@ mod imp {
 
 #[cfg(windows)]
 mod imp {
+    use std::sync::OnceLock;
     use std::time::Duration;
 
-    use windows_sys::Win32::Foundation::FILETIME;
-    use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+    use windows_sys::Win32::System::Performance::{
+        QueryPerformanceCounter, QueryPerformanceFrequency,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentThread;
+    use windows_sys::Win32::System::WindowsProgramming::QueryThreadCycleTime;
 
-    fn filetime_100ns(ft: &FILETIME) -> u64 {
-        (u64::from(ft.dwHighDateTime) << 32) | u64::from(ft.dwLowDateTime)
+    /// Nanoseconds per CPU cycle, measured once. `GetThreadTimes` is only
+    /// updated on the ~15.6 ms scheduler tick — useless against a 4 ms
+    /// budget — so the thread's cycle counter is used instead and scaled
+    /// by a short calibration spin against the performance counter. The
+    /// scale drifts with frequency scaling (turbo, power states), which
+    /// is fine for a budget guard: the aim is "not charged while off-CPU",
+    /// not a metrology-grade clock.
+    fn ns_per_cycle() -> f64 {
+        static NS_PER_CYCLE: OnceLock<f64> = OnceLock::new();
+        *NS_PER_CYCLE.get_or_init(calibrate)
+    }
+
+    fn calibrate() -> f64 {
+        let mut freq: i64 = 0;
+        let mut qpc_start: i64 = 0;
+        let mut qpc_now: i64 = 0;
+        // SAFETY: valid out-pointers; the calls only write into them.
+        let ok = unsafe { QueryPerformanceFrequency(&raw mut freq) != 0 }
+            && unsafe { QueryPerformanceCounter(&raw mut qpc_start) != 0 };
+        if !ok || freq <= 0 {
+            return 0.0;
+        }
+        let cycles_start = raw_cycles();
+        // Spin ~2 ms of real work so the cycle counter moves.
+        let target = qpc_start + freq / 500;
+        let mut acc = 0u64;
+        loop {
+            acc = acc.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            // SAFETY: as above.
+            if unsafe { QueryPerformanceCounter(&raw mut qpc_now) } == 0 || qpc_now >= target {
+                break;
+            }
+        }
+        std::hint::black_box(acc);
+        let cycles = raw_cycles().saturating_sub(cycles_start);
+        if cycles == 0 {
+            return 0.0;
+        }
+        let elapsed_ns = (qpc_now - qpc_start) as f64 * 1e9 / freq as f64;
+        elapsed_ns / cycles as f64
+    }
+
+    fn raw_cycles() -> u64 {
+        let mut cycles: u64 = 0;
+        // SAFETY: `GetCurrentThread` is a pseudo-handle needing no close;
+        // `cycles` is a valid out-pointer the call only writes into.
+        let ok = unsafe { QueryThreadCycleTime(GetCurrentThread(), &raw mut cycles) };
+        if ok == 0 { 0 } else { cycles }
     }
 
     pub fn thread_cpu_time() -> Duration {
-        let zero = FILETIME {
-            dwLowDateTime: 0,
-            dwHighDateTime: 0,
-        };
-        let (mut creation, mut exit, mut kernel, mut user) = (zero, zero, zero, zero);
-        // SAFETY: `GetCurrentThread` returns a pseudo-handle that needs no
-        // closing; the four out-pointers are valid `FILETIME`s that
-        // `GetThreadTimes` only writes into. Non-zero return means success.
-        let ok = unsafe {
-            GetThreadTimes(
-                GetCurrentThread(),
-                &raw mut creation,
-                &raw mut exit,
-                &raw mut kernel,
-                &raw mut user,
-            )
-        };
-        if ok == 0 {
-            return Duration::ZERO;
-        }
-        let total_100ns = filetime_100ns(&kernel).saturating_add(filetime_100ns(&user));
-        Duration::from_nanos(total_100ns.saturating_mul(100))
+        let ns = raw_cycles() as f64 * ns_per_cycle();
+        Duration::from_nanos(ns as u64)
     }
 }
 
