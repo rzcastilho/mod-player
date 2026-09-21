@@ -1081,12 +1081,18 @@ fn hang_fixture_suspended_audio_continues() {
         "test setup must reach transport_enabled"
     );
 
+    // `Active` *or* already `Suspended`: the transport is already playing,
+    // so the fixture's very first `play_state_changed` hangs and — under
+    // the 1 ms share — suspends it, sometimes inside a single 2 ms poll
+    // of this loop. Either state is a valid starting point for what this
+    // test measures (the render thread's independence); the suspension
+    // itself is asserted below regardless.
     assert!(pump_controller_until(
         &mut controller,
         ACTIVE_TIMEOUT,
         |c| matches!(
             c.plugins_mut().record(id).map(|r| &r.lifecycle),
-            Some(Lifecycle::Active)
+            Some(Lifecycle::Active | Lifecycle::Suspended { .. })
         )
     ));
 

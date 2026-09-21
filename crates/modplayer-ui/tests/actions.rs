@@ -1937,7 +1937,8 @@ fn shift_equals_plus_on_focused_waveform_never_steps_tempo() {
 /// produces its own `TempoStepUp` invocation (`repeats_while_held`).
 #[test]
 fn plus_without_time_stretch_notifies_once_while_held() {
-    let (mut controller, _handle, _dirs) = active_controller("tempo-no-node-notify");
+    let (mut controller, _handle, _dirs) =
+        active_controller_without_bundled_plugins("tempo-no-node-notify");
     controller.queue_replace(vec![track("a", 200_000)]);
     controller.play();
     controller.tick();
