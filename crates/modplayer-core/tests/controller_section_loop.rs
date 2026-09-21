@@ -268,6 +268,45 @@ fn pump_until(
     }
 }
 
+/// Everything worth knowing when a wait on Section Loop times out: the
+/// record's lifecycle/health/abort count, its CPU-share gauge, the
+/// panels/overlays it has registered, and its console (which the runtime
+/// now feeds with every handler abort, suspension and RPC timeout, with
+/// cost figures). Evaluated only inside a failing `assert!`'s message.
+fn diagnose(
+    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+    id: PluginId,
+) -> String {
+    let record = controller.plugins_mut().record(id).map(|r| {
+        (
+            r.lifecycle.clone(),
+            r.health,
+            r.abort_window.len(),
+            r.gauges
+                .as_ref()
+                .map(|g| g.cpu_permille_of_share())
+                .unwrap_or(0),
+        )
+    });
+    let panels: Vec<String> = controller
+        .plugins_mut()
+        .ui()
+        .panels()
+        .for_plugin(id)
+        .iter()
+        .map(|p| p.id.to_string())
+        .collect();
+    let overlays = overlay_ids(controller, id);
+    let console: Vec<String> = controller
+        .plugin_log()
+        .entries()
+        .map(|e| format!("[{}] {}: {}", e.level, e.plugin, e.message))
+        .collect();
+    format!(
+        "record(lifecycle, health, aborts, cpu‰)={record:?} panels={panels:?} overlays={overlays:?} console={console:#?}"
+    )
+}
+
 fn wait_active(
     controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
     id: PluginId,
@@ -310,10 +349,15 @@ fn ready_section_loop() -> (
     let dev_id = DeviceId::new("dev-1").unwrap_or_else(|| unreachable!());
     controller.confirm_device(dev_id, BufferPreset::Balanced);
     let id = section_loop_id(&mut controller);
-    assert!(wait_active(&mut controller, id), "Section Loop must launch");
+    assert!(
+        wait_active(&mut controller, id),
+        "Section Loop must launch: {}",
+        diagnose(&mut controller, id)
+    );
     assert!(
         wait_panel_registered(&mut controller, id),
-        "Section Loop's ready_ack handler must register its panel"
+        "Section Loop's ready_ack handler must register its panel: {}",
+        diagnose(&mut controller, id)
     );
     controller.set_playback_permitted(true, None);
     controller.queue_replace(vec![track("a")]);
@@ -359,11 +403,13 @@ fn reopen_section_loop(
     let id = section_loop_id(&mut controller);
     assert!(
         wait_active(&mut controller, id),
-        "Section Loop must launch again after relaunch"
+        "Section Loop must launch again after relaunch: {}",
+        diagnose(&mut controller, id)
     );
     assert!(
         wait_panel_registered(&mut controller, id),
-        "Section Loop must re-register its panel from a fresh ready_ack (G4/L2)"
+        "Section Loop must re-register its panel from a fresh ready_ack (G4/L2): {}",
+        diagnose(&mut controller, id)
     );
     (controller, id)
 }
@@ -1216,6 +1262,32 @@ fn markers_survive_reload_and_relist() {
     controller2.set_playback_permitted(true, None);
     controller2.queue_replace(vec![track("a")]);
     controller2.play();
+    // FR-11.3.2, deterministically: `play()` is the `dispatch()` that
+    // makes the track current, loads its markers and fans out
+    // `track_changed` in one go — and the plugin's `markers.list()` in
+    // that handler is a read of the shared snapshot. The snapshot must
+    // therefore already carry the restored region *now*, before any
+    // `tick()` has run; previously it was only republished at the end
+    // of the next tick, so a plugin thread that won the race relisted
+    // the previous (empty) track and never saw a later `marker_changed`.
+    {
+        let snapshot = controller2.plugins_mut().snapshot().clone();
+        let guard = snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            guard.regions.len(),
+            1,
+            "the plugin-visible snapshot must hold the restored region before the first tick: {:?}",
+            guard.regions
+        );
+        assert_eq!(
+            guard.markers.len(),
+            3,
+            "A, B and the cue must all be in the snapshot before the first tick: {:?}",
+            guard.markers
+        );
+    }
     controller2.tick();
 
     // The host model itself restores A, B and the cue before Section
@@ -1263,13 +1335,19 @@ fn markers_survive_reload_and_relist() {
     // `ready_ack` and the ensuing `track_changed`) agrees: its repeat
     // slider shows 4 and its overlays are rebuilt from the restored
     // region.
-    assert!(pump_until(&mut controller2, Duration::from_secs(5), |c| {
+    let relisted = pump_until(&mut controller2, Duration::from_secs(5), |c| {
         let ids = overlay_ids(c, id2);
         widget_value(c, id2, "repeat") == Some(WidgetValue::Number(4.0))
             && ids.contains(&"a_line".to_string())
             && ids.contains(&"b_line".to_string())
             && ids.contains(&"ab_region".to_string())
-    }));
+    });
+    assert!(
+        relisted,
+        "Section Loop must relist the restored region on its fresh track_changed: repeat={:?} {}",
+        widget_value(&mut controller2, id2, "repeat"),
+        diagnose(&mut controller2, id2)
+    );
 }
 
 // -- T039: disable mid-loop (US2-2/US2-3, SC-003) ---------------------------
