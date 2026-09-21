@@ -151,6 +151,67 @@ fn active_controller(
     (controller, handle, TestDirs(dir, track_state_dir))
 }
 
+/// `active_controller` with every bundled plugin disabled before it can
+/// touch the chain. The tempo-step tests below add their own
+/// `TimeStretch` node and assert on it, but `tempo_step` acts on the
+/// chain's *first* time-stretch node — and Key & Tempo (013), launched
+/// by `launch()`, creates its own pitch/stretch pair asynchronously from
+/// `ready_ack`. Whichever node lands first wins, which made those tests
+/// timing-dependent. Disabling the plugins stops their threads; any node
+/// a plugin already managed to create is *orphaned* by that teardown
+/// (chain.md L7e), not removed, so the drain removes whatever is left
+/// once no plugin can add more, and returns with an empty chain.
+fn active_controller_without_bundled_plugins(
+    label: &str,
+) -> (
+    PlaybackController<FakeBackend, ScriptedHost>,
+    ScriptedHostHandle,
+    TestDirs,
+) {
+    let (mut controller, handle, dirs) = active_controller(label);
+    let ids: Vec<PluginId> = controller
+        .plugins_mut()
+        .records()
+        .iter()
+        .map(|r| r.id)
+        .collect();
+    for id in ids {
+        controller.plugin_disable(id);
+    }
+    // A plugin's `chain_add_node` RPC can already be queued when its
+    // thread is stopped and still be applied on a later tick, so keep
+    // removing until the chain has stayed empty across several ticks
+    // with every plugin down.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut quiet_ticks = 0;
+    loop {
+        controller.tick();
+        let leftovers: Vec<_> = controller.chain().nodes().iter().map(|n| n.id).collect();
+        for id in leftovers {
+            let _ = controller.chain_remove_node(id);
+        }
+        let all_down = controller
+            .plugins_mut()
+            .records()
+            .iter()
+            .all(|r| !matches!(r.lifecycle, Lifecycle::Loading | Lifecycle::Active));
+        if all_down && controller.chain().nodes().is_empty() {
+            quiet_ticks += 1;
+            if quiet_ticks >= 5 {
+                break;
+            }
+        } else {
+            quiet_ticks = 0;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "bundled plugins must go down and leave the chain empty"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    (controller, handle, dirs)
+}
+
 fn default_input() -> RawInput {
     RawInput {
         screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0))),
@@ -1684,7 +1745,8 @@ fn disabled_tempo_binding_does_not_block_and_flags_on_enable() {
 /// nudging the first time-stretch node's ratio each time.
 #[test]
 fn tempo_actions_enabled_and_repeat() {
-    let (mut controller, _handle, _dirs) = active_controller("tempo-enabled-repeat");
+    let (mut controller, _handle, _dirs) =
+        active_controller_without_bundled_plugins("tempo-enabled-repeat");
     assert!(controller.actions().is_enabled(HostAction::TempoStepUp));
     assert!(controller.actions().is_enabled(HostAction::TempoStepDown));
 
@@ -1739,7 +1801,8 @@ fn tempo_actions_enabled_and_repeat() {
 /// the tempo action ever reaching the dispatcher.
 #[test]
 fn plus_minus_step_tempo_unless_waveform_focused() {
-    let (mut controller, _handle, _dirs) = active_controller("tempo-vs-waveform");
+    let (mut controller, _handle, _dirs) =
+        active_controller_without_bundled_plugins("tempo-vs-waveform");
     controller.queue_replace(vec![track("a", 200_000)]);
     controller.play();
     controller.tick();
@@ -1819,7 +1882,8 @@ fn plus_minus_step_tempo_unless_waveform_focused() {
 /// `TempoStepUp` with the waveform focused).
 #[test]
 fn shift_equals_plus_on_focused_waveform_never_steps_tempo() {
-    let (mut controller, _handle, _dirs) = active_controller("tempo-vs-waveform-shift-plus");
+    let (mut controller, _handle, _dirs) =
+        active_controller_without_bundled_plugins("tempo-vs-waveform-shift-plus");
     controller.queue_replace(vec![track("a", 200_000)]);
     controller.play();
     controller.tick();
