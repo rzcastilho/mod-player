@@ -153,11 +153,17 @@ fn infinite_loop_handler_aborts_within_budget() {
         let cause = wait_for_abort(&events);
         let elapsed = start.elapsed();
         assert_eq!(cause, Some(AbortCause::Deadline));
-        // The budget is thread CPU time; on Windows that comes from the
-        // thread's cycle counter scaled by a one-shot calibration, which
-        // frequency scaling can put off by a fair fraction, so the slack
-        // there is wider.
-        let slack = if cfg!(windows) {
+        // The budget is thread CPU time while `elapsed` is wall time, so
+        // any moment the runner deschedules the plugin thread widens the
+        // gap: on a hosted CI VM (`CI=true`) the bound is a coarse "did
+        // not run away" check (a 6.7 ms abort was seen on the 3-vCPU
+        // macOS runner). On Windows the CPU clock is the thread's cycle
+        // counter scaled by a one-shot calibration, which frequency
+        // scaling can put off by a fair fraction, so its slack is wider
+        // too.
+        let slack = if std::env::var_os("CI").is_some() {
+            Duration::from_millis(16)
+        } else if cfg!(windows) {
             Duration::from_millis(6)
         } else {
             Duration::from_millis(2)
