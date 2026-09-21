@@ -625,12 +625,22 @@ fn local_loop_toggle_applies_and_returns_focus_under_auto() {
         FocusHolder::Host,
         "a local loop toggle must return focus to the host under Auto"
     );
+    // Seen to fail once on a hosted Linux runner and never reproduced
+    // locally; the message carries everything needed to read that run.
+    let armed = controller
+        .markers()
+        .and_then(|m| m.armed_region())
+        .map(|r| r.id);
+    let regions: Vec<(RegionId, bool)> = controller
+        .markers()
+        .map(|m| m.regions().iter().map(|r| (r.id, r.armed)).collect())
+        .unwrap_or_default();
+    let current = controller.markers().and_then(|m| m.current_region());
     assert!(
-        controller
-            .markers()
-            .and_then(|m| m.armed_region())
-            .is_none(),
-        "the region itself must actually be disarmed"
+        armed.is_none(),
+        "the region itself must actually be disarmed: armed={armed:?} current={current:?} \
+         regions(id, armed)={regions:?} focus-a log={:?}",
+        probe_log(&mut controller, id_a)
     );
 
     assert!(
