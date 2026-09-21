@@ -330,7 +330,7 @@ fn three_suspensions_auto_disable() {
 
     for round in 1..=3u8 {
         assert!(
-            pump_controller_until(&mut controller, Duration::from_secs(2), |c| {
+            pump_controller_until(&mut controller, ACTIVE_TIMEOUT, |c| {
                 matches!(
                     c.plugins_mut().record(id).map(|r| &r.lifecycle),
                     Some(Lifecycle::Active)
@@ -404,7 +404,7 @@ fn restart_keeps_session_counter() {
     let suspend_once = |controller: &mut PlaybackController<FakeBackend, ScriptedHost>| {
         assert!(pump_controller_until(
             controller,
-            Duration::from_secs(2),
+            ACTIVE_TIMEOUT,
             |c| matches!(
                 c.plugins_mut().record(id).map(|r| &r.lifecycle),
                 Some(Lifecycle::Active)
@@ -1026,6 +1026,14 @@ fn wait_for_reaped(
     })
 }
 
+/// How long a fixture may take to reach `Active` after `launch()`. 5 s,
+/// matching `controller_plugin_ui.rs`/`controller_key_tempo.rs`: every
+/// test here boots all fourteen fixture/bundled Luau VMs, a dozen tests
+/// run in parallel, and a debug build under a full `cargo test
+/// --workspace` was seen to miss 2 s. Headroom for scheduling, not a
+/// correctness margin — a passing test never waits this long.
+const ACTIVE_TIMEOUT: Duration = Duration::from_secs(5);
+
 fn pump_controller_until(
     controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
     timeout: Duration,
@@ -1075,7 +1083,7 @@ fn hang_fixture_suspended_audio_continues() {
 
     assert!(pump_controller_until(
         &mut controller,
-        Duration::from_secs(2),
+        ACTIVE_TIMEOUT,
         |c| matches!(
             c.plugins_mut().record(id).map(|r| &r.lifecycle),
             Some(Lifecycle::Active)
