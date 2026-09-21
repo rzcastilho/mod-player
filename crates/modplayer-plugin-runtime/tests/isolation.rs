@@ -208,7 +208,10 @@ fn repeated_hang_suspends_within_one_second() {
                 suspend_cause = Some(cause);
                 break;
             }
-            Ok((_, RuntimeEvent::HandlerAborted { .. })) => continue,
+            // Every abort also reports itself to the plugin console
+            // (a `Log` event with its cost figures); neither is the
+            // suspension this loop is waiting for.
+            Ok((_, RuntimeEvent::HandlerAborted { .. } | RuntimeEvent::Log { .. })) => continue,
             Ok(_) | Err(_) => break,
         }
     }
