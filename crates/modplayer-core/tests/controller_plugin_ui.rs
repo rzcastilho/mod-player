@@ -375,14 +375,15 @@ fn request_focus_in_handler_auto_grants() {
         WidgetValue::Bool(true),
     );
 
-    // 5s (not 2s): this file's own tests each `launch()` all 12 fixtures
+    // 15s (not 2s): this file's own tests each `launch()` all 12 fixtures
     // (011-plugin-ui-contributions US2 T079 added `ui-shortcuts`, the
     // 12th), and running the whole file spawns/tears down several dozen
     // real plugin threads across the earlier tests in this same process —
-    // real headroom for scheduling, not a correctness margin.
+    // real headroom for scheduling, not a correctness margin. 5s was still
+    // seen to miss once in a full `cargo test --workspace` run.
     assert!(pump_controller_until(
         &mut controller,
-        Duration::from_secs(5),
+        Duration::from_secs(15),
         |c| { c.plugins_mut().arbiter().holder() == FocusHolder::Plugin(id) }
     ));
 }

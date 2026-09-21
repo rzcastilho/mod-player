@@ -176,6 +176,13 @@ impl ParsedRequest {
 /// sent the appropriate response (contracts/authorization-service.md
 /// "Loopback callback HTTP contract").
 fn handle_connection(mut stream: TcpStream, config: &ListenerConfig) -> Option<ListenerOutcome> {
+    // On BSD-derived platforms (macOS included) an accepted socket inherits
+    // the listener's `O_NONBLOCK`; Linux does not. Without this, a `read`
+    // that runs before the request bytes arrive returns `WouldBlock`,
+    // which `read_request_line` reports as a malformed request (400) and
+    // the real callback is never consumed. Make the stream blocking so the
+    // read timeout below is what bounds the wait.
+    let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
 
     let Some(request_line) = read_request_line(&mut stream) else {
