@@ -413,12 +413,20 @@ fn unloading_writes_committed_within_200ms() {
         start.elapsed()
     );
 
+    // The plugin exits once its 200 ms unload window elapses whether or
+    // not the writer has landed the file yet (RT8); on the Windows runner
+    // the fsync + rename took longer than that. What this test checks is
+    // that the write was *handed over* before exit, so drain the writer
+    // — every other sender to it went away with the plugin thread — and
+    // only then read the file.
+    drop(handle);
+    writer.join();
+
     let file = paths.plugin_file("org.modplayer.test.scheduler");
     let contents = std::fs::read_to_string(&file)
         .unwrap_or_else(|e| unreachable!("expected {file:?} to exist: {e}"));
     assert!(contents.contains("hello"), "file contents: {contents}");
 
-    writer.join();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
