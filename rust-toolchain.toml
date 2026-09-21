@@ -5,3 +5,4 @@
 # available) so `cargo build --workspace` succeeds; `rust-version` in the
 # workspace manifest is bumped to match.
 channel = "1.95.0"
+components = ["rustfmt", "clippy"]
