@@ -84,6 +84,11 @@ fn overload_counts_and_names_costliest() {
         processor.render(&mut out);
     }
     let _ = drain_events(&mut events);
+    // The counter is cumulative and a settle render can itself overload
+    // on a slow machine (a debug-build render on the Windows CI runner
+    // did, 256 frames at 44.1 kHz being a 5.8 ms period), so measure the
+    // burned render as a delta.
+    let overloads_before = shared.overload_count();
 
     processor.debug_set_burn_ns(0, OVERLOAD_BURN_NS);
     processor.render(&mut out);
@@ -107,7 +112,7 @@ fn overload_counts_and_names_costliest() {
         ),
         "must name the only (and so costliest) active slot: {overloads:?}"
     );
-    assert_eq!(shared.overload_count(), 1);
+    assert_eq!(shared.overload_count(), overloads_before + 1);
     assert!(shared.over_budget());
 }
 
