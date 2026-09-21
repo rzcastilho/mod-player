@@ -667,6 +667,16 @@ pub struct PlaybackController<B: OutputBackend, H: SourceHost> {
     /// snapshot()` — compared by value (the model carries no revision
     /// counter of its own).
     plugin_snapshot_queue: Vec<QueueItemInfo>,
+    /// Set whenever `sync_marker_attachment` *replaces* `self.markers`
+    /// (a track change's load, or a clear): a freshly loaded
+    /// `TrackMarkers` starts at revision `0`, indistinguishable by
+    /// revision from the empty baseline it replaces, so the revision
+    /// diff alone would leave the snapshot's marker list stale — and a
+    /// plugin's `track_changed` handler reads exactly that list
+    /// (`markers.list()` is a local snapshot read) to rediscover its own
+    /// region (012 spec: "restored … before Section Loop observes
+    /// `track_changed`").
+    plugin_snapshot_markers_replaced: bool,
 
     /// 010-transport-focus (research R3, data-model.md §1.5): who is
     /// driving the transport method calls currently in flight — the
@@ -844,6 +854,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
             plugin_snapshot_marker_revision: 0,
             plugin_snapshot_chain_revision: 0,
             plugin_snapshot_queue: Vec::new(),
+            plugin_snapshot_markers_replaced: false,
             transport_actor: TransportActor::default(),
             plugin_panels: settings.plugin_panels.clone(),
             getting_started_dismissed: settings.getting_started_dismissed,
@@ -2129,7 +2140,8 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         let chain_changed = chain_revision != self.plugin_snapshot_chain_revision;
         let queue_items = queue_item_infos(&self.queue);
         let queue_changed = queue_items != self.plugin_snapshot_queue;
-        if !markers_changed && !chain_changed && !queue_changed {
+        let markers_replaced = std::mem::take(&mut self.plugin_snapshot_markers_replaced);
+        if !markers_changed && !chain_changed && !queue_changed && !markers_replaced {
             return;
         }
 
@@ -3504,6 +3516,9 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         self.flush_track_state();
         self.push_command_retrying(Command::LoopDisarm);
         self.markers = None;
+        // Either branch below replaces the model wholesale; the snapshot
+        // must follow even when the revision happens not to move.
+        self.plugin_snapshot_markers_replaced = true;
         self.marker_state_track = current_id;
         let Some(item) = current else {
             return;
@@ -4062,6 +4077,14 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
     /// `QueueChanged` (row 3's "any `QueueChange`").
     fn fan_out_plugin_playback_events(&mut self, is_queue_changed: bool) {
         let now = self.now();
+        // Publish the read model *before* any of the events below reach a
+        // plugin: a handler's `markers.list()`/`queue.list()`/`chain.list()`
+        // is a local snapshot read, and the snapshot is otherwise only
+        // republished at the end of the next `tick()`. Without this, a
+        // `track_changed` handler that relists its own region (Section
+        // Loop, 012 spec FR-11.3.2) races the host thread and, on a fast
+        // plugin thread, reads the *previous* track's markers.
+        self.publish_plugin_snapshot_if_changed();
         // 012-section-loop-plugin (FR-007): `api.playback.state()`'s local
         // dispatch (`PlaybackState`) reads this same atomic snapshot's own
         // `source_rate`/`intent` fields — kept in sync with the real
