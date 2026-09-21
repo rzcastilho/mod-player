@@ -58,16 +58,33 @@ fn cached_texture(
     png: Option<&DecodedPng>,
 ) -> Option<TextureHandle> {
     let png = png?;
-    ctx.memory_mut(|memory| {
-        let cache = memory
+    let cache_key = (plugin, key.to_string());
+    let cached = ctx.memory_mut(|memory| {
+        memory
             .data
-            .get_temp_mut_or_default::<PluginAssetCache>(cache_memory_id());
-        let handle = cache
+            .get_temp_mut_or_default::<PluginAssetCache>(cache_memory_id())
             .textures
-            .entry((plugin, key.to_string()))
-            .or_insert_with(|| upload(ctx, key, png));
-        Some(handle.clone())
-    })
+            .get(&cache_key)
+            .cloned()
+    });
+    if let Some(handle) = cached {
+        return Some(handle);
+    }
+    // Upload *outside* `memory_mut`: `load_texture` takes the `Context`
+    // lock itself (via `ctx.input()`), and `memory_mut` already holds it
+    // for writing — nesting the two deadlocks the UI thread (egui's
+    // debug build bails out after 10 s; release hangs). The whole frame
+    // runs on one thread, so nothing can slip in between the miss above
+    // and the insert below.
+    let handle = upload(ctx, key, png);
+    ctx.memory_mut(|memory| {
+        memory
+            .data
+            .get_temp_mut_or_default::<PluginAssetCache>(cache_memory_id())
+            .textures
+            .insert(cache_key, handle.clone());
+    });
+    Some(handle)
 }
 
 /// L5/FR-014a: draw a plugin's header icon at `size` — its own decoded
