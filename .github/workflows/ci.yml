@@ -47,6 +47,9 @@ jobs:
         run: cargo test --workspace
 
       - name: cargo deny check
+        # A Docker container action: runs on Linux only, and the licence/
+        # advisory/ban/source checks are platform-independent anyway.
+        if: matrix.os == 'ubuntu-latest'
         uses: EmbarkStudios/cargo-deny-action@v2
 
       - name: Check SPDX license headers
