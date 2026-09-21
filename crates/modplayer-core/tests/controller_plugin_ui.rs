@@ -367,6 +367,13 @@ fn request_focus_in_handler_auto_grants() {
     let id = controller_plugin_id(&mut controller, UI_PANEL);
     assert!(wait_active(&mut controller, id));
     assert!(wait_panel_registered(&mut controller, id));
+    // The fixture's `ready_ack` registers the panel and then, in a separate
+    // RPC, the `take_over` action; a click that lands in between resolves
+    // to "unregistered action" and is dropped, so wait for both.
+    assert!(wait_plugin_action_registered(
+        &mut controller,
+        &take_over_action_id()
+    ));
 
     controller.plugin_panel_interaction(
         id,
@@ -448,6 +455,12 @@ fn handler_throw_contained() {
 // directly at the controller level (the actual chord-to-action matching
 // is `modplayer-ui::actions::dispatch`'s own job — the plugin-ui/tests/
 // actions.rs::dispatch_returns_plugin_action_id, T065, covers that half).
+
+/// `"<ui-panel identifier>.take_over"` — the action the fixture's "Take
+/// Over" button names (`plugins/fixtures/ui-panel/main.luau`).
+fn take_over_action_id() -> PluginActionId {
+    PluginActionId::parse(&format!("{UI_PANEL}.take_over")).unwrap_or_else(|| unreachable!())
+}
 
 fn wait_plugin_action_registered(
     controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
@@ -641,6 +654,13 @@ fn button_action_source_ui() {
     let id = controller_plugin_id(&mut controller, UI_PANEL);
     assert!(wait_active(&mut controller, id));
     assert!(wait_panel_registered(&mut controller, id));
+    // The fixture's `ready_ack` registers the panel and then, in a separate
+    // RPC, the `take_over` action; a click that lands in between resolves
+    // to "unregistered action" and is dropped, so wait for both.
+    assert!(wait_plugin_action_registered(
+        &mut controller,
+        &take_over_action_id()
+    ));
 
     controller.plugin_panel_interaction(
         id,

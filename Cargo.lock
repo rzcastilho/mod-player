@@ -3314,11 +3314,13 @@ dependencies = [
 name = "modplayer-plugin-runtime"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "log",
  "mlua",
  "modplayer-capability-gateway",
  "modplayer-engine",
  "serde_json",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

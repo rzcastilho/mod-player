@@ -172,12 +172,7 @@ fn ready_creates_adjacent_pitch_and_stretch_nodes() {
     let id = key_tempo_id(&mut controller);
     assert!(wait_active(&mut controller, id), "Key & Tempo must launch");
 
-    assert!(
-        pump_until(&mut controller, Duration::from_secs(5), |c| {
-            c.chain().nodes().len() >= 2
-        }),
-        "Key & Tempo must create both of its nodes on a cold start"
-    );
+    assert_nodes_created(&mut controller, id);
 
     let nodes = controller.chain().nodes();
     assert_eq!(
@@ -242,6 +237,30 @@ fn ready_creates_adjacent_pitch_and_stretch_nodes() {
 /// Launches Key & Tempo through to both nodes existing (G1-G3), same
 /// cold-start shape `ready_creates_adjacent_pitch_and_stretch_nodes`
 /// verifies above — the shared starting point for every US1 test below.
+/// Waits for Key & Tempo's cold-start node creation (G1-G3); on a miss
+/// the message carries the plugin's lifecycle and console log, since the
+/// usual cause is its `ready_ack` handler having been aborted or the
+/// plugin suspended, not the nodes merely being slow.
+fn assert_nodes_created(controller: &mut KeyTempoController, id: PluginId) {
+    let created = pump_until(controller, Duration::from_secs(5), |c| {
+        c.chain().nodes().len() >= 2
+    });
+    assert!(
+        created,
+        "Key & Tempo must create both of its nodes on a cold start: lifecycle={:?} nodes={} log={:?}",
+        controller
+            .plugins_mut()
+            .record(id)
+            .map(|r| r.lifecycle.clone()),
+        controller.chain().nodes().len(),
+        controller
+            .plugin_log()
+            .entries()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
 fn key_tempo_ready() -> (KeyTempoController, TempDir, TempDir, TempDir, PluginId) {
     let (mut controller, dir, psd, tsd) = key_tempo_controller();
     controller.launch();
@@ -249,12 +268,7 @@ fn key_tempo_ready() -> (KeyTempoController, TempDir, TempDir, TempDir, PluginId
     controller.confirm_device(dev_id, BufferPreset::Balanced);
     let id = key_tempo_id(&mut controller);
     assert!(wait_active(&mut controller, id), "Key & Tempo must launch");
-    assert!(
-        pump_until(&mut controller, Duration::from_secs(5), |c| {
-            c.chain().nodes().len() >= 2
-        }),
-        "Key & Tempo must create both of its nodes on a cold start"
-    );
+    assert_nodes_created(&mut controller, id);
     // G2 "neither present" (T045/T047): right after creating both nodes,
     // the script runs the FR-012 default-reset logic for the (here,
     // absent) current track — a handful of `set_param` calls that are

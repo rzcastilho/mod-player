@@ -369,11 +369,31 @@ fn track(id: &str) -> TrackRef {
 
 /// Build a controller over a confirmed device, ready for `play()` (mirrors
 /// `controller_streaming.rs`'s `ready_controller`).
+/// Clears every discovered record's `enabled` flag so `launch()` spawns
+/// no plugin thread: this file asserts on exactly the nodes it adds to
+/// the chain itself, and Key & Tempo (013) would otherwise add its own
+/// pitch/stretch pair asynchronously from `ready_ack` (the fixture-driven
+/// tests further down use their own harness and opt fixtures back in).
+fn leave_plugins_unlaunched(controller: &mut PlaybackController<FakeBackend, ScriptedHost>) {
+    let ids: Vec<_> = controller
+        .plugins_mut()
+        .records()
+        .iter()
+        .map(|r| r.id)
+        .collect();
+    for id in ids {
+        if let Some(record) = controller.plugins_mut().record_mut(id) {
+            record.enabled = false;
+        }
+    }
+}
+
 fn ready_controller() -> (PlaybackController<FakeBackend, ScriptedHost>, TempDir) {
     let (store, dir) = fresh_store();
     let host = ScriptedHost::new();
     let devices = vec![fake_device()];
     let mut controller = PlaybackController::new(FakeBackend::new(devices), host, store);
+    leave_plugins_unlaunched(&mut controller);
     controller.launch();
     let dev_id = DeviceId::new("dev-1").unwrap_or_else(|| unreachable!());
     controller.confirm_device(dev_id, BufferPreset::Balanced);
@@ -393,6 +413,7 @@ fn ready_controller_with_handle() -> (
     let handle = host.handle();
     let devices = vec![fake_device()];
     let mut controller = PlaybackController::new(FakeBackend::new(devices), host, store);
+    leave_plugins_unlaunched(&mut controller);
     controller.launch();
     let dev_id = DeviceId::new("dev-1").unwrap_or_else(|| unreachable!());
     controller.confirm_device(dev_id, BufferPreset::Balanced);

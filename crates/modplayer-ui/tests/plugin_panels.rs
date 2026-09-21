@@ -155,9 +155,41 @@ fn is_suspended(
     )
 }
 
+/// Waits until the `ui-panel` fixture has finished *all* of its own
+/// start-up RPCs: `ready_ack` registers the panel, then two actions, then
+/// arms a 20 ms timer whose handler calls `request_focus()` (the R16
+/// contrast probe). The panel showing up is only the first of those.
+///
+/// Why this matters here: `interaction_count`'s `Request::DebugProbe` is
+/// served by core with the controller thread *blocked* on the plugin's
+/// reply for up to 250 ms, and the plugin only answers probes between
+/// handlers. A probe issued while the fixture is still inside a handler
+/// waiting on an RPC that only the controller's next `tick()` can answer
+/// deadlocks until that timeout and comes back `host_busy` (`-1`). The
+/// timer's `request_focus` landing in the arbiter's pending queue is the
+/// last RPC of the fixture's start-up, so it marks the fixture quiescent.
+fn wait_ui_panel_quiescent(
+    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+    id: PluginId,
+) {
+    assert!(
+        pump_until(controller, Duration::from_secs(2), |c| {
+            !c.plugin_panels_view().docked.is_empty()
+        }),
+        "the fixture's ready_ack handler must have registered its panel"
+    );
+    assert!(
+        pump_until(controller, Duration::from_secs(5), |c| {
+            c.plugins_mut().arbiter().pending().contains(&id)
+        }),
+        "the fixture's start-up timer must have recorded its request_focus"
+    );
+}
+
 /// A controller with the `ui-panel` fixture spawned, `Active`, and its
 /// "Controls" panel already registered (waits for the fixture's own
-/// asynchronous `ready_ack` handler).
+/// asynchronous `ready_ack` handler and start-up timer to finish; see
+/// `wait_ui_panel_quiescent`).
 fn launch_ui_panel(
     label: &str,
 ) -> (
@@ -177,12 +209,7 @@ fn launch_ui_panel(
         )),
         "the ui-panel fixture must reach Active on its own"
     );
-    assert!(
-        pump_until(&mut controller, Duration::from_secs(2), |c| {
-            !c.plugin_panels_view().docked.is_empty()
-        }),
-        "the fixture's ready_ack handler must have registered its panel"
-    );
+    wait_ui_panel_quiescent(&mut controller, id);
     (controller, dir, psd, tsd, id)
 }
 
@@ -848,13 +875,21 @@ fn float_clamped_into_window() {
 fn placeholder_on_suspend() {
     // Not `launch_ui_panel`: the running plugin thread captures its
     // `Budgets` once, at spawn (mirrors `plugins_view.rs`'s own
-    // `suspended_row_shows_dash_gauges`), so the 1 ms share override must
-    // land *before* `spawn`, not after the fixture is already `Active`.
+    // `suspended_row_shows_dash_gauges`), so the share override must land
+    // *before* `spawn`, not after the fixture is already `Active`.
+    //
+    // 3 ms, not the 1 ms the hang-fixture tests use: this test asserts the
+    // *cause* text, and the ui-panel fixture's own `ready_ack` (a
+    // 16-widget `register_panel` plus two `register_action`s) can cost
+    // over 1 ms of CPU on its own, which would suspend it as `CpuShare`
+    // before the hang click even lands. The hang abort's sample is ≥ the
+    // 4 ms handler budget by construction, so any share under 4 ms still
+    // classifies it as `Hang`.
     let (mut controller, _dir, _psd, _tsd) = fixture_controller("placeholder-suspend");
     let id = fixture_id(&mut controller, UI_PANEL);
     if let Some(record) = controller.plugins_mut().record_mut(id) {
         record.budgets = modplayer_capability_gateway::budgets::Budgets {
-            share: Duration::from_millis(1),
+            share: Duration::from_millis(3),
             ..modplayer_capability_gateway::budgets::Budgets::DEFAULT
         };
     }
@@ -866,21 +901,16 @@ fn placeholder_on_suspend() {
         )),
         "the ui-panel fixture must reach Active on its own"
     );
-    assert!(
-        pump_until(&mut controller, Duration::from_secs(2), |c| {
-            !c.plugin_panels_view().docked.is_empty()
-        }),
-        "the fixture's ready_ack handler must have registered its panel"
-    );
+    wait_ui_panel_quiescent(&mut controller, id);
 
-    // A 1 ms share suspends the fixture's own "hang" busy-loop probe the
+    // A 3 ms share suspends the fixture's own "hang" busy-loop probe the
     // moment it runs.
     controller.plugin_panel_interaction(id, &wid("main"), &wid("hang"), WidgetValue::Bool(true));
     assert!(
         pump_until(&mut controller, Duration::from_secs(2), |c| is_suspended(
             c, id
         )),
-        "the hang probe must suspend the fixture under a 1ms share"
+        "the hang probe must suspend the fixture under a 3ms share"
     );
 
     let ctx = Context::default();

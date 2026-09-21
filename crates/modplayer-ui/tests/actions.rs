@@ -124,6 +124,19 @@ fn active_controller(
     ScriptedHostHandle,
     TestDirs,
 ) {
+    active_controller_with(label, |_| {})
+}
+
+/// `active_controller` with a hook that runs on the constructed
+/// controller *before* `launch()`.
+fn active_controller_with(
+    label: &str,
+    before_launch: impl FnOnce(&mut PlaybackController<FakeBackend, ScriptedHost>),
+) -> (
+    PlaybackController<FakeBackend, ScriptedHost>,
+    ScriptedHostHandle,
+    TestDirs,
+) {
     let (store, dir) = fresh_store(label);
     let track_state_dir = TempDir::new(&format!("{label}-track-state"));
     let host = ScriptedHost::new();
@@ -141,6 +154,7 @@ fn active_controller(
         unsafe { std::env::remove_var("MODPLAYER_TRACK_STATE_DIR") };
         controller
     };
+    before_launch(&mut controller);
     controller.launch();
     controller.confirm_device(
         DeviceId::new("dev-1").unwrap_or_else(|| unreachable!()),
@@ -149,6 +163,37 @@ fn active_controller(
     controller.set_playback_permitted(true, None);
     controller.tick();
     (controller, handle, TestDirs(dir, track_state_dir))
+}
+
+/// `active_controller`, but with every bundled plugin left un-launched.
+/// The tempo-step tests below add their own `TimeStretch` node and
+/// assert on it, while `tempo_step` acts on the chain's *first*
+/// time-stretch node — and Key & Tempo (013), launched by `launch()`,
+/// creates its own pitch/stretch pair asynchronously from `ready_ack`.
+/// Whichever node landed first won, which made those tests
+/// timing-dependent. `launch()` only spawns records flagged `enabled`,
+/// so clearing the flag first means no plugin thread ever exists here:
+/// nothing to race, nothing to drain.
+fn active_controller_without_bundled_plugins(
+    label: &str,
+) -> (
+    PlaybackController<FakeBackend, ScriptedHost>,
+    ScriptedHostHandle,
+    TestDirs,
+) {
+    active_controller_with(label, |controller| {
+        let ids: Vec<PluginId> = controller
+            .plugins_mut()
+            .records()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        for id in ids {
+            if let Some(record) = controller.plugins_mut().record_mut(id) {
+                record.enabled = false;
+            }
+        }
+    })
 }
 
 fn default_input() -> RawInput {
@@ -1684,7 +1729,8 @@ fn disabled_tempo_binding_does_not_block_and_flags_on_enable() {
 /// nudging the first time-stretch node's ratio each time.
 #[test]
 fn tempo_actions_enabled_and_repeat() {
-    let (mut controller, _handle, _dirs) = active_controller("tempo-enabled-repeat");
+    let (mut controller, _handle, _dirs) =
+        active_controller_without_bundled_plugins("tempo-enabled-repeat");
     assert!(controller.actions().is_enabled(HostAction::TempoStepUp));
     assert!(controller.actions().is_enabled(HostAction::TempoStepDown));
 
@@ -1739,7 +1785,8 @@ fn tempo_actions_enabled_and_repeat() {
 /// the tempo action ever reaching the dispatcher.
 #[test]
 fn plus_minus_step_tempo_unless_waveform_focused() {
-    let (mut controller, _handle, _dirs) = active_controller("tempo-vs-waveform");
+    let (mut controller, _handle, _dirs) =
+        active_controller_without_bundled_plugins("tempo-vs-waveform");
     controller.queue_replace(vec![track("a", 200_000)]);
     controller.play();
     controller.tick();
@@ -1819,7 +1866,8 @@ fn plus_minus_step_tempo_unless_waveform_focused() {
 /// `TempoStepUp` with the waveform focused).
 #[test]
 fn shift_equals_plus_on_focused_waveform_never_steps_tempo() {
-    let (mut controller, _handle, _dirs) = active_controller("tempo-vs-waveform-shift-plus");
+    let (mut controller, _handle, _dirs) =
+        active_controller_without_bundled_plugins("tempo-vs-waveform-shift-plus");
     controller.queue_replace(vec![track("a", 200_000)]);
     controller.play();
     controller.tick();
@@ -1889,7 +1937,8 @@ fn shift_equals_plus_on_focused_waveform_never_steps_tempo() {
 /// produces its own `TempoStepUp` invocation (`repeats_while_held`).
 #[test]
 fn plus_without_time_stretch_notifies_once_while_held() {
-    let (mut controller, _handle, _dirs) = active_controller("tempo-no-node-notify");
+    let (mut controller, _handle, _dirs) =
+        active_controller_without_bundled_plugins("tempo-no-node-notify");
     controller.queue_replace(vec![track("a", 200_000)]);
     controller.play();
     controller.tick();

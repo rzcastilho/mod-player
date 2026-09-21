@@ -26,8 +26,12 @@ jobs:
           sudo apt-get install -y libasound2-dev libxkbcommon-dev libwayland-dev pkg-config
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        # Must match the pin in rust-toolchain.toml: rustup honours that file
+        # over the action's default, so installing `stable` here leaves the
+        # pinned toolchain without rustfmt/clippy and `cargo fmt` fails.
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.95.0
           components: rustfmt, clippy
 
       - name: Cache cargo registry and build artifacts
@@ -43,6 +47,9 @@ jobs:
         run: cargo test --workspace
 
       - name: cargo deny check
+        # A Docker container action: runs on Linux only, and the licence/
+        # advisory/ban/source checks are platform-independent anyway.
+        if: matrix.os == 'ubuntu-latest'
         uses: EmbarkStudios/cargo-deny-action@v2
 
       - name: Check SPDX license headers

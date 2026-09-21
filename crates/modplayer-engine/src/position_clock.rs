@@ -35,6 +35,13 @@ impl PositionClock {
         } else {
             anchor.position_frames
         };
+        // A render that runs late publishes an anchor whose true position
+        // is behind what was already extrapolated (by at most the cap
+        // above); hold the last report across that rather than stepping
+        // the playhead backwards. Anything further back is a real seek or
+        // track change and passes straight through.
+        let hold_within = u64::from(anchor.buffer_frames) * 2;
+        let position_frames = shared.monotonic_position(position_frames, hold_within);
         frames_to_duration(position_frames, source_rate)
     }
 }
@@ -69,6 +76,39 @@ mod tests {
             elapsed > Duration::ZERO,
             "position must advance while playing"
         );
+    }
+
+    /// A late anchor whose true position is behind the extrapolated
+    /// report must not step the clock backwards; a real seek back must.
+    #[test]
+    fn late_anchor_never_steps_backwards_but_a_seek_does() {
+        let shared = RtShared::new();
+        // Anchor at 10_000 frames; after well over two buffers' worth of
+        // wall time the extrapolation sits at the cap, 10_000 + 512.
+        shared.write_anchor(10_000, Instant::now(), true, 256, 1.0);
+        thread::sleep(Duration::from_millis(30));
+        let ahead = PositionClock::now(&shared, 44_100);
+        assert!(
+            ahead > frames_to_duration(10_500, 44_100),
+            "sanity: extrapolation must have reached the cap: {ahead:?}"
+        );
+        // The render thread now publishes the real position: only one
+        // buffer actually rendered.
+        shared.write_anchor(10_256, Instant::now(), true, 256, 1.0);
+        let after = PositionClock::now(&shared, 44_100);
+        assert!(
+            after >= ahead,
+            "late anchor stepped back: {ahead:?} -> {after:?}"
+        );
+
+        // A seek back well beyond the cap is a real move and passes.
+        shared.write_anchor(1_000, Instant::now(), true, 256, 1.0);
+        let seeked = PositionClock::now(&shared, 44_100);
+        assert!(
+            seeked < after,
+            "a seek must move the clock back: {seeked:?}"
+        );
+        assert!(seeked < Duration::from_millis(40));
     }
 
     #[test]

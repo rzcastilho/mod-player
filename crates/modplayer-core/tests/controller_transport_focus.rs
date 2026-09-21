@@ -625,12 +625,22 @@ fn local_loop_toggle_applies_and_returns_focus_under_auto() {
         FocusHolder::Host,
         "a local loop toggle must return focus to the host under Auto"
     );
+    // Seen to fail once on a hosted Linux runner and never reproduced
+    // locally; the message carries everything needed to read that run.
+    let armed = controller
+        .markers()
+        .and_then(|m| m.armed_region())
+        .map(|r| r.id);
+    let regions: Vec<(RegionId, bool)> = controller
+        .markers()
+        .map(|m| m.regions().iter().map(|r| (r.id, r.armed)).collect())
+        .unwrap_or_default();
+    let current = controller.markers().and_then(|m| m.current_region());
     assert!(
-        controller
-            .markers()
-            .and_then(|m| m.armed_region())
-            .is_none(),
-        "the region itself must actually be disarmed"
+        armed.is_none(),
+        "the region itself must actually be disarmed: armed={armed:?} current={current:?} \
+         regions(id, armed)={regions:?} focus-a log={:?}",
+        probe_log(&mut controller, id_a)
     );
 
     assert!(
@@ -1038,9 +1048,16 @@ fn manual_two_requests_both_pending_until_give() {
         ),
         "the user's own Give focus must grant focus-a"
     );
-    assert_eq!(
-        controller.plugins_mut().arbiter().request_order(id_b),
-        Some(1),
+    // Pending, not a fixed queue position: `fixture_controller` launches
+    // every fixture, and `ui-panel`/`wellbehaved`/`flood` request focus
+    // on their own schedule, so who queued ahead of focus-b is a matter
+    // of thread timing (the Windows runner ordered it differently).
+    assert!(
+        controller
+            .plugins_mut()
+            .arbiter()
+            .request_order(id_b)
+            .is_some(),
         "focus-b is still just listed as requesting, never auto-granted under Manual"
     );
 }
@@ -1363,9 +1380,14 @@ fn pending_plugin_disabled_leaves_queue_and_panel() {
         ),
         "focus_give must grant focus-a"
     );
-    assert_eq!(
-        controller.plugins_mut().arbiter().request_order(id_b),
-        Some(1),
+    // Pending, not a fixed queue position — see
+    // `manual_two_requests_both_pending_until_give`'s own note on the other fixtures.
+    assert!(
+        controller
+            .plugins_mut()
+            .arbiter()
+            .request_order(id_b)
+            .is_some(),
         "focus-b must still be pending ahead of this test's own action"
     );
 

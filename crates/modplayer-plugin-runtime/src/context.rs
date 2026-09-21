@@ -3,6 +3,7 @@
 //! `PluginContext`: one plugin's sandboxed Luau state plus everything its
 //! bindings need (RT1, RT2; data-model.md §2).
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use mlua::{Lua, LuaOptions, StdLib};
@@ -58,7 +59,20 @@ pub struct Shared {
     /// request_focus`'s binding reads it (and only it) to mark the RPC as
     /// user-interaction-originated.
     pub in_interaction_handler: bool,
+    /// The last few track scopes `flush_scope` handed to the writer
+    /// thread, newest first, as `(track id, encoded bytes)`. The writer
+    /// is asynchronous (fsync + rename), so a `TrackChanged` straight back
+    /// to a just-left track can otherwise read the file before the write
+    /// has landed and restore an empty scope; `restore_track_state`
+    /// consults this before touching disk. Bounded to
+    /// [`RECENT_TRACK_FLUSHES`] entries; every entry is already bounded by
+    /// `budgets.storage`.
+    pub recent_track_flushes: VecDeque<(String, Vec<u8>)>,
 }
+
+/// How many recently flushed track scopes [`Shared::recent_track_flushes`]
+/// keeps.
+pub const RECENT_TRACK_FLUSHES: usize = 8;
 
 /// A context failed to come up (RT5 "script error -> Exited").
 #[derive(Debug)]

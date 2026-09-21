@@ -19,6 +19,7 @@ use egui::{Context, Event, Key, Modifiers, PointerButton, Pos2, RawInput, Rect};
 use modplayer_audio_io::{FakeBackend, FakeDevice};
 use modplayer_audio_source::{Availability, TrackId, TrackRef};
 use modplayer_audio_source_synthetic::ScriptedHost;
+use modplayer_core::plugins::PluginId;
 use modplayer_core::settings::SettingsStore;
 use modplayer_core::{NodeId, PlaybackController, tr};
 use modplayer_effects::catalog::{NodeKind, ParamId};
@@ -88,6 +89,21 @@ fn ready_controller(label: &str) -> (PlaybackController<FakeBackend, ScriptedHos
     let devices = vec![fake_device()];
     let mut controller =
         PlaybackController::new(FakeBackend::new(devices), ScriptedHost::new(), store);
+    // Bundled plugins stay un-launched: `launch()` only spawns records
+    // flagged `enabled`, and Key & Tempo (013) would otherwise add its
+    // own pitch/stretch nodes to the chain asynchronously, racing every
+    // test here that asserts on exactly the nodes it added itself.
+    let bundled: Vec<PluginId> = controller
+        .plugins_mut()
+        .records()
+        .iter()
+        .map(|r| r.id)
+        .collect();
+    for id in bundled {
+        if let Some(record) = controller.plugins_mut().record_mut(id) {
+            record.enabled = false;
+        }
+    }
     controller.launch();
     controller.confirm_device(
         DeviceId::new("dev-1").unwrap_or_else(|| unreachable!()),

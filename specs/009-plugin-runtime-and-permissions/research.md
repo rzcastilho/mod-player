@@ -167,8 +167,8 @@ thread" that owns the models — same refactor plus a second authority.
 
 | Budget | Mechanism |
 |---|---|
-| 4 ms per handler | Before each handler call the scheduler stores `deadline = now + 4 ms` in an `AtomicU64` (nanos since context start). The `set_interrupt` callback compares `Instant::now()` against it and returns `Err(BudgetExceeded)` when passed. Cost per check ≈ 25 ns (one monotonic clock read); Luau calls it at loop back-edges and calls. RPC waits push the deadline forward by the wait length. |
-| 10 % of one core over 1 s | A `VecDeque<(Instant, Duration)>` of handler durations (RPC waits excluded); after every handler completion or abort, evict samples older than 1 s and suspend if the sum > 100 ms. |
+| 4 ms per handler | Measured as the plugin thread's own CPU time (`CLOCK_THREAD_CPUTIME_ID` / `GetThreadTimes`, `cpu_clock.rs`) — "time during which the plugin's context is executing" excludes time the OS has it descheduled or blocked. Reading that clock is a syscall, too slow for the `set_interrupt` callback Luau runs at loop back-edges and calls, so before each handler the scheduler records the CPU clock and stores a wall-clock *trigger* `now + 4 ms` in an `AtomicU64` (nanos since context start). The callback compares `Instant::now()` against the trigger (≈ 25 ns); only once it has passed does it read the CPU clock, re-arming the trigger from the CPU still unspent, or returning `Err(BudgetExceeded)` when the 4 ms really are burnt. RPC waits push the trigger forward by the wait length so a slow host reply never even costs the CPU read. |
+| 10 % of one core over 1 s | A `VecDeque<(Instant, Duration)>` of handler thread-CPU durations; after every handler completion or abort, evict samples older than 1 s and suspend if the sum > 100 ms. |
 | 64 MB heap | `Lua::set_memory_limit(64 * 1024 * 1024)`; any `Error::MemoryError` surfacing from a handler suspends the plugin (`cause: Memory`). `used_memory()` is sampled after every handler into the `PluginGauges` atomics for the list. |
 | 10 MB storage | `PluginStateStore` (R9) accounts the serialized size of all keys+values across both scopes; a `set` that would exceed it (or 256-byte key / 1 MB value) returns `budget_exceeded`/`storage_cap` and leaves the store unchanged. |
 | `ready()` within 5 s | The scheduler's first wake deadline; on expiry with no `ready()` → suspend (`cause: DidNotStart`). |
@@ -179,9 +179,12 @@ reported as `RuntimeEvent::HandlerAborted { cause }`; core's
 `PluginRecord` keeps the 3-in-60 s → `warning` → clear-after-5-min window
 (FR-010) with the controller's injectable clock.
 
-**Alternatives considered**: counting Luau instructions instead of wall
-time — deterministic but not what the spec measures ("wall-clock time
-during which the plugin's context is executing"); `luau-jit` — faster but
+**Alternatives considered**: counting Luau instructions instead of time —
+deterministic but not what the spec measures ("time during which the
+plugin's context is executing"); pure wall-clock deadlines (the first
+implementation) — cheapest, but charged the plugin for time it was
+descheduled or blocked, so on a loaded machine well-behaved plugins were
+aborted and suspended for work they never did; `luau-jit` — faster but
 interrupt points in generated code are the same, and JIT adds a moving
 target to the memory accounting.
 
@@ -218,11 +221,16 @@ about to be suspended anyway), `Inbound::Control` (`Unloading{reason}`,
   `ready_ack`, `unloading`) are pushed by core's `fan_out(event)` filtered
   by each plugin's grants (FR-028); ordering per plugin is the inbox order.
 - **`track_changed` with state restored first** (FR-021): the plugin
-  thread, on dequeuing `TrackChanged`, loads the per-track file for that
-  track into the store under a 4 ms deadline (the read is host code with a
-  deadline check between read and parse); on overrun the load is dropped,
-  a `HandlerAborted{cause: RestoreTimeout}` is reported and the event is
-  delivered with no per-track state.
+  thread, on dequeuing `TrackChanged`, loads the per-track scope for that
+  track into the store — from its own record of recently flushed scopes
+  when the track was just left (the writer is asynchronous, so the file may
+  not have landed yet), else from the per-track file. A file over the
+  `budgets.storage` cap is refused unread: a `HandlerAborted{cause:
+  RestoreTimeout}` is reported and the event is delivered with no
+  per-track state. (An earlier revision timed the read against a 4 ms
+  wall-clock deadline and discarded the bytes on overrun; that lost state
+  under ordinary IO/scheduling jitter without bounding anything, since the
+  time was already spent.)
 
 **Alternatives considered**: a single shared "plugin clock" thread pushing
 positions to every plugin — breaks "a slow handler delays only that

@@ -53,18 +53,24 @@ Constitution I, II, VII, VIII, IX. Types are in
   (64 MiB)`, `set_interrupt(budget check)`, install `api`, then
   `sandbox(true)` so globals/builtins are read-only before the entry
   script runs. No `require`, `loadstring`, `io`, `os`, `debug`.
-- **RT3 Handler invocation**: `run_handler(name, payload)` sets
-  `deadline = now + 4 ms`, calls the Lua function, and maps the result:
-  `Ok` → sample recorded; `Err(RuntimeError|CallbackError)` with the
-  budget marker → `HandlerAborted{Deadline}`; any other `Err` →
+- **RT3 Handler invocation**: `run_handler(name, payload)` arms a 4 ms
+  budget of the plugin thread's own *CPU time* (FR-009), calls the Lua
+  function, and maps the result: `Ok` → sample recorded;
+  `Err(RuntimeError|CallbackError)` with the budget marker →
+  `HandlerAborted{Deadline}`; any other `Err` →
   `HandlerAborted{Exception(text)}` (logged at `error`);
   `Err(MemoryError)` → `Suspended{Memory}`. The Lua state is reused after
-  a Deadline/Exception abort (the error unwound cleanly).
-- **RT4 Aggregate share**: after every handler completion or abort,
-  `samples` (durations excluding RPC waits) older than 1 s are evicted; if
-  the sum exceeds 100 ms → `Suspended{CpuShare}` (or `Hang` when the last
-  sample was itself a Deadline abort) and the thread proceeds to RT8 with
-  reason `Suspend`.
+  a Deadline/Exception abort (the error unwound cleanly). Mechanically the
+  interrupt callback compares a cheap wall-clock trigger (`now + 4 ms`,
+  pushed out by any RPC wait per RT7); only once that has passed does it
+  read the thread CPU clock, and it re-arms the trigger from the CPU still
+  unspent rather than aborting a handler that was merely descheduled or
+  blocked. Time off-CPU is never charged.
+- **RT4 Aggregate share**: after every handler completion or abort, its
+  thread-CPU duration is recorded; `samples` older than 1 s are evicted;
+  if the sum exceeds 100 ms → `Suspended{CpuShare}` (or `Hang` when the
+  last sample was itself a Deadline abort) and the thread proceeds to RT8
+  with reason `Suspend`.
 - **RT5 Ready gate**: no `HostEvent` is dispatched to handlers before
   `api.ready()`; inbound events before it are held (up to the inbox cap);
   if `ready()` has not been called 5 s after context creation →
@@ -97,11 +103,17 @@ Constitution I, II, VII, VIII, IX. Types are in
   macOS/Linux (test `position_jitter_under_5ms`), Windows measured
   manually (research R5 risk).
 - **RT11 Track state restore**: on `HostEvent::TrackChanged{track}` the
-  thread first loads `<tracks>/<hex(track)>.json` into the store's track
-  scope with a 4 ms deadline between read and parse; overrun ⇒ discard,
-  `HandlerAborted{RestoreTimeout}`, then deliver `track_changed` with an
-  empty track scope. The previous track scope is flushed (dirty ⇒
-  `WriteJob`) before the load.
+  thread first loads the new track's scope into the store, then delivers
+  `track_changed`. The previous track scope is flushed (dirty ⇒
+  `WriteJob`) before the load. Because the writer is asynchronous, the
+  thread keeps the last few flushed track scopes in memory and restores
+  from that record when the same track comes straight back, so a return
+  never depends on the write having landed. Otherwise the bytes come from
+  `<tracks>/<hex(track)>.json`; a file larger than `budgets.storage`
+  (which the store enforces on every write, so it cannot be the store's
+  own) is refused unread ⇒ `HandlerAborted{RestoreTimeout}` and an empty
+  track scope. A read that merely took long is never discarded after the
+  fact — that would only lose state without bounding anything.
 - **RT12 Faults never escape**: the thread body is wrapped in
   `std::panic::catch_unwind`; a panic (which `mlua` with
   `catch_rust_panics` already converts) becomes `Suspended{Hang}` +

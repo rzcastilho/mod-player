@@ -1,0 +1,4 @@
+# Embedded sources (`include_str!` of .ftl/.luau/.toml/.md, hash-pinned
+# disclosure text) must have identical bytes on every platform: keep LF
+# in the working tree everywhere, whatever core.autocrlf says.
+* text=auto eol=lf

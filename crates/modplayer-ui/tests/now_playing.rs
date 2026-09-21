@@ -19,6 +19,7 @@ use modplayer_audio_source::{Availability, SourceCommand, SourceHealth, TrackId,
 use modplayer_audio_source_synthetic::{ScriptedHost, ScriptedHostHandle};
 use modplayer_core::actions::ScopeState;
 use modplayer_core::markers::{CueSlot, TrackMarkers};
+use modplayer_core::plugins::PluginId;
 use modplayer_core::settings::SettingsStore;
 use modplayer_core::transport::Intent;
 use modplayer_core::{NotRegisteredReason, PlaybackController, tr};
@@ -124,6 +125,22 @@ fn active_controller(
         unsafe { std::env::remove_var("MODPLAYER_TRACK_STATE_DIR") };
         controller
     };
+    // Bundled plugins stay un-launched: `launch()` only spawns records
+    // flagged `enabled`, and Key & Tempo (013) would otherwise register
+    // its panel into the Now Playing dock asynchronously, shifting the
+    // layout between one frame and the next under the tests here that
+    // measure a widget's bounds and then click it.
+    let bundled: Vec<PluginId> = controller
+        .plugins_mut()
+        .records()
+        .iter()
+        .map(|r| r.id)
+        .collect();
+    for id in bundled {
+        if let Some(record) = controller.plugins_mut().record_mut(id) {
+            record.enabled = false;
+        }
+    }
     controller.launch();
     controller.confirm_device(
         DeviceId::new("dev-1").unwrap_or_else(|| unreachable!()),

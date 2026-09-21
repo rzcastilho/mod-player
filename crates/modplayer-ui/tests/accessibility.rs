@@ -135,6 +135,21 @@ fn active_controller(
         unsafe { std::env::remove_var("MODPLAYER_TRACK_STATE_DIR") };
         controller
     };
+    // Bundled plugins stay un-launched: `launch()` only spawns records
+    // flagged `enabled`, and Key & Tempo (013) would otherwise add its
+    // own pitch/stretch nodes to the chain asynchronously, racing every
+    // test here that asserts on exactly the nodes it added itself.
+    let bundled: Vec<PluginId> = controller
+        .plugins_mut()
+        .records()
+        .iter()
+        .map(|r| r.id)
+        .collect();
+    for id in bundled {
+        if let Some(record) = controller.plugins_mut().record_mut(id) {
+            record.enabled = false;
+        }
+    }
     controller.launch();
     controller.confirm_device(
         DeviceId::new("dev-1").unwrap_or_else(|| unreachable!()),
