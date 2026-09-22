@@ -9,12 +9,17 @@
 use egui::{ScrollArea, Ui};
 use modplayer_core::tr;
 
+use crate::theme;
+
 /// Draw the privacy notice. Returns `true` once "Back" is clicked, so the
 /// caller (`welcome.rs`, and later `settings/about.rs`) can pop back to
 /// whichever screen opened this one.
 pub fn show(ui: &mut Ui) -> bool {
     ui.heading(tr("privacy-title"));
     ScrollArea::vertical().show(ui, |ui| {
+        // FR-006, U2: the privacy notice is prose, capped at the
+        // 72-character measure rather than spanning the window.
+        ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
         ui.label(tr("privacy-body"));
     });
     ui.button(tr("privacy-back")).clicked()

@@ -6,8 +6,10 @@
 //! (FR-016); no full-view spinner exists.
 
 use egui::accesskit::Role;
-use egui::{CornerRadius, Sense, Ui, Vec2};
+use egui::{Sense, Ui, Vec2};
 use modplayer_core::tr;
+
+use crate::theme;
 
 /// Track-row height (research R9: "56 px track rows, 72 px album/artist/
 /// playlist rows") — the default a caller renders while a row of unknown
@@ -25,7 +27,7 @@ pub fn skeleton_row(ui: &mut Ui, height: f32) {
 
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
-        painter.rect_filled(rect, CornerRadius::from(4u8), ui.visuals().faint_bg_color);
+        painter.rect_filled(rect, theme::radius::SM, ui.visuals().faint_bg_color);
     }
 
     ui.ctx().accesskit_node_builder(response.id, |builder| {

@@ -13,6 +13,8 @@ use modplayer_audio_source::SourceHost;
 use modplayer_core::{PlaybackController, tr};
 use modplayer_engine::{BufferPreset, DeviceId, NegotiatedBuffer, SampleRate};
 
+use crate::theme;
+
 /// The three device-buffer presets shown in the combo, in display order
 /// (contracts/ui-surface.md).
 const PRESETS: [BufferPreset; 3] = [
@@ -50,7 +52,12 @@ impl DeviceCheckScreen {
 
         // Empty state (zero devices): only Skip (contracts/ui-surface.md).
         if devices.is_empty() {
-            ui.label(tr("device-check-no-devices"));
+            ui.scope(|ui| {
+                // FR-006, U2: help text, capped at the 72-character
+                // measure.
+                ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
+                ui.label(tr("device-check-no-devices"));
+            });
             if ui.button(tr("device-check-skip")).clicked() {
                 controller.skip_device_check();
                 return true;
@@ -109,7 +116,11 @@ impl DeviceCheckScreen {
             controller.play_test_tone();
         }
 
-        ui.label(tr("device-check-question"));
+        ui.scope(|ui| {
+            // FR-006, U2: help text, capped at the 72-character measure.
+            ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
+            ui.label(tr("device-check-question"));
+        });
         let mut close = false;
         ui.horizontal(|ui| {
             if ui.button(tr("device-check-yes")).clicked() {

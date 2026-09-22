@@ -33,6 +33,8 @@ use modplayer_capability_gateway::ui::limits::MAX_STRING_FIELD_CHARS;
 use modplayer_capability_gateway::ui::{FieldKind, ListItem, SettingsField};
 use modplayer_core::{PlaybackController, PluginId, tr};
 
+use crate::theme;
+
 /// UI-only navigation state: which plugin's sub-page (if any) is open.
 /// Field values themselves are never cached here — they are read fresh
 /// from `PluginSettingsView` every frame (S7).
@@ -68,7 +70,16 @@ pub fn show<B: OutputBackend, H: SourceHost>(
             if ui.button(tr("settings-plugins-back")).clicked() {
                 screen.open = None;
             }
-            ui.heading(view.name.clone());
+            // 014-design-tokens-and-type-scale (US2, T033, data-model.md §6
+            // "settings groups" -> `theme::section_label`), with the
+            // accesskit label pinned back to the exact `view.name` (mirrors
+            // `settings::controls::section_heading`/`markers::panel`, T030)
+            // so the accessible name doesn't pick up the painted uppercase
+            // text (FR-019).
+            let heading = ui.label(theme::section_label(&view.name));
+            ui.ctx().accesskit_node_builder(heading.id, |b| {
+                b.set_label(view.name.clone());
+            });
             let field_focus = focus.and_then(|(p, f)| (p == plugin).then_some(f));
             for field in &view.page.fields {
                 let value = view.page.values.get(field.id.as_str());
@@ -82,7 +93,7 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     }
 
     ui.label(tr("placeholder-settings-category"));
-    ui.separator();
+    theme::divider(ui);
     ui.label(tr("settings-plugins-pages"));
     if views.is_empty() {
         ui.label(tr("settings-plugins-none"));

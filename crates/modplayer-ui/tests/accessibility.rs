@@ -40,6 +40,18 @@ use modplayer_ui::library_view::{self, LibraryTab, LibraryViewState};
 use modplayer_ui::settings::controls::{self, ControlsScreen};
 use modplayer_ui::waveform::WaveformState;
 
+/// 014-design-tokens-and-type-scale (US2, T021-T024/T030-T033): a bare
+/// `Context::default()` has none of the token `Style`'s
+/// `Name("display")`/`Name("section")` text styles installed, which the
+/// screens this sweep renders now reach — panicking on layout otherwise.
+/// Install them once, exactly as `App::new`/`App::update` do (mirrors
+/// `controls.rs` test's identically-named helper).
+fn fresh_ctx() -> Context {
+    let ctx = Context::default();
+    modplayer_ui::theme::apply_tokens(&ctx);
+    ctx
+}
+
 struct TempDir(PathBuf);
 
 impl TempDir {
@@ -198,7 +210,7 @@ impl AccessNode {
 /// `rendered_texts`, kept structured instead of flattened to text so role/
 /// toggled/disabled state survive too).
 fn render_nodes(render: impl FnMut(&mut egui::Ui)) -> Vec<AccessNode> {
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut output = ctx.run_ui(default_input(), render);
     let update = output
@@ -1117,7 +1129,7 @@ fn every_waveform_key_in_the_contract_table_is_reachable() {
     controller.queue_replace(vec![track("a")]);
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     // Tab to the overview (egui's default per-frame focus-advance model —
@@ -1532,7 +1544,7 @@ fn markers_panel_and_empty_state_are_exposed() {
 fn every_view_level_marker_shortcut_key_is_reachable() {
     let (mut controller, _dirs, mut artwork, mut waveform) =
         marker_controller("view-shortcuts-reachable");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     // `I`/`O`: create and complete the current region.
@@ -1655,7 +1667,7 @@ fn every_focused_marker_key_is_reachable() {
         .add_point_marker()
         .unwrap_or_else(|e| unreachable!("add_point_marker: {e}"));
     waveform.focused_marker = Some(id);
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     let start = controller
@@ -1757,7 +1769,7 @@ fn fresh_bare_controller(label: &str) -> (PlaybackController<FakeBackend, Script
 }
 
 fn platform_now() -> Platform {
-    if Context::default().os().is_mac() {
+    if fresh_ctx().os().is_mac() {
         Platform::Mac
     } else {
         Platform::Other

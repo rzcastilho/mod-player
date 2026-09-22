@@ -25,6 +25,17 @@ use modplayer_core::settings::SettingsStore;
 use modplayer_core::{PlaybackController, tr, tr_args};
 use modplayer_engine::{BufferPreset, DeviceId, FrameCount, SampleRate};
 
+/// 014-design-tokens-and-type-scale (US2, T026): a bare `Context::default()`
+/// has none of the token `Style`'s `Name("section")` text style installed,
+/// which each result group's own header now reaches — panicking on layout
+/// otherwise. Install it once, exactly as `App::new`/`App::update` do
+/// (mirrors `controls.rs` test's identically-named helper).
+fn fresh_ctx() -> Context {
+    let ctx = Context::default();
+    modplayer_ui::theme::apply_tokens(&ctx);
+    ctx
+}
+
 struct TempDir(PathBuf);
 
 impl TempDir {
@@ -162,7 +173,7 @@ fn render_nodes(
     controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
     focus: &mut bool,
 ) -> Vec<Node> {
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut artwork = modplayer_ui::artwork::ArtworkCache::new();
     let mut output = ctx.run_ui(default_input(), |ui| {

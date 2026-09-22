@@ -9,10 +9,12 @@
 //! `effects_view.rs` for placement/toggle and its own panel-header/row
 //! conventions.
 
-use egui::{Button, ComboBox, Id, Ui, WidgetInfo, WidgetType};
+use egui::{Button, ComboBox, Id, RichText, Ui, WidgetInfo, WidgetType};
 use modplayer_audio_io::OutputBackend;
 use modplayer_audio_source::SourceHost;
 use modplayer_core::{FocusPolicy, FocusRow, PlaybackController, tr, tr_args};
+
+use crate::theme;
 
 /// Persists the Transport panel's open/closed state across frames in
 /// egui's own per-viewer memory (mirrors `effects_view::panel_open_id`):
@@ -50,7 +52,10 @@ pub fn show<B: OutputBackend, H: SourceHost>(
             .holder
             .as_ref()
             .map_or_else(|| tr("transport-holder-host"), |row| row.name.clone());
-        ui.label(tr_args("transport-holder", &[("holder", holder_name)]));
+        // 014-design-tokens-and-type-scale (US2, T029): non-numeric status
+        // text, `secondary`/`.weak()` — the numeric transport readouts
+        // this panel doesn't have are US3's T039, not this task's scope.
+        ui.label(RichText::new(tr_args("transport-holder", &[("holder", holder_name)])).weak());
 
         show_policy_combo(ui, controller, view.policy);
 
@@ -111,14 +116,29 @@ fn show_row<B: OutputBackend, H: SourceHost>(
     let state = row_state_text(row);
     let group = ui.group(|ui| {
         ui.horizontal(|ui| {
-            ui.label(&row.name);
+            // 014-design-tokens-and-type-scale (US2, T029): the row's own
+            // plugin name is the row's `body`/`text_primary` title (mirrors
+            // `rows::title_text`); the holds/requesting badge is its
+            // secondary detail, `.weak()`, visually paired the same way.
+            ui.label(
+                RichText::new(&row.name)
+                    .text_style(theme::text::BODY)
+                    .color(theme::roles(ui.visuals()).text_primary),
+            );
             if row.holds {
-                ui.label(tr("transport-holds"));
+                ui.label(RichText::new(tr("transport-holds")).weak());
             } else if let Some(order) = row.request_order {
-                ui.label(tr_args(
-                    "transport-requesting",
-                    &[("order", order.to_string())],
-                ));
+                // 014-design-tokens-and-type-scale (US3, T039): the request
+                // order is this panel's one numeric readout — `mono` so its
+                // digits sit in a fixed-width column across rows, layered
+                // on top of the existing `.weak()` secondary weight.
+                ui.label(
+                    theme::mono_text(tr_args(
+                        "transport-requesting",
+                        &[("order", order.to_string())],
+                    ))
+                    .weak(),
+                );
             }
 
             if ui

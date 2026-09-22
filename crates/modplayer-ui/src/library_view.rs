@@ -28,6 +28,7 @@ use crate::rows::{
     ActingListOutcome, RowAction, RowEntity, RowEvent, TrackListLookup, acting_list, list_row,
     virtualized_list,
 };
+use crate::theme;
 use crate::widgets::skeleton::{ROW_HEIGHT, WIDE_ROW_HEIGHT, skeleton_row};
 
 /// The five fixed-order tabs (contracts/ui-surface.md §3).
@@ -148,7 +149,12 @@ pub fn show<B: OutputBackend, H: SourceHost>(
         && index.followed_artists().is_empty()
         && index.playlists().is_empty();
     if whole_library_empty {
-        ui.label(tr("library-empty"));
+        // FR-006, U2: empty-state copy, capped at the 72-character measure
+        // (research R17) — never applied to row titles/table cells.
+        ui.scope(|ui| {
+            ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
+            ui.label(tr("library-empty"));
+        });
         if ui.button(tr("action-search")).clicked() {
             return LibraryOutcome::FocusSearch;
         }
@@ -206,7 +212,11 @@ pub enum RowActionOutcome {
 }
 
 fn empty_state_with_search(ui: &mut Ui, tab: LibraryTab) -> LibraryOutcome {
-    ui.label(tr(tab.empty_key()));
+    // FR-006, U2: empty-state copy, capped at the 72-character measure.
+    ui.scope(|ui| {
+        ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
+        ui.label(tr(tab.empty_key()));
+    });
     if ui.button(tr("action-search")).clicked() {
         return LibraryOutcome::FocusSearch;
     }
@@ -392,7 +402,11 @@ fn show_playlists<B: OutputBackend, H: SourceHost>(
 ) -> LibraryOutcome {
     let ids: Vec<PlaylistId> = controller.library().playlists().to_vec();
     if ids.is_empty() {
-        ui.label(tr(LibraryTab::Playlists.empty_key()));
+        // FR-006, U2: empty-state copy, capped at the 72-character measure.
+        ui.scope(|ui| {
+            ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
+            ui.label(tr(LibraryTab::Playlists.empty_key()));
+        });
         // The "create one" action is a placeholder (FR-005/FR-017): no
         // playlist creation exists in this slice.
         if ui.button(tr("action-create")).clicked() {

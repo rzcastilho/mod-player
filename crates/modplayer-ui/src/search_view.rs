@@ -24,6 +24,7 @@ use crate::rows::{
     ActingListOutcome, RowAction, RowEntity, RowEvent, TrackListLookup, acting_list, list_row,
     virtualized_list,
 };
+use crate::theme;
 use crate::widgets::skeleton::{ROW_HEIGHT, WIDE_ROW_HEIGHT, skeleton_row};
 
 /// A group's own scroll area is capped to this many rows tall (US3 T071,
@@ -80,7 +81,12 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     }
 
     if session.offline() {
-        ui.label(tr("search-offline"));
+        // FR-006, U2: empty-state copy, capped at the 72-character measure
+        // (research R17).
+        ui.scope(|ui| {
+            ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
+            ui.label(tr("search-offline"));
+        });
         return;
     }
 
@@ -94,10 +100,14 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     }
 
     if session.is_no_results() {
-        ui.label(tr_args(
-            "search-no-results",
-            &[("query", session.query().to_string())],
-        ));
+        // FR-006, U2: empty-state copy, capped at the 72-character measure.
+        ui.scope(|ui| {
+            ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
+            ui.label(tr_args(
+                "search-no-results",
+                &[("query", session.query().to_string())],
+            ));
+        });
         return;
     }
 
@@ -282,9 +292,16 @@ fn group_header_key(kind: SearchKind) -> &'static str {
     }
 }
 
+/// 014-design-tokens-and-type-scale (US2, T026, data-model.md §6 "Panel/
+/// group headers" -> `theme::section_label`): each result group's own
+/// header renders through the `section` role like every other panel/group
+/// header (`markers::panel`'s "Markers", `settings::controls`'s category
+/// headings). The accessible name stays the exact, un-uppercased `text`
+/// (mirrors those same call sites) — set explicitly rather than left to
+/// derive from the now-uppercased painted text.
 fn draw_header(ui: &mut Ui, kind: SearchKind) {
     let text = tr(group_header_key(kind));
-    let response = ui.label(&text);
+    let response = ui.label(theme::section_label(&text));
     ui.ctx().accesskit_node_builder(response.id, |b| {
         b.set_role(Role::Header);
         b.set_label(text.clone());

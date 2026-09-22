@@ -29,6 +29,19 @@ use modplayer_ui::{Shell, actions};
 /// suite's negotiated buffer size, so genuinely comfortable.
 const JUMP_LAND_TOLERANCE_FRAMES: u64 = 512;
 
+/// 014-design-tokens-and-type-scale (US2, T022/T030): a bare
+/// `Context::default()` has none of the token `Style`'s
+/// `Name("display")`/`Name("section")` text styles installed, which
+/// `now_playing::show` (hosting this panel) and the Markers panel's own
+/// header now reach — panicking on layout otherwise. Install them once,
+/// exactly as `App::new`/`App::update` do (mirrors `controls.rs` test's
+/// identically-named helper).
+fn fresh_ctx() -> Context {
+    let ctx = Context::default();
+    modplayer_ui::theme::apply_tokens(&ctx);
+    ctx
+}
+
 struct TempDir(PathBuf);
 
 impl TempDir {
@@ -377,7 +390,7 @@ fn i_then_o_creates_region_at_playhead_positions() {
 
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     let expected_a = controller.shared().position_frames();
@@ -430,7 +443,7 @@ fn l_toggles_current_region_and_refuses_with_reason() {
 
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     // No region at all: refuses.
@@ -517,7 +530,7 @@ fn armed_region_shows_wraps_remaining() {
 
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let texts = rendered_texts(&ctx, &mut controller, &mut artwork, &mut waveform);
 
@@ -561,7 +574,7 @@ fn armed_inactive_badge_when_state_1() {
 
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let texts = rendered_texts(&ctx, &mut controller, &mut artwork, &mut waveform);
 
@@ -579,7 +592,7 @@ fn painted_shapes(
     sample_rate: u32,
     paint: impl FnOnce(&egui::Painter, &TimeSpace),
 ) -> Vec<Shape> {
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     let mut paint = Some(paint);
     let output = ctx.run_ui(default_input(), |ui| {
         let (rect, _response) =
@@ -675,7 +688,7 @@ fn empty_state_shows_press_i_hint() {
 
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     let texts = rendered_texts(&ctx, &mut controller, &mut artwork, &mut waveform);
@@ -705,7 +718,7 @@ fn clear_all_two_step_confirm_and_cancel() {
 
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     // Not yet confirming: the plain button, no "Clear N markers?" text.
@@ -794,7 +807,7 @@ fn m_creates_point_marker_with_default_name_sorted() {
 
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     let expected_pos = controller.shared().position_frames();
@@ -838,7 +851,7 @@ fn sixty_fifth_marker_refused_inline() {
 
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     press_key(&ctx, &mut controller, &mut artwork, &mut waveform, Key::M);
@@ -866,7 +879,7 @@ fn shortcuts_inactive_while_rename_open() {
         rename: Some((id, String::new())),
         ..Default::default()
     };
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     // The rename `TextEdit` (`markers::panel`'s `show_marker_row`) must
@@ -913,7 +926,7 @@ fn glyph_focus_arrow_nudges_by_setting_and_shift_ten_x() {
         focused_marker: Some(id),
         ..Default::default()
     };
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     press_key(
@@ -996,7 +1009,7 @@ fn delete_focused_endpoint_makes_region_incomplete() {
         focused_marker: Some(a_id),
         ..Default::default()
     };
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     press_key(
@@ -1035,7 +1048,7 @@ fn f2_rename_commits_on_enter_cancels_on_esc() {
         focused_marker: Some(id),
         ..Default::default()
     };
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     press_key(&ctx, &mut controller, &mut artwork, &mut waveform, Key::F2);
@@ -1112,7 +1125,7 @@ fn c_cycles_palette_and_row_matches_glyph() {
         focused_marker: Some(id),
         ..Default::default()
     };
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     press_key(&ctx, &mut controller, &mut artwork, &mut waveform, Key::C);
@@ -1153,7 +1166,7 @@ fn drag_from_overview_zooms_detail_and_lands_within_5ms() {
 
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     let overview_rect = overview_bounds(&ctx, &mut controller, &mut artwork, &mut waveform);
@@ -1235,7 +1248,7 @@ fn drag_esc_restores_position_and_window() {
 
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     let glyph_rect = glyph_bounds(&ctx, &mut controller, &mut artwork, &mut waveform);
@@ -1313,7 +1326,7 @@ fn shift_digit_sets_cue_and_digit_jumps_keeping_state() {
 
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     let slot1 = CueSlot::new(1).unwrap_or_else(|| unreachable!());
@@ -1411,7 +1424,7 @@ fn digit_on_empty_slot_is_noop() {
 
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     let before_pos = controller.shared().position_frames();
@@ -1472,7 +1485,7 @@ fn shift_digit_on_occupied_slot_moves_at_limit() {
 
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     let _ = controller.backend_mut().render_buffers(5);
@@ -1530,7 +1543,7 @@ fn tab_focus_on_a_glyph_enables_the_marker_key_table() {
     let mut artwork = ArtworkCache::new();
     // No `focused_marker`: focus arrives purely through egui, as `Tab` does.
     let mut waveform = WaveformState::default();
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
 
     let glyph_id = egui::Id::new(("marker-glyph", "overview", id));
     let output = ctx.run_ui(default_input(), |ui| {

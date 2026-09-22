@@ -10,7 +10,7 @@
 //! literal appears here (contracts/ui-panels.md A4): every colour comes
 //! from `theme::overlay_color`/`theme::paint_host_glyph`.
 
-use egui::{Align2, Color32, FontId, Painter, Rect, Stroke, Vec2, pos2};
+use egui::{Align2, Painter, Rect, Stroke, Vec2, pos2};
 use modplayer_capability_gateway::ui::{GlyphRef, HostGlyph, OverlayPrimitive};
 use modplayer_core::plugins::OverlayLayer;
 
@@ -34,7 +34,6 @@ pub enum ViewKind {
 /// than over already-drawn content.
 pub const LANE_HEIGHT: f32 = 16.0;
 const GLYPH_SIZE: f32 = 12.0;
-const LABEL_FONT_SIZE: f32 = 10.0;
 
 /// O5-O10: paint every layer's primitives for one waveform widget's
 /// current frame, in [`OverlayLayer`] order (already the correct
@@ -138,11 +137,17 @@ fn paint_primitive(
                 pos2(rect.left(), lane_rect.top()),
                 pos2(rect.right(), lane_rect.bottom()),
             );
+            // 014-design-tokens-and-type-scale (US2/US5, T035/T066,
+            // FR-017): both the font size and the low-level font
+            // construction itself come from the token module now —
+            // `theme::secondary_font_id` — so no ad-hoc font construction
+            // remains at this call site; the colour is always a
+            // plugin-chosen `OverlayColor`, never a literal.
             painter.with_clip_rect(clip).text(
                 pos2(x, lane_rect.center().y),
                 Align2::LEFT_CENTER,
                 text,
-                FontId::proportional(LABEL_FONT_SIZE),
+                theme::secondary_font_id(),
                 theme::overlay_color(*color, visuals),
             );
         }
@@ -158,7 +163,7 @@ fn paint_primitive(
             let resolved = theme::overlay_color(*color, visuals);
             match icon {
                 GlyphRef::Host(host) => {
-                    theme::paint_host_glyph(painter, *host, center, GLYPH_SIZE, resolved)
+                    theme::paint_host_glyph(painter, *host, center, GLYPH_SIZE, resolved, visuals)
                 }
                 GlyphRef::Package(key) => {
                     match plugin_assets::glyph_texture_id(
@@ -174,7 +179,7 @@ fn paint_primitive(
                                 texture_id,
                                 image_rect,
                                 Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                                Color32::WHITE,
+                                theme::roles(visuals).text_on_accent,
                             );
                         }
                         // FR-014a: a `Package` key that never resolved
@@ -189,6 +194,7 @@ fn paint_primitive(
                             center,
                             GLYPH_SIZE,
                             visuals.weak_text_color(),
+                            visuals,
                         ),
                     }
                 }

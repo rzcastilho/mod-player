@@ -28,6 +28,18 @@ use modplayer_ui::artwork::{ArtworkCache, ArtworkState};
 use modplayer_ui::waveform::{DetailWindow, DragOrigin, DragPreview, TimeSpace, WaveformState};
 use modplayer_ui::{Shell, actions};
 
+/// 014-design-tokens-and-type-scale (US2, T022): a bare `Context::default()`
+/// has none of the token `Style`'s `Name("display")` text style installed,
+/// which `now_playing::show`'s current-track title now reaches —
+/// panicking on layout otherwise. Install it once, exactly as
+/// `App::new`/`App::update` do (mirrors `controls.rs` test's
+/// identically-named helper).
+fn fresh_ctx() -> Context {
+    let ctx = Context::default();
+    modplayer_ui::theme::apply_tokens(&ctx);
+    ctx
+}
+
 struct TempDir(PathBuf);
 
 impl TempDir {
@@ -162,7 +174,7 @@ fn rendered_texts<B: modplayer_audio_io::OutputBackend, H: modplayer_audio_sourc
     artwork: &mut ArtworkCache,
     waveform: &mut WaveformState,
 ) -> Vec<String> {
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut output = ctx.run_ui(default_input(), |ui| {
         modplayer_ui::now_playing::show(ui, controller, artwork, waveform);
@@ -195,7 +207,7 @@ fn rendered_painted_texts<
     artwork: &mut ArtworkCache,
     waveform: &mut WaveformState,
 ) -> Vec<String> {
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     let output = ctx.run_ui(default_input(), |ui| {
         modplayer_ui::now_playing::show(ui, controller, artwork, waveform);
     });
@@ -230,7 +242,7 @@ fn render_nodes<B: modplayer_audio_io::OutputBackend, H: modplayer_audio_source:
     waveform: &mut WaveformState,
     input: RawInput,
 ) -> Vec<NodeInfo> {
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut output = ctx.run_ui(input, |ui| {
         modplayer_ui::now_playing::show(ui, controller, artwork, waveform);
@@ -448,7 +460,7 @@ fn artwork_falls_back_to_initials() {
 
     let url = "https://i.scdn.co/image/deadbeef";
     let mut artwork = ArtworkCache::new();
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     // The force-fail toggle short-circuits before any network call
     // (`fetch_and_decode`), so this converges almost immediately.
     let mut state = artwork.get(&ctx, url);
@@ -490,7 +502,7 @@ fn click_on_overview_seeks_to_exact_frame() {
 
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     let bounds = overview_bounds(&ctx, &mut controller, &mut artwork, &mut waveform);
@@ -541,7 +553,7 @@ fn drag_previews_without_seeking_and_esc_cancels() {
 
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     let bounds = overview_bounds(&ctx, &mut controller, &mut artwork, &mut waveform);
@@ -611,7 +623,7 @@ fn seek_slider_commits_once_per_release() {
 
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     let bounds = overview_bounds(&ctx, &mut controller, &mut artwork, &mut waveform);
@@ -878,7 +890,7 @@ fn pointer_zoom_on_detail_is_anchored_on_the_pointer_not_the_playhead() {
 
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     // First frame: establish the detail window and read its screen rect
@@ -1093,7 +1105,7 @@ fn keyboard_table_matches_pointer_results() {
         controller.queue_replace(vec![track("a", 200_000)]);
         let mut artwork = ArtworkCache::new();
         let mut waveform = WaveformState::default();
-        let ctx = Context::default();
+        let ctx = fresh_ctx();
         ctx.enable_accesskit();
 
         tab_focus_named(
@@ -1137,7 +1149,7 @@ fn keyboard_table_matches_pointer_results() {
     controller.queue_replace(vec![track("a", 200_000)]);
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     tab_focus_named(
@@ -1256,7 +1268,7 @@ fn keyboard_table_matches_pointer_results() {
         controller.tick();
         let artwork = ArtworkCache::new();
         let waveform = WaveformState::default();
-        let ctx = Context::default();
+        let ctx = fresh_ctx();
         ctx.enable_accesskit();
         (controller, dirs, artwork, waveform, ctx)
     }
@@ -1640,7 +1652,7 @@ fn transport_panel_survives_track_change() {
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let texts = |controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
                  artwork: &mut ArtworkCache,

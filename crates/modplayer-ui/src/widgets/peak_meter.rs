@@ -7,8 +7,10 @@
 //! stays independent of the controller type). Accessible value is the last
 //! peak in dBFS.
 
-use egui::{Color32, CornerRadius, Sense, Stroke, StrokeKind, Ui, Vec2, WidgetInfo, WidgetType};
+use egui::{Sense, Stroke, StrokeKind, Ui, Vec2, WidgetInfo, WidgetType};
 use modplayer_core::tr;
+
+use crate::theme;
 
 /// Lower bound of the meter's dBFS scale (contracts/ui-surface.md).
 pub const SCALE_MIN_DB: f32 = -60.0;
@@ -27,7 +29,7 @@ pub fn peak_meter(ui: &mut Ui, peak: f32, ceiling_db: f32) {
 
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
-        let corner = CornerRadius::from(2u8);
+        let corner = theme::radius::SM;
         painter.rect_filled(rect, corner, ui.visuals().extreme_bg_color);
 
         let fraction = fraction_of(peak_db);
@@ -35,7 +37,7 @@ pub fn peak_meter(ui: &mut Ui, peak: f32, ceiling_db: f32) {
         fill.set_width(rect.width() * fraction);
         let over_ceiling = peak_db >= ceiling_db.clamp(SCALE_MIN_DB, SCALE_MAX_DB);
         let fill_color = if over_ceiling {
-            Color32::from_rgb(220, 60, 60)
+            theme::roles(ui.visuals()).danger
         } else {
             ui.visuals().selection.bg_fill
         };
@@ -68,7 +70,10 @@ pub fn peak_meter(ui: &mut Ui, peak: f32, ceiling_db: f32) {
             accessible_value.clone(),
         )
     });
-    response.on_hover_text(accessible_value);
+    // 014-design-tokens-and-type-scale (US3, T041): the dB reading is this
+    // widget's one numeric readout — `mono` so its digits share one
+    // advance width, matching every other numeric readout's column.
+    response.on_hover_text(theme::mono_text(accessible_value));
 }
 
 fn fraction_of(db: f32) -> f32 {

@@ -7,8 +7,10 @@
 
 use std::ops::Range;
 
-use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Stroke, Visuals, pos2};
+use egui::{Align2, Color32, Painter, Pos2, Rect, Stroke, Visuals, pos2};
 use modplayer_core::{AnalysisStatus, WaveformPeaks};
+
+use crate::theme;
 
 use super::coords::TimeSpace;
 
@@ -113,7 +115,10 @@ pub fn paint(painter: &Painter, space: &TimeSpace, visuals: &Visuals, input: &Wa
             rect.center(),
             Align2::CENTER_CENTER,
             input.unavailable_text,
-            FontId::proportional((rect.height() * 0.35).max(10.0)),
+            // 014-design-tokens-and-type-scale (US3, T043): the `mono`
+            // role's fixed size replaces the height-proportional literal
+            // (FR-018a's font-size-literal removal).
+            theme::mono_font_id(),
             visuals.weak_text_color(),
         );
     } else if let Some(peaks) = input.peaks {

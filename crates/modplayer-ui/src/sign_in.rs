@@ -20,6 +20,8 @@ use egui::{Spinner, Ui, WidgetInfo, WidgetType};
 use modplayer_account::{AccountEvent, AccountService, SessionState, SignInNote, UPGRADE_URL};
 use modplayer_core::{tr, tr_args};
 
+use crate::theme;
+
 /// The transient tier-result sub-view (contracts/ui-surface.md: shown once
 /// after `TierChecked`/`TierCheckFailed`). Premium shows nothing — the
 /// flow advances immediately — so only these two outcomes pause here.
@@ -169,11 +171,16 @@ fn show_store_unreadable(ui: &mut Ui, account: &mut AccountService) -> Vec<Accou
 /// ui-surface.md: "`signin-store-remedy-<platform>`").
 fn show_store_message(ui: &mut Ui, store_name_key: &'static str) {
     ui.heading(tr("signin-title"));
-    ui.label(tr_args(
-        "signin-store-unavailable",
-        &[("store", tr(store_name_key))],
-    ));
-    ui.label(tr(remedy_key(store_name_key)));
+    // FR-006, U2: the store-unreadable explanation is prose, capped at the
+    // 72-character measure (research R17).
+    ui.scope(|ui| {
+        ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
+        ui.label(tr_args(
+            "signin-store-unavailable",
+            &[("store", tr(store_name_key))],
+        ));
+        ui.label(tr(remedy_key(store_name_key)));
+    });
 }
 
 /// The platform-specific remediation line (contracts/ui-surface.md:

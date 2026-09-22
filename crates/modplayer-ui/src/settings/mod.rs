@@ -29,6 +29,7 @@ use crate::actions::{self, Claim};
 use crate::device_check::DeviceCheckScreen;
 use crate::settings::about::AboutScreen;
 use crate::settings::controls::ControlsScreen;
+use crate::theme;
 
 const SEARCH_BOX_ID: &str = "settings-search-box";
 
@@ -130,20 +131,32 @@ pub fn show<B: OutputBackend, H: SourceHost>(
                 screen.plugin_focus = Some((hit.plugin, hit.field_id));
             }
         }
-        ui.separator();
+        ui.add_space(theme::space::XL);
     }
 
+    // 014-design-tokens-and-type-scale (US2, T032): the category list is
+    // this screen's "section list entries" (data-model.md §6 "settings
+    // groups" -> `theme::section_label`) — there is no separate "Settings"
+    // screen heading anywhere in this slice (audited: `show` goes straight
+    // from the search box to this list, and `app.rs`/`shell.rs` draw no
+    // per-section title above it either, T031), so `title` has nothing to
+    // apply to here.
     ui.horizontal_wrapped(|ui| {
         for category in SettingsCategory::ALL {
-            if ui
-                .selectable_label(screen.category == category, tr(category.label_key()))
-                .clicked()
-            {
+            let label = tr(category.label_key());
+            let response =
+                ui.selectable_label(screen.category == category, theme::section_label(&label));
+            // Accessible name pinned back to the exact, un-uppercased
+            // label (FR-019) — see `shell::nav_rail`'s identical note.
+            ui.ctx().accesskit_node_builder(response.id, |b| {
+                b.set_label(label.clone());
+            });
+            if response.clicked() {
                 screen.category = category;
             }
         }
     });
-    ui.separator();
+    ui.add_space(theme::space::XL);
 
     let focus = screen.focus_target.take();
     match screen.category {

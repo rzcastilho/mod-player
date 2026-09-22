@@ -7,9 +7,10 @@
 //! the caller reads `PlaybackController::chain_meters()` fresh each
 //! frame and hands the values in (data-model.md §2.5).
 
-use egui::{CornerRadius, Rect, Sense, StrokeKind, Ui, Vec2, WidgetInfo, WidgetType, pos2};
+use egui::{Rect, Sense, StrokeKind, Ui, Vec2, WidgetInfo, WidgetType, pos2};
 use modplayer_core::{LevelPair, tr};
 
+use crate::theme;
 use crate::widgets::peak_meter::{SCALE_MAX_DB, SCALE_MIN_DB};
 
 fn to_db(amplitude: f32) -> f32 {
@@ -51,7 +52,7 @@ pub fn level_pair(ui: &mut Ui, side_label_key: &str, level: LevelPair) {
         let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
         if ui.is_rect_visible(rect) {
             let painter = ui.painter();
-            let corner = CornerRadius::from(2u8);
+            let corner = theme::radius::SM;
             painter.rect_filled(rect, corner, ui.visuals().extreme_bg_color);
 
             let half = rect.width() / 2.0;
@@ -84,8 +85,11 @@ pub fn level_pair(ui: &mut Ui, side_label_key: &str, level: LevelPair) {
         });
         response.on_hover_text(accessible);
 
-        ui.label(peak_text);
-        ui.label(rms_text);
+        // 014-design-tokens-and-type-scale (US3, T042): peak/RMS meter
+        // readouts are numeric fields compared side by side — `mono` so
+        // their digits line up in a fixed-width column.
+        ui.label(theme::mono_text(peak_text));
+        ui.label(theme::mono_text(rms_text));
     });
 }
 

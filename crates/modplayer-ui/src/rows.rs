@@ -32,6 +32,7 @@ use modplayer_core::{tr, tr_args};
 
 use crate::actions::{self, Claim};
 use crate::artwork::{ArtworkCache, ArtworkState};
+use crate::theme;
 use crate::widgets::initials::initials_placeholder;
 use crate::widgets::skeleton::{ROW_HEIGHT, WIDE_ROW_HEIGHT};
 
@@ -342,11 +343,8 @@ fn draw_artwork(ui: &mut Ui, cache: &mut ArtworkCache, entity: &RowEntity) {
             let (rect, _response) =
                 ui.allocate_exact_size(Vec2::splat(ARTWORK_SIZE), Sense::hover());
             if ui.is_rect_visible(rect) {
-                ui.painter().rect_filled(
-                    rect,
-                    egui::CornerRadius::from((ARTWORK_SIZE * 0.15) as u8),
-                    ui.visuals().faint_bg_color,
-                );
+                ui.painter()
+                    .rect_filled(rect, theme::radius::MD, ui.visuals().faint_bg_color);
             }
         }
         ArtworkDecision::Initials(name) => {
@@ -361,6 +359,15 @@ fn draw_artwork(ui: &mut Ui, cache: &mut ArtworkCache, entity: &RowEntity) {
 /// into the next row).
 fn line(ui: &mut Ui, text: impl Into<RichText>) -> egui::Response {
     ui.add(Label::new(text.into()).truncate())
+}
+
+/// A row's own title, explicit `body` + `text_primary` (014-design-tokens-
+/// and-type-scale, US2, T021, data-model.md §6 "List row title") — visibly
+/// distinct from the `.weak()`/`text_secondary` detail line beneath it.
+fn title_text(ui: &Ui, text: &str) -> RichText {
+    RichText::new(text)
+        .text_style(theme::text::BODY)
+        .color(theme::roles(ui.visuals()).text_primary)
 }
 
 /// Draw the per-kind content columns (contracts/ui-surface.md §5): a
@@ -378,7 +385,8 @@ fn draw_content(ui: &mut Ui, entity: &RowEntity) {
                 if unavailable {
                     line(ui, RichText::new(&track.title).weak());
                 } else {
-                    line(ui, &track.title);
+                    let title = title_text(ui, &track.title);
+                    line(ui, title);
                 }
                 if track.explicit {
                     let response = ui.label("E");
@@ -395,22 +403,36 @@ fn draw_content(ui: &mut Ui, entity: &RowEntity) {
                 detail.push_str(" — ");
                 detail.push_str(album);
             }
-            detail.push_str(" — ");
-            detail.push_str(&format_duration(track.duration_ms));
-            line(ui, RichText::new(detail).weak());
+            ui.horizontal(|ui| {
+                line(ui, RichText::new(detail).weak());
+                line(ui, RichText::new(" — ").weak());
+                // 014-design-tokens-and-type-scale (US3, T045, data-model.md
+                // §6 "duration" — the field this track-detail line ends
+                // with, shared by every screen that lists tracks through
+                // this row): `mono` so the digits line up in a fixed-width
+                // column across rows, layered on the existing `.weak()`
+                // secondary weight.
+                line(
+                    ui,
+                    theme::mono_text(format_duration(track.duration_ms)).weak(),
+                );
+            });
         }
         RowEntity::Album(album) => {
-            line(ui, &album.name);
+            let title = title_text(ui, &album.name);
+            line(ui, title);
             line(ui, RichText::new(album.artists.join(", ")).weak());
             if let Some(release) = &album.release_date {
                 line(ui, RichText::new(release.year.to_string()).weak());
             }
         }
         RowEntity::Artist(artist) => {
-            line(ui, &artist.name);
+            let title = title_text(ui, &artist.name);
+            line(ui, title);
         }
         RowEntity::Playlist(playlist) => {
-            line(ui, &playlist.name);
+            let title = title_text(ui, &playlist.name);
+            line(ui, title);
             if !playlist.editable {
                 line(
                     ui,

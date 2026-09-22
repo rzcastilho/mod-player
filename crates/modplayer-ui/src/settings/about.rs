@@ -10,6 +10,7 @@ use modplayer_account::TERMS_URL;
 use modplayer_core::{tr, tr_args};
 
 use crate::privacy_notice;
+use crate::theme;
 
 /// Which sub-view Settings › About is currently showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -41,7 +42,12 @@ pub fn show(ui: &mut Ui, screen: &mut AboutScreen) {
 }
 
 fn show_main(ui: &mut Ui, screen: &mut AboutScreen) {
-    ui.label(tr("about-product"));
+    // FR-006, U2: the product description is prose, capped at the
+    // 72-character measure (research R17).
+    ui.scope(|ui| {
+        ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
+        ui.label(tr("about-product"));
+    });
     ui.label(tr_args(
         "about-version",
         &[("version", env!("CARGO_PKG_VERSION").to_string())],
@@ -58,10 +64,14 @@ fn show_main(ui: &mut Ui, screen: &mut AboutScreen) {
 /// as `about-product`, per contract), but read-only: no acknowledge/
 /// decline, just a `privacy-back` button back to the About screen.
 fn show_disclosure(ui: &mut Ui, screen: &mut AboutScreen) {
-    ui.label(tr("welcome-description"));
-    ui.label(tr("disclosure-unofficial"));
-    ui.label(tr("disclosure-premium-required"));
-    ui.label(tr("disclosure-terms-apply"));
+    // FR-006, U2: prose, capped at the 72-character measure.
+    ui.scope(|ui| {
+        ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
+        ui.label(tr("welcome-description"));
+        ui.label(tr("disclosure-unofficial"));
+        ui.label(tr("disclosure-premium-required"));
+        ui.label(tr("disclosure-terms-apply"));
+    });
     ui.hyperlink_to(tr("disclosure-terms-link"), TERMS_URL);
     if ui.button(tr("privacy-back")).clicked() {
         screen.view = View::Main;

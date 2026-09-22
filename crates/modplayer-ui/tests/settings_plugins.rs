@@ -37,6 +37,18 @@ use modplayer_core::settings_registry::search_plugin_settings;
 use modplayer_core::{PlaybackController, PluginId};
 use modplayer_ui::settings::plugins::{self, PluginsScreen};
 
+/// 014-design-tokens-and-type-scale (US2, T032/T033): a bare
+/// `Context::default()` has none of the token `Style`'s
+/// `Name("section")` text style installed, which the Plugins settings
+/// sub-page heading now reaches — panicking on layout otherwise. Install
+/// it once, exactly as `App::new`/`App::update` do (mirrors `controls.rs`
+/// test's identically-named helper).
+fn fresh_ctx() -> Context {
+    let ctx = Context::default();
+    modplayer_ui::theme::apply_tokens(&ctx);
+    ctx
+}
+
 const UI_SETTINGS: &str = "org.modplayer.fixture.ui-settings";
 const PLUGIN_NAME: &str = "UI settings fixture";
 
@@ -281,7 +293,7 @@ fn find_one<'a>(nodes: &'a [AccessNode], role: Role, name: &str) -> &'a AccessNo
 #[test]
 fn page_listed_by_name() {
     let (mut controller, _dir, _psd, _tsd, _id) = launch_ui_settings("page-listed");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut screen = PluginsScreen::new();
 
@@ -297,7 +309,7 @@ fn page_listed_by_name() {
 #[test]
 fn field_roles_and_names() {
     let (mut controller, _dir, _psd, _tsd, id) = launch_ui_settings("field-roles");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut screen = PluginsScreen::new();
 
@@ -340,7 +352,7 @@ fn field_roles_and_names() {
 #[test]
 fn boolean_applies_on_change() {
     let (mut controller, _dir, _psd, _tsd, id) = launch_ui_settings("boolean-change");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut screen = PluginsScreen::new();
 
@@ -390,7 +402,7 @@ fn boolean_applies_on_change() {
 #[test]
 fn number_applies_on_commit() {
     let (mut controller, _dir, _psd, _tsd, id) = launch_ui_settings("number-commit");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut screen = PluginsScreen::new();
 
@@ -470,7 +482,7 @@ fn search_finds_field_with_path() {
     assert_eq!(hit.field_id, "shift");
     assert_eq!(hit.path, "Plugins › UI settings fixture › Semitone shift");
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut screen = PluginsScreen::new();
     let focus = Some((hit.plugin, hit.field_id.as_str()));

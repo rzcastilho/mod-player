@@ -6,7 +6,9 @@
 //! alphanumeric character of each of the name's first two words), or the
 //! music glyph `♪` when the name has no letter or digit at all.
 
-use egui::{Align2, Color32, CornerRadius, FontId, Sense, Ui, Vec2};
+use egui::{Align2, Color32, Sense, Ui, Vec2};
+
+use crate::theme;
 
 /// The glyph shown when a name has no letter or digit to derive initials
 /// from (FR-020).
@@ -66,14 +68,14 @@ pub fn initials_placeholder(ui: &mut Ui, name: &str, size: f32) {
         let painter = ui.painter();
         painter.rect_filled(
             rect,
-            CornerRadius::from((size * 0.15) as u8),
+            theme::radius::full(size),
             ui.visuals().extreme_bg_color,
         );
         painter.text(
             rect.center(),
             Align2::CENTER_CENTER,
             initials(name).text(),
-            FontId::proportional(size * 0.4),
+            theme::initials_font_id(size),
             text_color(ui),
         );
     }

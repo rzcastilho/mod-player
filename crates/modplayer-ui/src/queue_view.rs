@@ -7,10 +7,12 @@
 //! Move up/Move down/Play next/Remove actions per row. Reached from Now
 //! Playing via the `queue-toggle` button (`now_playing.rs`).
 
-use egui::{Button, Ui};
+use egui::{Button, RichText, Ui};
 use modplayer_audio_io::OutputBackend;
 use modplayer_audio_source::{Repeat, SourceHost};
 use modplayer_core::{Origin, PlaybackController, tr, tr_args};
+
+use crate::theme;
 
 /// Draw the Queue panel, applying any header/row action directly to
 /// `controller`.
@@ -44,24 +46,39 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     });
 
     if view.items.is_empty() {
-        ui.label(tr("queue-empty"));
+        // FR-006, U2: empty-state copy, capped at the 72-character measure
+        // (research R17).
+        ui.scope(|ui| {
+            ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
+            ui.label(tr("queue-empty"));
+        });
         return;
     }
 
     for row in &view.items {
         ui.horizontal(|ui| {
+            // 014-design-tokens-and-type-scale (US2, T027, data-model.md §6
+            // "List row title"/"List row secondary line"): the row's own
+            // title is explicit `body`/`text_primary` (mirrors
+            // `rows::title_text`); the current marker, artist and badges
+            // are the row's secondary detail, `.weak()` like every other
+            // row's detail line — visually paired the same way.
             if row.is_current {
-                ui.label(tr("queue-current"));
+                ui.label(RichText::new(tr("queue-current")).weak());
             }
-            ui.label(tr_args("queue-row", &[("title", row.title.clone())]));
+            ui.label(
+                RichText::new(tr_args("queue-row", &[("title", row.title.clone())]))
+                    .text_style(theme::text::BODY)
+                    .color(theme::roles(ui.visuals()).text_primary),
+            );
             if !row.artist.is_empty() {
-                ui.label(row.artist.clone());
+                ui.label(RichText::new(row.artist.clone()).weak());
             }
             if row.origin == Origin::PlayNext {
-                ui.label(tr("queue-badge-play-next"));
+                ui.label(RichText::new(tr("queue-badge-play-next")).weak());
             }
             if row.unavailable {
-                ui.label(tr("queue-badge-unavailable"));
+                ui.label(RichText::new(tr("queue-badge-unavailable")).weak());
             }
 
             if ui.add(Button::new(tr("queue-move-up"))).clicked() {

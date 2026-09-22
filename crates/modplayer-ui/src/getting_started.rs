@@ -10,6 +10,8 @@
 use egui::{Frame, Ui, accesskit::Role};
 use modplayer_core::tr;
 
+use crate::theme;
+
 /// What happened this frame, if anything (contracts/getting-started-
 /// card.md C1/C2). `App::show_library` is the only caller, and the only
 /// place that acts on `OpenTutorial`/`Dismiss`.
@@ -28,8 +30,13 @@ pub fn show(ui: &mut Ui) -> GettingStartedOutcome {
     let mut outcome = GettingStartedOutcome::None;
     Frame::group(ui.style()).show(ui, |ui| {
         ui.heading(tr("getting-started-title"));
-        ui.label(tr("getting-started-section-loop"));
-        ui.label(tr("getting-started-key-tempo"));
+        ui.scope(|ui| {
+            // FR-006, U2: the plugin description lines are prose, capped
+            // at the 72-character measure.
+            ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
+            ui.label(tr("getting-started-section-loop"));
+            ui.label(tr("getting-started-key-tempo"));
+        });
         ui.horizontal(|ui| {
             let tutorial = ui.button(tr("getting-started-tutorial"));
             // X1: the tutorial control is a link, not a plain button.

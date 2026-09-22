@@ -12,6 +12,8 @@ use egui::{Id, Modal, RichText, Ui};
 use modplayer_account::{AccountEvent, AccountService, SessionState, Tier};
 use modplayer_core::{tr, tr_args};
 
+use crate::theme;
+
 /// Draw the Settings › Account screen for the current session state.
 pub fn show(ui: &mut Ui, account: &mut AccountService) -> Vec<AccountEvent> {
     match account.state() {
@@ -43,12 +45,17 @@ fn show_signed_in(ui: &mut Ui, account: &mut AccountService) -> Vec<AccountEvent
         None => ui.label(tr("account-never-validated")),
     };
 
-    ui.label(tr("account-recheck-desc"));
+    // FR-006, U2: field-description prose, capped at the 72-character
+    // measure (research R17).
+    ui.scope(|ui| {
+        ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
+        ui.label(tr("account-recheck-desc"));
+    });
     if ui.button(tr("account-recheck")).clicked() {
         account.recheck_tier();
     }
 
-    ui.separator();
+    theme::divider(ui);
 
     if ui.button(tr("account-sign-out")).clicked() {
         open_sign_out_modal(ui);

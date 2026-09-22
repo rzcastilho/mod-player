@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use egui::{Button, Id, Ui, Vec2};
+use egui::{Button, Id, RichText, Ui, Vec2};
 use modplayer_audio_io::OutputBackend;
 use modplayer_audio_source::{SourceHealth, SourceHost};
 use modplayer_core::{ActiveState, AnalysisStatus, Intent, PlaybackController, tr, tr_args};
@@ -21,6 +21,7 @@ use crate::markers;
 use crate::plugin_overlays::{self, ViewKind};
 use crate::plugin_panels;
 use crate::queue_view;
+use crate::theme;
 use crate::transport_view;
 use crate::waveform::{
     self, DetailWindow, DragOrigin, DragPreview, WaveformEvent, WaveformPaint, WaveformState,
@@ -175,7 +176,7 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     // markers block and before the Queue panel, regardless of whether a
     // track is loaded (an empty chain with 0 % figures is valid).
     if effects_open {
-        ui.separator();
+        ui.add_space(theme::space::XL);
         // The panel scrolls on its own: a full 16-node chain (or two
         // equalizers) is taller than the window, and without this the
         // "Add node…" row, master volume and the Queue panel fell off the
@@ -195,7 +196,7 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     // 010-transport-focus, contracts/ui-transport-panel.md §1: drawn after
     // the Effect Chain panel (if open) and before the Queue panel.
     if transport_open {
-        ui.separator();
+        ui.add_space(theme::space::XL);
         transport_view::show(ui, controller);
     }
 
@@ -208,7 +209,7 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     peak_meter::peak_meter(ui, peak, ceiling_db);
 
     if queue_open {
-        ui.separator();
+        ui.add_space(theme::space::XL);
         queue_view::show(ui, controller);
     }
 
@@ -240,10 +241,17 @@ fn show_heading<B: OutputBackend, H: SourceHost>(
                     artwork_name(item),
                 );
                 ui.vertical(|ui| {
-                    ui.heading(tr_args(
-                        "now-playing-title",
-                        &[("title", item.track.title.clone())],
-                    ));
+                    // 014-design-tokens-and-type-scale (US2, T022): the
+                    // Now Playing track title is the app's one `display`-
+                    // role surface (data-model.md §6), a size up from the
+                    // `title` role `ui.heading()` would otherwise give it.
+                    ui.label(
+                        RichText::new(tr_args(
+                            "now-playing-title",
+                            &[("title", item.track.title.clone())],
+                        ))
+                        .text_style(theme::text::DISPLAY.clone()),
+                    );
                     if !item.track.artists.is_empty() {
                         ui.label(tr_args(
                             "now-playing-artist",
@@ -407,10 +415,10 @@ fn show_waveform<B: OutputBackend, H: SourceHost>(
     let peaks = peaks.as_deref();
     let unavailable_text = tr("waveform-unavailable");
 
-    ui.label(tr_args(
+    ui.label(theme::mono_text(tr_args(
         "time-elapsed",
         &[("time", format_mmss_frames(playhead_frame, sample_rate))],
-    ));
+    )));
 
     let previewing = waveform.drag.is_some();
     let markers_snapshot = controller.markers().cloned();
@@ -485,10 +493,10 @@ fn show_waveform<B: OutputBackend, H: SourceHost>(
     }
 
     let remaining_frames = len_frames.saturating_sub(playhead_frame);
-    ui.label(tr_args(
+    ui.label(theme::mono_text(tr_args(
         "time-remaining",
         &[("time", format_mmss_frames(remaining_frames, sample_rate))],
-    ));
+    )));
 
     let detail_window = detail.start_frame..(detail.start_frame + detail.width_frames);
     markers::lane(

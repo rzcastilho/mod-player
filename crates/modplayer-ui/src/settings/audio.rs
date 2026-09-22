@@ -27,6 +27,7 @@ use modplayer_engine::{
 };
 
 use crate::device_check::DeviceCheckScreen;
+use crate::theme;
 
 /// The three device-buffer presets shown in the combo, in display order
 /// (mirrors `device_check.rs`'s own `PRESETS`).
@@ -70,7 +71,12 @@ pub fn show<B: OutputBackend, H: SourceHost>(
         .unwrap_or_default();
 
     ui.label(tr("setting-output-device"));
-    ui.label(tr("setting-output-device-desc"));
+    // FR-006, U2: field-description prose, capped at the 72-character
+    // measure (research R17).
+    ui.scope(|ui| {
+        ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
+        ui.label(tr("setting-output-device-desc"));
+    });
     let current_device = controller.preferred_device().cloned();
     let current_label = current_device
         .as_ref()
@@ -102,14 +108,24 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     }
 
     ui.label(tr("setting-buffer-preset"));
-    ui.label(tr("setting-buffer-preset-desc"));
+    ui.scope(|ui| {
+        ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
+        ui.label(tr("setting-buffer-preset-desc"));
+    });
     let mut preset = controller.preset();
     let previous_preset = preset;
+    // 014-design-tokens-and-type-scale (US3, T044): the buffer preset's
+    // latency figure is a numeric readout — `mono` so its digits line up
+    // with every other numeric readout's column.
     let buffer_preset_response = ComboBox::from_id_salt("audio.buffer_preset")
-        .selected_text(preset_label(preset, device_rate))
+        .selected_text(theme::mono_text(preset_label(preset, device_rate)))
         .show_ui(ui, |ui| {
             for candidate in PRESETS {
-                ui.selectable_value(&mut preset, candidate, preset_label(candidate, device_rate));
+                ui.selectable_value(
+                    &mut preset,
+                    candidate,
+                    theme::mono_text(preset_label(candidate, device_rate)),
+                );
             }
         })
         .response;
@@ -123,7 +139,10 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     }
 
     ui.label(tr("setting-limiter-ceiling"));
-    ui.label(tr("setting-limiter-ceiling-desc"));
+    ui.scope(|ui| {
+        ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
+        ui.label(tr("setting-limiter-ceiling-desc"));
+    });
     let mut ceiling_db = f64::from(controller.ceiling().db());
     let ceiling_response = ui.add(
         Slider::new(
@@ -139,7 +158,10 @@ pub fn show<B: OutputBackend, H: SourceHost>(
         controller.set_ceiling(CeilingDb::new(ceiling_db as f32));
     }
 
-    ui.label(tr("setting-safe-volume-desc"));
+    ui.scope(|ui| {
+        ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
+        ui.label(tr("setting-safe-volume-desc"));
+    });
     let mut safe_volume_enabled = cached.safe_volume.enabled;
     let enabled_response = ui.checkbox(&mut safe_volume_enabled, tr("setting-safe-volume"));
     if focus == Some("audio.safe_volume_enabled") {
@@ -157,7 +179,10 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     }
 
     ui.label(tr("setting-safe-volume-cap"));
-    ui.label(tr("setting-safe-volume-cap-desc"));
+    ui.scope(|ui| {
+        ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
+        ui.label(tr("setting-safe-volume-cap-desc"));
+    });
     let mut cap = f64::from(cached.safe_volume.cap.value());
     let cap_response = ui.add(Slider::new(&mut cap, 0.0..=100.0).step_by(1.0));
     if focus == Some("audio.safe_volume_cap") {
@@ -174,7 +199,10 @@ pub fn show<B: OutputBackend, H: SourceHost>(
         );
     }
 
-    ui.label(tr("setting-test-output-device-desc"));
+    ui.scope(|ui| {
+        ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
+        ui.label(tr("setting-test-output-device-desc"));
+    });
     let test_button_response = ui.button(tr("setting-test-output-device"));
     if focus == Some("audio.test_output_device") {
         test_button_response.request_focus();

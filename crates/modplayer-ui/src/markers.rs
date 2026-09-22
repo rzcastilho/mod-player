@@ -76,12 +76,21 @@ pub fn lane<B: OutputBackend, H: SourceHost>(
         return;
     };
     let space = TimeSpace::new(rect, window, sample_rate);
+    let mark_color = marker_mark_color(ui.visuals());
 
     for marker in markers.markers() {
         let color = theme::marker_color(marker.color);
         let x = space.x_of(marker.position);
         let focused = waveform.focused_marker == Some(marker.id);
-        paint_glyph(ui.painter(), marker.kind, x, rect, color, focused);
+        paint_glyph(
+            ui.painter(),
+            marker.kind,
+            x,
+            rect,
+            color,
+            focused,
+            mark_color,
+        );
 
         let glyph_id = Id::new(("marker-glyph", lane_kind, marker.id));
         let hit_rect =
@@ -203,6 +212,18 @@ fn glyph_accessible_name(marker: &Marker, sample_rate: u32) -> String {
     )
 }
 
+/// The colour for a marker glyph's focus outline / cue-slot digit
+/// (014-design-tokens-and-type-scale, US5, T063/T066, U5): drawn on top of
+/// the marker's own (arbitrary palette) fill colour, the same "mark on a
+/// colour fill" situation `theme::paint_host_glyph` is in — so this uses
+/// the same role, `text_on_accent`, rather than a literal `Color32::WHITE`.
+/// A pure `Visuals -> Color32` mapping so
+/// `type_roles::marker_labels_use_a_role_colour` can pin it directly.
+#[must_use]
+pub fn marker_mark_color(visuals: &egui::Visuals) -> Color32 {
+    theme::roles(visuals).text_on_accent
+}
+
 /// Paint one marker's glyph at `x` (006, contracts/ui-markers.md §3):
 /// region `[`/`]` brackets, a point's downward triangle, or a cue's
 /// numbered square — 2px-stroked (vs. 1.5px/plain) while `focused`.
@@ -213,12 +234,15 @@ fn paint_glyph(
     rect: Rect,
     color: Color32,
     focused: bool,
+    mark_color: Color32,
 ) {
     match kind {
         MarkerKind::RegionStart { .. } => paint_bracket(painter, x, rect, color, true, focused),
         MarkerKind::RegionEnd { .. } => paint_bracket(painter, x, rect, color, false, focused),
-        MarkerKind::Point => paint_point_glyph(painter, x, rect, color, focused),
-        MarkerKind::Cue { slot } => paint_cue_glyph(painter, x, rect, color, slot.get(), focused),
+        MarkerKind::Point => paint_point_glyph(painter, x, rect, color, focused, mark_color),
+        MarkerKind::Cue { slot } => {
+            paint_cue_glyph(painter, x, rect, color, slot.get(), focused, mark_color)
+        }
     }
 }
 
@@ -243,7 +267,14 @@ fn paint_bracket(painter: &Painter, x: f32, rect: Rect, color: Color32, open: bo
 
 /// A `Point` marker's glyph (contracts/ui-markers.md §3): a 10px downward
 /// triangle, apex pointing into the waveform below.
-fn paint_point_glyph(painter: &Painter, x: f32, rect: Rect, color: Color32, focused: bool) {
+fn paint_point_glyph(
+    painter: &Painter,
+    x: f32,
+    rect: Rect,
+    color: Color32,
+    focused: bool,
+    mark_color: Color32,
+) {
     const HALF_WIDTH: f32 = 5.0;
     const HEIGHT: f32 = 10.0;
     let top = rect.top();
@@ -253,7 +284,7 @@ fn paint_point_glyph(painter: &Painter, x: f32, rect: Rect, color: Color32, focu
         pos2(x, top + HEIGHT),
     ];
     let outline = if focused {
-        Stroke::new(1.5, Color32::WHITE)
+        Stroke::new(1.5, mark_color)
     } else {
         Stroke::NONE
     };
@@ -262,7 +293,15 @@ fn paint_point_glyph(painter: &Painter, x: f32, rect: Rect, color: Color32, focu
 
 /// A `Cue { slot }` marker's glyph (contracts/ui-markers.md §3): a 10px
 /// square with the slot digit.
-fn paint_cue_glyph(painter: &Painter, x: f32, rect: Rect, color: Color32, slot: u8, focused: bool) {
+fn paint_cue_glyph(
+    painter: &Painter,
+    x: f32,
+    rect: Rect,
+    color: Color32,
+    slot: u8,
+    focused: bool,
+    mark_color: Color32,
+) {
     const HALF: f32 = 5.0;
     let square = Rect::from_center_size(pos2(x, rect.center().y), vec2(HALF * 2.0, HALF * 2.0));
     painter.rect_filled(square, 1.0, color);
@@ -270,7 +309,7 @@ fn paint_cue_glyph(painter: &Painter, x: f32, rect: Rect, color: Color32, slot: 
         painter.rect_stroke(
             square,
             1.0,
-            Stroke::new(1.5, Color32::WHITE),
+            Stroke::new(1.5, mark_color),
             egui::StrokeKind::Inside,
         );
     }
@@ -278,8 +317,8 @@ fn paint_cue_glyph(painter: &Painter, x: f32, rect: Rect, color: Color32, slot: 
         square.center(),
         egui::Align2::CENTER_CENTER,
         slot.to_string(),
-        egui::FontId::monospace(9.0),
-        Color32::WHITE,
+        theme::mono_font_id(),
+        mark_color,
     );
 }
 
@@ -492,7 +531,19 @@ pub fn panel<B: OutputBackend, H: SourceHost>(
     waveform: &mut WaveformState,
 ) {
     ui.horizontal(|ui| {
-        ui.heading(tr("markers-panel"));
+        // 014-design-tokens-and-type-scale (US2, T030): the panel's chrome
+        // header becomes a `section` role (uppercase + tracking) rather
+        // than a full `title`, matching every other panel-header
+        // treatment (`settings/mod.rs`, `settings/controls.rs`) — the
+        // accessible name stays the exact, un-uppercased `markers-panel`
+        // string (`accessibility.rs::markers_panel_and_empty_state_are_
+        // exposed` pins this), so it's set explicitly rather than left to
+        // derive from the (now uppercased) painted text.
+        let heading = ui.label(theme::section_label(&tr("markers-panel")));
+        ui.ctx().accesskit_node_builder(heading.id, |b| {
+            b.set_role(Role::Heading);
+            b.set_label(tr("markers-panel"));
+        });
         if ui.button(tr("markers-new-loop")).clicked() {
             let _ = controller.new_loop_region();
         }

@@ -21,6 +21,8 @@
 use egui::{Order, Ui};
 use modplayer_core::tr;
 
+use crate::theme;
+
 /// 011-plugin-ui-contributions, contracts/ui-panels.md L2: a floated
 /// plugin panel is a plain `Order::Middle` window — the same layer the
 /// notification area's own `Area` uses — so it never floats above a
@@ -86,14 +88,29 @@ impl Default for Shell {
 
 impl Shell {
     /// Draw the left-rail nav buttons in fixed order, updating `section` on
-    /// click. Each button's visible text is also its accessible name
-    /// (egui sets both from the same string automatically).
+    /// click.
+    ///
+    /// 014-design-tokens-and-type-scale (US2, T031): the rail's own
+    /// entries are this shell's only "heading"-shaped text (no section's
+    /// content draws a screen heading of its own in this slice — Library/
+    /// Search/Settings/Plugins open straight into content, and Now
+    /// Playing's `display` title lives in `now_playing.rs`, T022) — styled
+    /// through `theme::section_label` like every other panel/group header
+    /// (data-model.md §6), never a hand-uppercased string. The accessible
+    /// name is pinned back to the exact, un-uppercased `tr(key)` (mirrors
+    /// `settings::controls::section_heading`, `markers::panel`'s T030)
+    /// rather than left to derive from the now-uppercased painted text —
+    /// FR-019 forbids a behaviour change, and a screen reader's own
+    /// announcement of a nav button is behaviour.
     pub fn nav_rail(&mut self, ui: &mut Ui) {
         for (section, key) in SECTIONS {
-            if ui
-                .selectable_label(self.section == section, tr(key))
-                .clicked()
-            {
+            let label = tr(key);
+            let response =
+                ui.selectable_label(self.section == section, theme::section_label(&label));
+            ui.ctx().accesskit_node_builder(response.id, |b| {
+                b.set_label(label.clone());
+            });
+            if response.clicked() {
                 self.section = section;
             }
         }
@@ -122,6 +139,7 @@ mod tests {
     #[test]
     fn every_shell_and_notification_widget_has_an_accessible_name() {
         let ctx = Context::default();
+        theme::apply_tokens(&ctx);
         ctx.enable_accesskit();
 
         let mut shell = Shell::default();
@@ -164,6 +182,12 @@ mod tests {
     /// across the different screen configurations this test exercises.
     fn accessible_widget_count(render: impl FnMut(&mut Ui)) -> usize {
         let ctx = Context::default();
+        // 014-design-tokens-and-type-scale (US2): the token `Style`'s
+        // `Name("display")`/`Name("section")` text styles must be
+        // installed before rendering any of the screens this helper
+        // exercises (welcome, sign-in, settings › account/about), exactly
+        // as `App::new`/`App::update` do.
+        theme::apply_tokens(&ctx);
         ctx.enable_accesskit();
         let mut output = ctx.run_ui(RawInput::default(), render);
         let Some(update) = output.platform_output.accesskit_update.take() else {

@@ -28,6 +28,18 @@ use modplayer_ui::artwork::ArtworkCache;
 use modplayer_ui::effects_view;
 use modplayer_ui::waveform::WaveformState;
 
+/// 014-design-tokens-and-type-scale (US2, T022): a bare `Context::default()`
+/// has none of the token `Style`'s `Name("display")` text style installed,
+/// which `now_playing::show` (hosting this panel) now reaches — panicking
+/// on layout otherwise. Install it once, exactly as `App::new`/
+/// `App::update` do (mirrors `controls.rs` test's identically-named
+/// helper).
+fn fresh_ctx() -> Context {
+    let ctx = Context::default();
+    modplayer_ui::theme::apply_tokens(&ctx);
+    ctx
+}
+
 struct TempDir(PathBuf);
 
 impl TempDir {
@@ -248,7 +260,7 @@ fn e_and_header_toggle_panel_and_it_survives_track_change() {
     let (mut controller, _dir) = ready_controller("toggle-survive");
     controller.queue_replace(vec![track("a"), track("b")]);
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
@@ -335,7 +347,7 @@ fn rows_list_nodes_in_processing_order_with_type_owner_bypass_handle_cost() {
         .chain_add_node(NodeKind::TimeStretch)
         .expect("add time stretch");
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let nodes = render_panel(&ctx, &mut controller);
 
@@ -407,7 +419,7 @@ fn seventeenth_add_is_refused_inline() {
         "chain must stay at 16, not corrupt"
     );
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let nodes = render_panel(&ctx, &mut controller);
     let texts: Vec<String> = nodes
@@ -431,7 +443,7 @@ fn drag_drop_reorders_and_calls_move_to() {
         .chain_add_node(NodeKind::TimeStretch)
         .expect("add c");
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     // Row 0 belongs to `a` — drop `c`'s handle payload onto it.
@@ -470,7 +482,7 @@ fn arrow_up_on_focused_handle_moves_node_and_keeps_focus() {
         .chain_add_node(NodeKind::PitchShift)
         .expect("add b");
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let handle_b = effects_view::handle_id(b);
     ctx.memory_mut(|memory| memory.request_focus(handle_b));
@@ -524,7 +536,7 @@ fn arrow_up_on_focused_handle_moves_node_and_keeps_focus() {
 fn bypass_toggle_updates_state_immediately() {
     let (mut controller, _dir) = ready_controller("bypass");
     let id = controller.chain_add_node(NodeKind::Gain).expect("add");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     let nodes = render_panel(&ctx, &mut controller);
@@ -552,7 +564,7 @@ fn remove_row_disappears_order_preserved() {
     let b = controller
         .chain_add_node(NodeKind::PitchShift)
         .expect("add b");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     // The topmost "Remove" belongs to row 0 (`a`, added first).
@@ -579,7 +591,7 @@ fn quality_note_appears_at_25_percent_and_clears_at_100() {
     let id = controller
         .chain_add_node(NodeKind::TimeStretch)
         .expect("add");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     controller
@@ -621,7 +633,7 @@ fn out_of_range_entry_displays_clamped_value() {
         "SC-005: the model must return the clamped value"
     );
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let nodes = render_panel(&ctx, &mut controller);
     let slider = nodes
@@ -713,7 +725,7 @@ fn add_each_kind_appends_at_defaults_and_shows_zero_cost() {
         );
     }
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let panel_nodes = render_panel(&ctx, &mut controller);
     assert_eq!(
@@ -732,7 +744,7 @@ fn phase_invert_disabled_unless_mono_sum() {
         .chain_add_node(NodeKind::StereoTools)
         .expect("add stereo tools");
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let nodes = render_panel(&ctx, &mut controller);
     let phase_invert = find_one(&nodes, Role::Button, &tr("effects-param-phase-invert"));
@@ -773,7 +785,7 @@ fn auto_bypassed_label_shown_from_view_flag() {
         .expect("node")
         .slot;
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let nodes = render_panel(&ctx, &mut controller);
     assert!(
@@ -798,7 +810,7 @@ fn auto_bypassed_label_shown_from_view_flag() {
 #[test]
 fn over_budget_badge_and_counter_follow_view() {
     let (mut controller, _dir) = ready_controller("over-budget-badge");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     let nodes = render_panel(&ctx, &mut controller);
@@ -849,7 +861,7 @@ fn meters_and_spectrum_render_from_snapshot() {
     bands[10] = 0.9;
     controller.shared().set_spectrum(&bands, 1);
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let nodes = render_panel(&ctx, &mut controller);
 
@@ -914,7 +926,7 @@ fn click_on_waveform_takes_focus_so_plus_zooms() {
         .chain_add_node(NodeKind::TimeStretch)
         .expect("add time stretch");
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();

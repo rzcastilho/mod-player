@@ -21,6 +21,7 @@ use modplayer_core::{ChainView, MeterSnapshot, NodeId, NodeRow, PlaybackControll
 use modplayer_effects::catalog::{NodeKind, NodeOwner, ParamId, QualityMode};
 
 use crate::actions::{self, Claim};
+use crate::theme;
 use crate::widgets::chain_meters;
 
 /// The kinds the "Add node…" control offers (contracts/ui-effect-
@@ -87,7 +88,16 @@ pub fn show<B: OutputBackend, H: SourceHost>(
 /// live from `RtShared` via `ChainView`/`MeterSnapshot` every frame.
 fn show_header(ui: &mut Ui, view: &ChainView, meters: &MeterSnapshot) {
     ui.horizontal(|ui| {
-        ui.heading(tr("effects-panel-title"));
+        // 014-design-tokens-and-type-scale (US2, T028, data-model.md §6:
+        // "Effect chain" is the named `section`-role example) — the
+        // accessible name is pinned back to the exact, un-uppercased
+        // title (FR-019), mirroring `markers::panel`'s T030 and
+        // `settings::controls::section_heading`.
+        let title = tr("effects-panel-title");
+        let heading = ui.label(theme::section_label(&title));
+        ui.ctx().accesskit_node_builder(heading.id, |b| {
+            b.set_label(title.clone());
+        });
         ui.label(tr_args(
             "effects-chain-cpu",
             &[("pct", format!("{:.0}", view.total_cost_pct))],
@@ -133,7 +143,10 @@ fn show_row<B: OutputBackend, H: SourceHost>(
                 let _ = controller.chain_set_bypass(row.id, bypassed);
             }
             if row.auto_bypassed {
-                ui.label(tr("effects-auto-bypassed"));
+                // 014-design-tokens-and-type-scale (US2, T028): a
+                // supplementary status note, `secondary`/`.weak()` like a
+                // row's other detail text.
+                ui.label(egui::RichText::new(tr("effects-auto-bypassed")).weak());
             }
 
             ui.label(tr_args(
@@ -144,7 +157,7 @@ fn show_row<B: OutputBackend, H: SourceHost>(
             show_params(ui, controller, row);
 
             if row.mode_note {
-                ui.label(tr("effects-mode-note"));
+                ui.label(egui::RichText::new(tr("effects-mode-note")).weak());
             }
 
             if ui.button(tr("effects-remove")).clicked() {

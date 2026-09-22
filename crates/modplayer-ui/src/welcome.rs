@@ -10,13 +10,14 @@
 //! replaces the same screen's content rather than opening a new one
 //! (contracts/ui-surface.md).
 
-use egui::{Ui, ViewportCommand};
+use egui::{RichText, Ui, ViewportCommand};
 use modplayer_account::{DISCLOSURE_BUNDLE_VERSION, TERMS_URL};
 use modplayer_audio_io::OutputBackend;
 use modplayer_audio_source::SourceHost;
 use modplayer_core::{DisclosureAcknowledgement, PlaybackController, Severity, tr};
 
 use crate::privacy_notice;
+use crate::theme;
 
 /// Which sub-view the Welcome screen is currently showing (contracts/
 /// ui-surface.md: "Decline view (same screen, replaces content)").
@@ -81,11 +82,19 @@ impl WelcomeScreen {
         ui: &mut Ui,
         controller: &mut PlaybackController<B, H>,
     ) -> Option<WelcomeOutcome> {
-        ui.heading(tr("welcome-title"));
-        ui.label(tr("welcome-description"));
-        ui.label(tr("disclosure-unofficial"));
-        ui.label(tr("disclosure-premium-required"));
-        ui.label(tr("disclosure-terms-apply"));
+        // 014-design-tokens-and-type-scale (US2, T023): the first-launch
+        // heading is a `display`-role surface (data-model.md §6), a size
+        // up from what `ui.heading()`'s `title` role would give it.
+        ui.label(RichText::new(tr("welcome-title")).text_style(theme::text::DISPLAY.clone()));
+        ui.scope(|ui| {
+            // FR-006, U2: the disclosure paragraph is prose, capped at the
+            // 72-character measure rather than spanning the window.
+            ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
+            ui.label(tr("welcome-description"));
+            ui.label(tr("disclosure-unofficial"));
+            ui.label(tr("disclosure-premium-required"));
+            ui.label(tr("disclosure-terms-apply"));
+        });
         ui.hyperlink_to(tr("disclosure-terms-link"), TERMS_URL);
         if ui.button(tr("disclosure-privacy-link")).clicked() {
             self.view = View::Privacy;
@@ -109,7 +118,11 @@ impl WelcomeScreen {
 }
 
 fn show_decline(ui: &mut Ui) {
-    ui.label(tr("decline-explanation"));
+    ui.scope(|ui| {
+        // FR-006, U2: prose, capped at the 72-character measure.
+        ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
+        ui.label(tr("decline-explanation"));
+    });
     if ui.button(tr("decline-quit")).clicked() {
         handle_decline(ui.ctx());
     }
