@@ -9,6 +9,7 @@ ModPlayer is an open-source desktop music player that plays a user's Spotify Pre
 | Document | Waves | Covers |
 |---|---|---|
 | [ModPlayer-Software-Specification.md](../ModPlayer-Software-Specification.md) | 001–007 | Consolidated software specification v0.1 (draft, 2026-09-15): overview, personas, journeys, functional requirements, plugin API, data model, integrations, NFRs, architecture, edge cases, governance |
+| [ModPlayer-UI-UX-Review.md](../ModPlayer-UI-UX-Review.md) | 008–011 | UI/UX review and improvement specification (2026-09-22, build `a2f262b`): screen-by-screen audit of the shipped interface, measured contrast, a design-token proposal, and 40 prioritized findings |
 
 ## Wave sequence
 
@@ -85,6 +86,43 @@ What the project needs to run for a long time and reach everyone: crash diagnost
 3. [003 — Localization and Portuguese (Brazil)](007-operations-and-polish/003-localization-pt-br.md) — externalized strings, pt-BR, solfège naming, plugin string tables
 4. [004 — Accessibility Hardening](007-operations-and-polish/004-accessibility-hardening.md) — keyboard-only operation, accessible names, contrast and high-contrast, flashing flag, CI checks
 5. [005 — Playback Polish: Crossfade, Quality Tier, Library Sorting](007-operations-and-polish/005-playback-polish.md) — crossfade (off while looping), quality tier, sortable library
+
+### 008 — Design Foundation
+
+The interface has never been designed: the theme module sets a light/dark preference and nothing else, so every screen renders in the UI toolkit's defaults with one font size, no spacing rhythm, no semantic colour, and colour literals scattered through the views. This wave establishes the tokens and the three components every other screen is built from, and carries the one accessibility failure the review measured — light-theme secondary text at 2.96:1 against a 4.5:1 requirement. It comes first because every later slice restyles surfaces that must already have a vocabulary to speak.
+
+1. [001 — Design Tokens, Type Scale, and Spacing](008-design-foundation/001-design-tokens-and-type-scale.md) — six typographic roles, 4 px spacing scale, semantic colour with verified contrast, no literals in views
+2. [002 — Button, Toggle, and Meter Variants](008-design-foundation/002-control-variants.md) — primary/default/quiet/destructive, real toggles, hover and focus feedback, metered colour roles
+3. [003 — List Row, Tab, and Panel Card Components](008-design-foundation/003-list-row-and-panel-components.md) — three-column row with right-aligned durations, open affordance, underlined tabs with counts, collapsible cards
+4. [004 — High-Contrast Appearance Option](008-design-foundation/004-high-contrast-appearance.md) — orthogonal high-contrast variant reaching 7:1, applied to plugin surfaces too
+
+### 009 — Window and Shell
+
+The app opens at a size it cannot render: the plugin dock clips its own buttons, notifications cover the tab strips they float over, and the navigation rail is live during onboarding while doing nothing. This wave makes the frame trustworthy at any size before the individual screens are reworked inside it.
+
+1. [001 — Window Sizing and Responsive Plugin Dock](009-window-and-shell/001-window-sizing-and-responsive-dock.md) — initial and minimum window size, resizable dock with a hide threshold, proportional waveform heights
+2. [002 — Notification Placement, Severity, and Message Quality](009-window-and-shell/002-notification-presentation.md) — bottom-right stack capped at three, severity accent, humanised messages with details behind an expander
+3. [003 — Shell Navigation and Launch Gates](009-window-and-shell/003-shell-navigation-and-gates.md) — rail hidden behind gates, preserved scroll per section, non-wrapping settings category row with overflow
+
+### 010 — Now-Playing Workbench
+
+The screen a practising musician lives in is a single column of fourteen controls where the transport scrolls away as soon as a panel opens. This wave restructures it around the transport and the waveform, then makes each practice surface — markers, effect chain — readable on its own terms.
+
+1. [001 — Sticky Transport Bar and Panel Layout](010-now-playing-workbench/001-transport-bar-and-panel-layout.md) — pinned transport, flexible waveform, panels as cards, toggles that reveal their panel, queue rows
+2. [002 — Waveform Legibility and Scrub Feedback](010-now-playing-workbench/002-waveform-legibility.md) — peak/RMS tones, played/unplayed split, visible playhead, loop shading, hover scrub with timestamp
+3. [003 — Markers Panel Structure](010-now-playing-workbench/003-markers-panel-structure.md) — grouped by loop/point/cue with counts, rename and recolour in place, destructive action separated
+4. [004 — Effect Chain Rows and Meters](010-now-playing-workbench/004-effect-chain-rows-and-meters.md) — identity/state/parameters/actions zones, units inside controls, drag reordering, scaled spectrum
+
+### 011 — Browse and Manage Polish
+
+Everything outside the practice loop: browsing, searching, managing plugins, changing settings, and the first five minutes. It lands last because each item is a quality improvement to a working surface rather than something that blocks a core task — but it is where the app stops feeling unfinished to a new user.
+
+1. [001 — Library Browsing and Detail View](011-browse-and-manage-polish/001-library-browsing-and-detail.md) — detail header with artwork and a play action, anchored row menus, shape-matched skeletons, restored scroll
+2. [002 — Search Results Structure and Feedback](011-browse-and-manage-polish/002-search-results-structure.md) — one page scroll with sticky group headers and counts, progress and result count, marked stale results
+3. [003 — Plugins List as a Real Table](011-browse-and-manage-polish/003-plugins-list-as-table.md) — aligned columns, permissions as a count plus expander, resource use against budgets, health as a state word
+4. [004 — Settings Fields, Placeholders, and Account Summary](011-browse-and-manage-polish/004-settings-fields-and-account.md) — grouped fields with units and per-field reset, marked placeholder categories, account summary, wider sign-out modal
+5. [005 — Keyboard Shortcut Reference](011-browse-and-manage-polish/005-keyboard-shortcut-reference.md) — real key glyphs, two-column grouped bindings, filter by key, printable shortcut sheet
+6. [006 — Onboarding and Sign-In Clarity](011-browse-and-manage-polish/006-onboarding-clarity.md) — welcome hierarchy and measure, sign-in progress and error status, device-check back and explanation, scannable getting-started card
 
 ## How to use this folder
 
@@ -206,6 +244,40 @@ Work through waves in order, and files in order within a wave. Open a file, copy
 | Part 12 B. Open questions | Carried into per-file "Open questions" sections and the list below |
 | Part 13 Glossary | Not sliced — reference material |
 
+### ModPlayer-UI-UX-Review.md
+
+| Source section | Covered by |
+|---|---|
+| Header — build, host, method | Not sliced — provenance of the audit |
+| § 1 Summary | Findings mapped individually below: UX-01 → 009-window-and-shell/001; UX-02, UX-03 → 008-design-foundation/001; UX-04 → 008-design-foundation/002; UX-05 → 009-window-and-shell/002 |
+| § 2 What the audit covered | Not sliced — scope statement for the audit itself |
+| § 3.1 First launch | UX-06 → 009-window-and-shell/003; UX-07, UX-08, UX-09, UX-10 → 011-browse-and-manage-polish/006; shortcut listing → 011-browse-and-manage-polish/005 |
+| § 3.2 Sign-in | UX-11, UX-12 → 011-browse-and-manage-polish/006 |
+| § 3.3 Library | UX-13, UX-15, UX-16 → 008-design-foundation/003; UX-14, UX-17 → 011-browse-and-manage-polish/001 |
+| § 3.4 Search | UX-18, UX-19, UX-20 → 011-browse-and-manage-polish/002 |
+| § 3.5 Now Playing | UX-01 → 009-window-and-shell/001; UX-21, UX-22, UX-26 → 010-now-playing-workbench/001; UX-23 → 010-now-playing-workbench/002; UX-24 → 010-now-playing-workbench/003; UX-25 → 010-now-playing-workbench/004 |
+| § 3.6 Plugins | UX-27, UX-28 → 011-browse-and-manage-polish/003; UX-29 (permission management) already covered by 005-community-registry/002-permission-management-and-usage-log; duplicated panel-header naming → 001-mvp/011-plugin-ui-contributions |
+| § 3.7 Settings | UX-31 → 009-window-and-shell/003; UX-32 → 011-browse-and-manage-polish/005; UX-33, UX-34, UX-35, UX-36 → 011-browse-and-manage-polish/004 |
+| § 3.8 Notifications | UX-05, UX-37, UX-38 → 009-window-and-shell/002 |
+| § 3.9 Cross-theme | 008-design-foundation/001 (surface separation, both palettes) |
+| § 3.10 States reviewed from source | Stale-search status → 011-browse-and-manage-polish/002; sign-in error variants → 011-browse-and-manage-polish/006; suspended-plugin placeholder → 011-browse-and-manage-polish/003 |
+| § 4.1 No design tokens | 008-design-foundation/001 |
+| § 4.2 Measured contrast | 008-design-foundation/001 (secondary text ≥4.5:1), 008-design-foundation/004 (high-contrast option) |
+| § 4.3 Layout and responsiveness | 009-window-and-shell/001; per-screen layout in 010-now-playing-workbench/001 and 009-window-and-shell/003 |
+| § 4.4 Typography and text | 008-design-foundation/001 (scale, measure, tabular figures); message wording in 009-window-and-shell/002 |
+| § 4.5 Feedback and affordance | 008-design-foundation/002 (hover, focus, pressed), 008-design-foundation/003 (row affordance), 011-browse-and-manage-polish/002 (progress) |
+| § 4.6 Accessibility versus the spec | NFR-6.5 → 008-design-foundation/001, 004; NFR-7.4 → 009-window-and-shell/001, 003 and 011-browse-and-manage-polish/003; NFR-6.6 text scaling (UX-40) deferred to 007-operations-and-polish/004-accessibility-hardening |
+| § 4.7 Stability found during the walk | UX-30 not sliced — an upstream toolkit crash, not design work; file as a defect against the windowing dependency |
+| § 5.1 Type scale | 008-design-foundation/001 |
+| § 5.2 Spacing and radius | 008-design-foundation/001 |
+| § 5.3 Semantic colour | 008-design-foundation/001; high-contrast variant in 008-design-foundation/004; marker and overlay colours in 010-now-playing-workbench/002–003 |
+| § 5.4 Component rules | 008-design-foundation/002–003; notifications in 009-window-and-shell/002; meters in 010-now-playing-workbench/004 |
+| § 5.5 Layout rules | 009-window-and-shell/001 (window, dock, waveform sizing), 010-now-playing-workbench/001 (transport bar and cards) |
+| § 6 Prioritized recommendations | Not sliced as a section — its table is the index the slices above were cut from; its four suggested feature cuts became waves 008–011 |
+| § 7 Appendix — screenshot index | Not sliced — evidence index |
+| § 7 Appendix — open questions | Carried into the per-file "Open questions" sections and the list below |
+| § 7 Appendix — how to reproduce | Not sliced — method notes for re-running the audit |
+
 ## Open questions
 
 1. Q-1 / A-3 — offline grace period the service's credentials allow, and whether cached streams play without a live session → gates 003-offline-and-library/002; spike before planning that wave.
@@ -234,3 +306,9 @@ Work through waves in order, and files in order within a wave. Open a file, copy
 24. A-15 — loop stays armed on seek-outside → 001-mvp/006.
 25. A-16 — reference hardware and track set → 001-mvp/001 and every latency/quality acceptance target.
 26. A-19 — provider audio features available → 006-practice-depth/001.
+27. Custom font family versus the platform default for the type scale → gates 008-design-foundation/001; the slice assumes the platform default.
+28. Whether the plugin dock is freely drag-resizable or snaps between fixed widths → 009-window-and-shell/001 (assumes drag-resizable with a remembered width).
+29. Settings categories as a sidebar versus a single non-wrapping row with an overflow control → decided as the row with overflow in 009-window-and-shell/003; revisit if a twelfth category appears.
+30. Whether a text-scale setting ships before the 200 % platform-scaling requirement is verified on Windows and Linux → deferred to 007-operations-and-polish/004-accessibility-hardening.
+31. Whether high contrast should follow an operating-system preference automatically → 008-design-foundation/004.
+32. UX-30, the reproducible crash in the windowing layer's Touch Bar teardown → not a wave item; needs an upstream defect report before the visual work lands.
