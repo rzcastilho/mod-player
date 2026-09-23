@@ -197,9 +197,9 @@ Single crate, `crates/modplayer-ui/`. All source paths are relative to the repos
 
 **Purpose**: Confirm nothing this feature touched regressed, and close out Governance's manual sign-off.
 
-- [ ] T055 [P] Run the unmodified regression net and confirm every suite still passes: `accessibility.rs`, `fluent_keys.rs`, `design_token_literals.rs` (0 hits — SC-007), `design_token_contrast.rs`, `design_token_roles.rs` (SC-006), `plugins_view.rs`, `plugin_panels.rs`, `settings_plugins.rs`, `queue_view.rs`, `effects_view.rs`, `markers.rs`, `rows.rs`, `now_playing.rs`, `controls.rs`, `actions.rs` (A2, SC-008)
+- [X] T055 [P] Run the unmodified regression net and confirm every suite still passes: `accessibility.rs`, `fluent_keys.rs`, `design_token_literals.rs` (0 hits — SC-007), `design_token_contrast.rs`, `design_token_roles.rs` (SC-006), `plugins_view.rs`, `plugin_panels.rs`, `settings_plugins.rs`, `queue_view.rs`, `effects_view.rs`, `markers.rs`, `rows.rs`, `now_playing.rs`, `controls.rs`, `actions.rs` (A2, SC-008)
 - [ ] T056 [P] `RUSTUP_TOOLCHAIN=1.95.0 cargo fmt --all --check && cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo test --workspace && cargo deny check`
-- [ ] T057 [P] `scripts/check-license-headers.sh` — confirm SPDX headers on `crates/modplayer-ui/src/theme/controls.rs` and `crates/modplayer-ui/src/widgets/controls.rs`
+- [X] T057 [P] `scripts/check-license-headers.sh` — confirm SPDX headers on `crates/modplayer-ui/src/theme/controls.rs` and `crates/modplayer-ui/src/widgets/controls.rs`
 - [ ] T058 Execute quickstart.md's manual scenarios M1–M10 (Governance › Manual Scenario Sign-Off): locate the window, drive with `CGEventPost`, capture with `screencapture`, sample with `target/manual-walk/pixel.py`; record pass/deviation with evidence on this task; verify `LaunchStep::Main` is reached before M2–M6/M8–M10, and if the sign-in gate blocks any, record it **not executed** with the reason — never fabricate a signed-in state
 - [ ] T059 If any manual scenario was recorded not-executed, write the deviation back into `quickstart.md` and `research.md`, and note it in `plan.md` § Complexity Tracking, per Governance
 
