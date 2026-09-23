@@ -529,3 +529,122 @@ fn disabled_controls_show_no_feedback() {
         "a disabled control must not hold focus, found {focused:?}"
     );
 }
+
+/// **B5** (contract control-variants.md): `Variant::Primary` is applied
+/// to exactly one call site in all of `src/**` — `welcome-acknowledge`
+/// (`welcome.rs`) — so the app has exactly one primary button (data-model
+/// §9.1). `theme/controls.rs` and `widgets/controls.rs` are excluded as
+/// the definition/host files, exactly as B6 excludes them.
+#[test]
+fn welcome_has_exactly_one_primary() {
+    let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let non_call_site_files = ["theme/controls.rs", "widgets/controls.rs"];
+
+    let mut primary_sites = Vec::new();
+    for path in walk_src_rs_files() {
+        let rel = path
+            .strip_prefix(&src_root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if non_call_site_files.contains(&rel.as_str()) {
+            continue;
+        }
+        let contents = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+        for (idx, line) in lines_containing(&contents, "Variant::Primary") {
+            primary_sites.push((rel.clone(), idx, line.to_string()));
+        }
+    }
+
+    assert_eq!(
+        primary_sites.len(),
+        1,
+        "expected exactly one Variant::Primary call site in src/**, found {}: {primary_sites:?}",
+        primary_sites.len()
+    );
+    let (rel, _idx, line) = &primary_sites[0];
+    assert_eq!(
+        rel, "welcome.rs",
+        "the one Variant::Primary site must be welcome.rs, found {rel}"
+    );
+    assert!(
+        line.contains("\"welcome-acknowledge\""),
+        "welcome.rs's Variant::Primary site must be welcome-acknowledge, found: {line}"
+    );
+}
+
+/// **B7** (contract control-variants.md): `Variant::Quiet` is applied to
+/// exactly the four Queue row actions (`queue-move-up`, `queue-move-down`,
+/// `queue-play-next`, `queue-remove`) in `queue_view.rs`, and
+/// `queue-remove` is never paired with `Variant::Destructive` (FR-004) —
+/// a queue removal stays trivially reversible, not destructive.
+#[test]
+fn queue_row_actions_are_quiet() {
+    let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let non_call_site_files = ["theme/controls.rs", "widgets/controls.rs"];
+    let expected_keys = [
+        "queue-move-up",
+        "queue-move-down",
+        "queue-play-next",
+        "queue-remove",
+    ];
+
+    let mut quiet_sites = Vec::new();
+    for path in walk_src_rs_files() {
+        let rel = path
+            .strip_prefix(&src_root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if non_call_site_files.contains(&rel.as_str()) {
+            continue;
+        }
+        let contents = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+        for (idx, line) in lines_containing(&contents, "Variant::Quiet") {
+            quiet_sites.push((rel.clone(), idx, line.to_string()));
+        }
+    }
+
+    assert_eq!(
+        quiet_sites.len(),
+        expected_keys.len(),
+        "expected exactly {} Variant::Quiet call site(s) in src/**, found {}: {quiet_sites:?}",
+        expected_keys.len(),
+        quiet_sites.len()
+    );
+    for (rel, _idx, _line) in &quiet_sites {
+        assert_eq!(
+            rel, "queue_view.rs",
+            "every Variant::Quiet site must be in queue_view.rs, found {rel}"
+        );
+    }
+
+    let contents = fs::read_to_string(src_root.join("queue_view.rs"))
+        .unwrap_or_else(|e| panic!("failed to read queue_view.rs: {e}"));
+    for key in expected_keys {
+        let tr_key = format!("\"{key}\"");
+        let key_lines = lines_containing(&contents, &tr_key);
+        assert!(
+            !key_lines.is_empty(),
+            "queue_view.rs: expected a call site for tr(\"{key}\")"
+        );
+        let on_a_quiet_line = key_lines
+            .iter()
+            .any(|(_, line)| line.contains("Variant::Quiet"));
+        assert!(
+            on_a_quiet_line,
+            "queue_view.rs: \"{key}\" is never paired with Variant::Quiet on the same line"
+        );
+    }
+
+    // queue-remove must never be paired with Variant::Destructive (FR-004).
+    let remove_lines = lines_containing(&contents, "\"queue-remove\"");
+    for (_, line) in &remove_lines {
+        assert!(
+            !line.contains("Variant::Destructive"),
+            "queue-remove must stay Quiet, not Destructive: {line}"
+        );
+    }
+}

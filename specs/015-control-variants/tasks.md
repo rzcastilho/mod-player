@@ -182,12 +182,12 @@ Single crate, `crates/modplayer-ui/`. All source paths are relative to the repos
 
 ### Tests for User Story 5 (write first — must fail red)
 
-- [ ] T052 [US5] Add `welcome_has_exactly_one_primary` (B5) and `queue_row_actions_are_quiet` (B7) to `crates/modplayer-ui/tests/control_variants.rs`
+- [X] T052 [US5] Add `welcome_has_exactly_one_primary` (B5) and `queue_row_actions_are_quiet` (B7) to `crates/modplayer-ui/tests/control_variants.rs`
 
 ### Implementation for User Story 5
 
-- [ ] T053 [US5] Convert `welcome-acknowledge`→primary (:108) in `crates/modplayer-ui/src/welcome.rs`
-- [ ] T054 [P] [US5] Convert `queue-move-up`/`-move-down`/`-play-next`/`-remove`→quiet (:84/:87/:90/:93); `queue-remove` stays **quiet**, not destructive (FR-004) in `crates/modplayer-ui/src/queue_view.rs` (same file as T038/T046 — sequential)
+- [X] T053 [US5] Convert `welcome-acknowledge`→primary (:108) in `crates/modplayer-ui/src/welcome.rs`
+- [X] T054 [P] [US5] Convert `queue-move-up`/`-move-down`/`-play-next`/`-remove`→quiet (:84/:87/:90/:93); `queue-remove` stays **quiet**, not destructive (FR-004) in `crates/modplayer-ui/src/queue_view.rs` (same file as T038/T046 — sequential)
 
 **Checkpoint**: All five user stories pass independently. `tests/control_variants.rs` is fully green (B1–B11, S4, A5, L1).
 

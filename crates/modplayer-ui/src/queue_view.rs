@@ -7,13 +7,14 @@
 //! Move up/Move down/Play next/Remove actions per row. Reached from Now
 //! Playing via the `queue-toggle` button (`now_playing.rs`).
 
-use egui::{Button, RichText, Ui};
+use egui::{RichText, Ui};
 use modplayer_audio_io::OutputBackend;
 use modplayer_audio_source::{Repeat, SourceHost};
 use modplayer_core::{Origin, PlaybackController, tr, tr_args};
 
 use crate::theme;
-use crate::widgets::controls::{SwitchKind, row_frame, switch};
+use crate::theme::controls::Variant;
+use crate::widgets::controls::{SwitchKind, button, row_frame, switch};
 
 /// Draw the Queue panel, applying any header/row action directly to
 /// `controller`.
@@ -84,16 +85,16 @@ pub fn show<B: OutputBackend, H: SourceHost>(
                     ui.label(RichText::new(tr("queue-badge-unavailable")).weak());
                 }
 
-                if ui.add(Button::new(tr("queue-move-up"))).clicked() {
+                if button(ui, Variant::Quiet, tr("queue-move-up")).clicked() {
                     controller.queue_move_up(row.uid);
                 }
-                if ui.add(Button::new(tr("queue-move-down"))).clicked() {
+                if button(ui, Variant::Quiet, tr("queue-move-down")).clicked() {
                     controller.queue_move_down(row.uid);
                 }
-                if !row.is_current && ui.add(Button::new(tr("queue-play-next"))).clicked() {
+                if !row.is_current && button(ui, Variant::Quiet, tr("queue-play-next")).clicked() {
                     controller.queue_play_next(row.uid);
                 }
-                if ui.add(Button::new(tr("queue-remove"))).clicked() {
+                if button(ui, Variant::Quiet, tr("queue-remove")).clicked() {
                     controller.queue_remove(row.uid);
                 }
             });

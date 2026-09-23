@@ -18,6 +18,8 @@ use modplayer_core::{DisclosureAcknowledgement, PlaybackController, Severity, tr
 
 use crate::privacy_notice;
 use crate::theme;
+use crate::theme::controls::Variant;
+use crate::widgets::controls::button;
 
 /// Which sub-view the Welcome screen is currently showing (contracts/
 /// ui-surface.md: "Decline view (same screen, replaces content)").
@@ -105,7 +107,7 @@ impl WelcomeScreen {
             // Enabled immediately, default focus (contracts/ui-surface.md)
             // — drawn first so it is first in egui's creation-order focus
             // chain, matching the nav rail's convention (shell.rs).
-            if ui.button(tr("welcome-acknowledge")).clicked() {
+            if button(ui, Variant::Primary, tr("welcome-acknowledge")).clicked() {
                 acknowledge(controller);
                 outcome = Some(WelcomeOutcome::Acknowledged);
             }
