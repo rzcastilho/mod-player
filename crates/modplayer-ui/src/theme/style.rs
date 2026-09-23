@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use egui::style::WidgetVisuals;
 use egui::{Color32, FontFamily, FontId, Margin, Stroke, Style, TextStyle, Theme, Visuals};
 
+use super::controls;
 use super::tokens::{self, space, text};
 
 /// Build a complete `Style` for `theme`. The only function in the crate
@@ -117,15 +118,45 @@ fn visuals(theme: Theme) -> Visuals {
     visuals.faint_bg_color = roles.surface_raised;
     visuals.code_bg_color = roles.surface_raised;
 
-    for widget in [
+    // Widget-state slot re-differentiation (015-control-variants FR-011a,
+    // data-model.md §4, research R13): `noninteractive`/`inactive` stay at
+    // rest; `hovered` carries the 4 % overlay, `active`/`open` the 8 % one
+    // — computed once here, the one `Style` construction site (design
+    // note 4), and consumed by every widget that draws through `Visuals`
+    // with no call-site edit (contract I4, I5).
+    let hover_bg = roles.surface_raised.blend(controls::hover_fill(roles));
+    let pressed_bg = roles.surface_raised.blend(controls::pressed_fill(roles));
+
+    recolor_widget(
         &mut visuals.widgets.noninteractive,
+        roles.surface_raised,
+        roles.text_primary,
+        divider,
+    );
+    recolor_widget(
         &mut visuals.widgets.inactive,
+        roles.surface_raised,
+        roles.text_primary,
+        divider,
+    );
+    recolor_widget(
         &mut visuals.widgets.hovered,
+        hover_bg,
+        roles.text_primary,
+        divider,
+    );
+    recolor_widget(
         &mut visuals.widgets.active,
+        pressed_bg,
+        roles.text_primary,
+        divider,
+    );
+    recolor_widget(
         &mut visuals.widgets.open,
-    ] {
-        recolor_widget(widget, roles.surface_raised, roles.text_primary, divider);
-    }
+        pressed_bg,
+        roles.text_primary,
+        divider,
+    );
 
     visuals.selection.bg_fill = roles.accent;
     visuals.selection.stroke = Stroke::new(1.0, roles.text_on_accent);
@@ -142,17 +173,18 @@ fn visuals(theme: Theme) -> Visuals {
     visuals
 }
 
-/// Recolour one `WidgetVisuals` slot (all five states get the same
-/// treatment — data-model.md §5.3, design note 12: token *colours*, not a
-/// new interaction state). `expansion` is left untouched (A8).
+/// Recolour one `WidgetVisuals` slot with the given `bg_fill` (015's
+/// per-slot differentiation, data-model.md §4) — `bg_stroke`, `fg_stroke`
+/// and `corner_radius` stay identical across every slot. `expansion` is
+/// left untouched (A8).
 fn recolor_widget(
     widget: &mut WidgetVisuals,
-    surface_raised: Color32,
+    bg_fill: Color32,
     text_primary: Color32,
     divider: Color32,
 ) {
-    widget.bg_fill = surface_raised;
-    widget.weak_bg_fill = surface_raised;
+    widget.bg_fill = bg_fill;
+    widget.weak_bg_fill = bg_fill;
     widget.bg_stroke = Stroke::new(1.0, divider);
     widget.corner_radius = tokens::radius::SM;
     widget.fg_stroke = Stroke::new(1.0, text_primary);
@@ -200,6 +232,10 @@ mod tests {
         assert_eq!(style.visuals.faint_bg_color, roles.surface_raised);
         assert_eq!(style.visuals.code_bg_color, roles.surface_raised);
 
+        // noninteractive/inactive stay resting; hovered/active/open carry
+        // the 015 overlay (data-model.md §4) — see
+        // `widget_slots_are_re_differentiated` below for the differentiated
+        // values themselves.
         for widget in [
             &style.visuals.widgets.noninteractive,
             &style.visuals.widgets.inactive,
@@ -207,11 +243,14 @@ mod tests {
             &style.visuals.widgets.active,
             &style.visuals.widgets.open,
         ] {
-            assert_eq!(widget.bg_fill, roles.surface_raised);
-            assert_eq!(widget.weak_bg_fill, roles.surface_raised);
             assert_eq!(widget.fg_stroke.color, roles.text_primary);
             assert_eq!(widget.corner_radius, tokens::radius::SM);
         }
+        assert_eq!(
+            style.visuals.widgets.noninteractive.bg_fill,
+            roles.surface_raised
+        );
+        assert_eq!(style.visuals.widgets.inactive.bg_fill, roles.surface_raised);
 
         assert_eq!(style.visuals.selection.bg_fill, roles.accent);
         assert_eq!(style.visuals.selection.stroke.color, roles.text_on_accent);
@@ -303,5 +342,55 @@ mod tests {
             built.spacing.default_area_size,
             default_spacing.default_area_size
         );
+    }
+
+    /// T010 (015-control-variants, contract I4): the five `Visuals::widgets`
+    /// slots are re-differentiated per data-model.md §4 —
+    /// `noninteractive`/`inactive` stay at `surface.raised`, `hovered`
+    /// carries the hover overlay, `active`/`open` the pressed overlay, and
+    /// every slot keeps the same `bg_stroke`/`fg_stroke`/`corner_radius`.
+    /// `no_geometry_or_interaction_field_changes` above is the V6/Y1
+    /// regression check and is asserted **verbatim**, unmodified by this
+    /// feature.
+    #[test]
+    fn widget_slots_are_re_differentiated() {
+        for theme in [Theme::Light, Theme::Dark] {
+            let style = build_style(theme);
+            let roles = tokens::for_dark_mode(matches!(theme, Theme::Dark));
+            let widgets = &style.visuals.widgets;
+
+            let hover_bg = roles.surface_raised.blend(controls::hover_fill(roles));
+            let pressed_bg = roles.surface_raised.blend(controls::pressed_fill(roles));
+
+            assert_eq!(widgets.noninteractive.bg_fill, roles.surface_raised);
+            assert_eq!(widgets.inactive.bg_fill, roles.surface_raised);
+            assert_eq!(widgets.hovered.bg_fill, hover_bg);
+            assert_eq!(widgets.active.bg_fill, pressed_bg);
+            assert_eq!(widgets.open.bg_fill, pressed_bg);
+
+            // V5: pairwise distinct — inactive != hovered != active.
+            assert_ne!(widgets.inactive.bg_fill, widgets.hovered.bg_fill);
+            assert_ne!(widgets.hovered.bg_fill, widgets.active.bg_fill);
+            assert_ne!(widgets.inactive.bg_fill, widgets.active.bg_fill);
+
+            // weak_bg_fill mirrors bg_fill; bg_stroke/fg_stroke/corner_radius
+            // stay identical across every slot (design note 12: colours
+            // only, no new interaction state, no geometry change).
+            for widget in [
+                &widgets.noninteractive,
+                &widgets.inactive,
+                &widgets.hovered,
+                &widgets.active,
+                &widgets.open,
+            ] {
+                assert_eq!(widget.weak_bg_fill, widget.bg_fill);
+                assert_eq!(
+                    widget.bg_stroke,
+                    Stroke::new(1.0, tokens::divider_color_for(roles))
+                );
+                assert_eq!(widget.fg_stroke.color, roles.text_primary);
+                assert_eq!(widget.corner_radius, tokens::radius::SM);
+            }
+        }
     }
 }

@@ -42,7 +42,7 @@ use crate::sign_in::{self, SignInScreen, TierResult};
 use crate::ticker::Ticker;
 use crate::waveform::WaveformState;
 use crate::welcome::{self, WelcomeScreen};
-use crate::{notifications, now_playing, plugins_view, search_view, settings, theme};
+use crate::{notifications, now_playing, plugins_view, search_view, settings, theme, widgets};
 
 /// Upper bound between UI frames while the app is running (≈ 30 Hz).
 const REPAINT_INTERVAL: Duration = Duration::from_millis(33);
@@ -312,6 +312,11 @@ impl<B: OutputBackend, H: SourceHost> eframe::App for App<B, H> {
             LaunchStep::DeviceCheck => self.show_launch_gate_device_check(ui),
             LaunchStep::Main => self.show_main(ui),
         });
+
+        // The app-wide focus ring (015-control-variants, research R3,
+        // contract F4): one pass, after every panel, so no view file
+        // paints a ring. Last statement of `App::ui`.
+        widgets::controls::paint_focus_ring(ui.ctx());
     }
 
     /// Closing the window quits (FR-008): stop, release the source's

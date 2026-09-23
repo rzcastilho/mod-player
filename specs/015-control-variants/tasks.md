@@ -43,36 +43,36 @@ Single crate, `crates/modplayer-ui/`. All source paths are relative to the repos
 
 ### Tests (write first — must fail red before Implementation below)
 
-- [ ] T004 Unit tests for `Variant`/`VariantPaint`/`variant_paint()` matching data-model.md §2's table exactly (B1, B2) in `crates/modplayer-ui/src/theme/controls.rs`
-- [ ] T005 Unit tests for `hover_fill`/`pressed_fill`/`focus_ring` derivations (I1, I2, F1, F2) in `crates/modplayer-ui/src/theme/controls.rs`
-- [ ] T006 Unit tests for switch metrics, the off/on state table, and the thumb-position delta (S1, S2, S3) in `crates/modplayer-ui/src/theme/controls.rs`
-- [ ] T007 Unit test asserting `DESTRUCTIVE_GAP >= 2 * style.spacing.item_spacing.x` (B9) in `crates/modplayer-ui/src/theme/controls.rs`
-- [ ] T008 Unit tests for `band()`'s fixed-order selection, including a boundary value and a danger boundary at or below −6 dBFS (M1–M5) in `crates/modplayer-ui/src/theme/controls.rs`
-- [ ] T009 Unit test for `mark_color`'s fill/track rule (K3) in `crates/modplayer-ui/src/theme/controls.rs`
-- [ ] T010 [P] Extend the widget-slot test module for the re-differentiation (I4) and assert 014's `no_geometry_or_interaction_field_changes` still passes **verbatim** (V6, Y1) in `crates/modplayer-ui/src/theme/style.rs`
-- [ ] T011 [P] Write behaviour tests: `button()`/`switch()` resolve state from `Response`'s own fields, **never** `widget_state()` (I7); each `SwitchKind` emits the right `WidgetInfo` (A1) in `crates/modplayer-ui/src/widgets/controls.rs`
-- [ ] T012 [P] Create `crates/modplayer-ui/tests/control_variants.rs` — the module-level integration suite, written **before** the values and widgets it pins (T013–T025), with: four variants pairwise-distinct triples (B3), variant colours come from roles (B4), a switch is not mistakable for any button variant (S4), the widget module uses only token values — no literal (L1), disabled controls show no hover/focus/pressed feedback (A5, F6, FR-020)
+- [X] T004 Unit tests for `Variant`/`VariantPaint`/`variant_paint()` matching data-model.md §2's table exactly (B1, B2) in `crates/modplayer-ui/src/theme/controls.rs`
+- [X] T005 Unit tests for `hover_fill`/`pressed_fill`/`focus_ring` derivations (I1, I2, F1, F2) in `crates/modplayer-ui/src/theme/controls.rs`
+- [X] T006 Unit tests for switch metrics, the off/on state table, and the thumb-position delta (S1, S2, S3) in `crates/modplayer-ui/src/theme/controls.rs`
+- [X] T007 Unit test asserting `DESTRUCTIVE_GAP >= 2 * style.spacing.item_spacing.x` (B9) in `crates/modplayer-ui/src/theme/controls.rs`
+- [X] T008 Unit tests for `band()`'s fixed-order selection, including a boundary value and a danger boundary at or below −6 dBFS (M1–M5) in `crates/modplayer-ui/src/theme/controls.rs`
+- [X] T009 Unit test for `mark_color`'s fill/track rule (K3) in `crates/modplayer-ui/src/theme/controls.rs`
+- [X] T010 [P] Extend the widget-slot test module for the re-differentiation (I4) and assert 014's `no_geometry_or_interaction_field_changes` still passes **verbatim** (V6, Y1) in `crates/modplayer-ui/src/theme/style.rs`
+- [X] T011 [P] Write behaviour tests: `button()`/`switch()` resolve state from `Response`'s own fields, **never** `widget_state()` (I7); each `SwitchKind` emits the right `WidgetInfo` (A1) in `crates/modplayer-ui/src/widgets/controls.rs`
+- [X] T012 [P] Create `crates/modplayer-ui/tests/control_variants.rs` — the module-level integration suite, written **before** the values and widgets it pins (T013–T025), with: four variants pairwise-distinct triples (B3), variant colours come from roles (B4), a switch is not mistakable for any button variant (S4), the widget module uses only token values — no literal (L1), disabled controls show no hover/focus/pressed feedback (A5, F6, FR-020)
 
 **Red gate**: T004–T012 must be run and observed **failing** — against the empty `theme/controls.rs` and `widgets/controls.rs` from Phase 1 — before any task below is started. A suite that compiles green here has not pinned anything (Constitution VIII; plan.md design note 1).
 
 ### Implementation (makes T004–T012 pass)
 
-- [ ] T013 Implement `Variant` enum + `VariantPaint` struct + `variant_paint()` per data-model.md §2 in `crates/modplayer-ui/src/theme/controls.rs`
-- [ ] T014 Implement `hover_fill()`/`pressed_fill()`/`focus_ring()` + `FOCUS_RING_WIDTH`/`FOCUS_RING_GAP` per data-model.md §3 in `crates/modplayer-ui/src/theme/controls.rs`
-- [ ] T015 Implement `SwitchMetrics`/`switch_metrics()`/`switch_track()`/`switch_thumb()` + `SWITCH_OUTLINE_WIDTH` per data-model.md §5 in `crates/modplayer-ui/src/theme/controls.rs`
-- [ ] T016 Implement `DESTRUCTIVE_GAP` constant per data-model.md §7 in `crates/modplayer-ui/src/theme/controls.rs`
-- [ ] T017 Implement `Band` enum, `BAND_WARNING_DB`, `band()`, `band_color()` per data-model.md §6 in `crates/modplayer-ui/src/theme/controls.rs`
-- [ ] T018 Implement `mark_color()`, `SCALE_MARK_WIDTH`, `CEILING_MARK_WIDTH` per data-model.md §6 in `crates/modplayer-ui/src/theme/controls.rs`
-- [ ] T019 [P] Re-differentiate the five `Visuals::widgets` slots inside `build_style`'s single construction site per data-model.md §4 (FR-011a, design note 4 "one construction site") in `crates/modplayer-ui/src/theme/style.rs`
+- [X] T013 Implement `Variant` enum + `VariantPaint` struct + `variant_paint()` per data-model.md §2 in `crates/modplayer-ui/src/theme/controls.rs`
+- [X] T014 Implement `hover_fill()`/`pressed_fill()`/`focus_ring()` + `FOCUS_RING_WIDTH`/`FOCUS_RING_GAP` per data-model.md §3 in `crates/modplayer-ui/src/theme/controls.rs`
+- [X] T015 Implement `SwitchMetrics`/`switch_metrics()`/`switch_track()`/`switch_thumb()` + `SWITCH_OUTLINE_WIDTH` per data-model.md §5 in `crates/modplayer-ui/src/theme/controls.rs`
+- [X] T016 Implement `DESTRUCTIVE_GAP` constant per data-model.md §7 in `crates/modplayer-ui/src/theme/controls.rs`
+- [X] T017 Implement `Band` enum, `BAND_WARNING_DB`, `band()`, `band_color()` per data-model.md §6 in `crates/modplayer-ui/src/theme/controls.rs`
+- [X] T018 Implement `mark_color()`, `SCALE_MARK_WIDTH`, `CEILING_MARK_WIDTH` per data-model.md §6 in `crates/modplayer-ui/src/theme/controls.rs`
+- [X] T019 [P] Re-differentiate the five `Visuals::widgets` slots inside `build_style`'s single construction site per data-model.md §4 (FR-011a, design note 4 "one construction site") in `crates/modplayer-ui/src/theme/style.rs`
 
 ### Host widgets (depend on T013–T019; turn T011/T012 green)
 
-- [ ] T020 Implement `button(ui, variant, text)` using `next_auto_id()` + `read_response` from last pass (research R4), compositing the overlay into the fill it hands `egui::Button` in `crates/modplayer-ui/src/widgets/controls.rs`
-- [ ] T021 Implement `SwitchKind` enum + `switch(ui, kind, on, label)`, emitting `WidgetInfo::selected(WidgetType::Checkbox | SelectableLabel, …)` per `kind` (data-model.md §8) in `crates/modplayer-ui/src/widgets/controls.rs`
-- [ ] T022 Implement `row_frame()`: reserve a shape index before content, `set` it after — zero layout change (research R5) in `crates/modplayer-ui/src/widgets/controls.rs`
-- [ ] T023 Implement `destructive_gap()` (`ui.add_space(DESTRUCTIVE_GAP)`) in `crates/modplayer-ui/src/widgets/controls.rs`
-- [ ] T024 Implement `paint_focus_ring(ctx)`: read `Memory::focused()` + `Context::read_response`, stroke one ring into a foreground layer, return silently when nothing is focused or the widget isn't visible (F1, F2, F4, F5) in `crates/modplayer-ui/src/widgets/controls.rs`
-- [ ] T025 [P] Wire `widgets::controls::paint_focus_ring(ui.ctx())` as the **last statement** of `App::ui` in `crates/modplayer-ui/src/app.rs`
+- [X] T020 Implement `button(ui, variant, text)` using `next_auto_id()` + `read_response` from last pass (research R4), compositing the overlay into the fill it hands `egui::Button` in `crates/modplayer-ui/src/widgets/controls.rs`
+- [X] T021 Implement `SwitchKind` enum + `switch(ui, kind, on, label)`, emitting `WidgetInfo::selected(WidgetType::Checkbox | SelectableLabel, …)` per `kind` (data-model.md §8) in `crates/modplayer-ui/src/widgets/controls.rs`
+- [X] T022 Implement `row_frame()`: reserve a shape index before content, `set` it after — zero layout change (research R5) in `crates/modplayer-ui/src/widgets/controls.rs`
+- [X] T023 Implement `destructive_gap()` (`ui.add_space(DESTRUCTIVE_GAP)`) in `crates/modplayer-ui/src/widgets/controls.rs`
+- [X] T024 Implement `paint_focus_ring(ctx)`: read `Memory::focused()` + `Context::read_response`, stroke one ring into a foreground layer, return silently when nothing is focused or the widget isn't visible (F1, F2, F4, F5) in `crates/modplayer-ui/src/widgets/controls.rs`
+- [X] T025 [P] Wire `widgets::controls::paint_focus_ring(ui.ctx())` as the **last statement** of `App::ui` in `crates/modplayer-ui/src/app.rs`
 
 **Checkpoint**: `theme::controls`, the re-differentiated `Style`, the three host widgets, and the focus-ring pass all compile and pass their own tests. Every user story below is now just call-site edits.
 
