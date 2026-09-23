@@ -50,30 +50,29 @@ Single crate, `crates/modplayer-ui/`. All source paths are relative to the repos
 - [ ] T008 Unit tests for `band()`'s fixed-order selection, including a boundary value and a danger boundary at or below −6 dBFS (M1–M5) in `crates/modplayer-ui/src/theme/controls.rs`
 - [ ] T009 Unit test for `mark_color`'s fill/track rule (K3) in `crates/modplayer-ui/src/theme/controls.rs`
 - [ ] T010 [P] Extend the widget-slot test module for the re-differentiation (I4) and assert 014's `no_geometry_or_interaction_field_changes` still passes **verbatim** (V6, Y1) in `crates/modplayer-ui/src/theme/style.rs`
+- [ ] T011 [P] Write behaviour tests: `button()`/`switch()` resolve state from `Response`'s own fields, **never** `widget_state()` (I7); each `SwitchKind` emits the right `WidgetInfo` (A1) in `crates/modplayer-ui/src/widgets/controls.rs`
+- [ ] T012 [P] Create `crates/modplayer-ui/tests/control_variants.rs` — the module-level integration suite, written **before** the values and widgets it pins (T013–T025), with: four variants pairwise-distinct triples (B3), variant colours come from roles (B4), a switch is not mistakable for any button variant (S4), the widget module uses only token values — no literal (L1), disabled controls show no hover/focus/pressed feedback (A5, F6, FR-020)
 
-### Implementation (makes T004–T010 pass)
+**Red gate**: T004–T012 must be run and observed **failing** — against the empty `theme/controls.rs` and `widgets/controls.rs` from Phase 1 — before any task below is started. A suite that compiles green here has not pinned anything (Constitution VIII; plan.md design note 1).
 
-- [ ] T011 Implement `Variant` enum + `VariantPaint` struct + `variant_paint()` per data-model.md §2 in `crates/modplayer-ui/src/theme/controls.rs`
-- [ ] T012 Implement `hover_fill()`/`pressed_fill()`/`focus_ring()` + `FOCUS_RING_WIDTH`/`FOCUS_RING_GAP` per data-model.md §3 in `crates/modplayer-ui/src/theme/controls.rs`
-- [ ] T013 Implement `SwitchMetrics`/`switch_metrics()`/`switch_track()`/`switch_thumb()` + `SWITCH_OUTLINE_WIDTH` per data-model.md §5 in `crates/modplayer-ui/src/theme/controls.rs`
-- [ ] T014 Implement `DESTRUCTIVE_GAP` constant per data-model.md §7 in `crates/modplayer-ui/src/theme/controls.rs`
-- [ ] T015 Implement `Band` enum, `BAND_WARNING_DB`, `band()`, `band_color()` per data-model.md §6 in `crates/modplayer-ui/src/theme/controls.rs`
-- [ ] T016 Implement `mark_color()`, `SCALE_MARK_WIDTH`, `CEILING_MARK_WIDTH` per data-model.md §6 in `crates/modplayer-ui/src/theme/controls.rs`
-- [ ] T017 [P] Re-differentiate the five `Visuals::widgets` slots inside `build_style`'s single construction site per data-model.md §4 (FR-011a, design note 4 "one construction site") in `crates/modplayer-ui/src/theme/style.rs`
+### Implementation (makes T004–T012 pass)
 
-### Host widgets (depend on T011–T017)
+- [ ] T013 Implement `Variant` enum + `VariantPaint` struct + `variant_paint()` per data-model.md §2 in `crates/modplayer-ui/src/theme/controls.rs`
+- [ ] T014 Implement `hover_fill()`/`pressed_fill()`/`focus_ring()` + `FOCUS_RING_WIDTH`/`FOCUS_RING_GAP` per data-model.md §3 in `crates/modplayer-ui/src/theme/controls.rs`
+- [ ] T015 Implement `SwitchMetrics`/`switch_metrics()`/`switch_track()`/`switch_thumb()` + `SWITCH_OUTLINE_WIDTH` per data-model.md §5 in `crates/modplayer-ui/src/theme/controls.rs`
+- [ ] T016 Implement `DESTRUCTIVE_GAP` constant per data-model.md §7 in `crates/modplayer-ui/src/theme/controls.rs`
+- [ ] T017 Implement `Band` enum, `BAND_WARNING_DB`, `band()`, `band_color()` per data-model.md §6 in `crates/modplayer-ui/src/theme/controls.rs`
+- [ ] T018 Implement `mark_color()`, `SCALE_MARK_WIDTH`, `CEILING_MARK_WIDTH` per data-model.md §6 in `crates/modplayer-ui/src/theme/controls.rs`
+- [ ] T019 [P] Re-differentiate the five `Visuals::widgets` slots inside `build_style`'s single construction site per data-model.md §4 (FR-011a, design note 4 "one construction site") in `crates/modplayer-ui/src/theme/style.rs`
 
-- [ ] T018 Write behaviour tests: `button()`/`switch()` resolve state from `Response`'s own fields, **never** `widget_state()` (I7); each `SwitchKind` emits the right `WidgetInfo` (A1) in `crates/modplayer-ui/src/widgets/controls.rs`
-- [ ] T019 Implement `button(ui, variant, text)` using `next_auto_id()` + `read_response` from last pass (research R4), compositing the overlay into the fill it hands `egui::Button` in `crates/modplayer-ui/src/widgets/controls.rs`
-- [ ] T020 Implement `SwitchKind` enum + `switch(ui, kind, on, label)`, emitting `WidgetInfo::selected(WidgetType::Checkbox | SelectableLabel, …)` per `kind` (data-model.md §8) in `crates/modplayer-ui/src/widgets/controls.rs`
-- [ ] T021 Implement `row_frame()`: reserve a shape index before content, `set` it after — zero layout change (research R5) in `crates/modplayer-ui/src/widgets/controls.rs`
-- [ ] T022 Implement `destructive_gap()` (`ui.add_space(DESTRUCTIVE_GAP)`) in `crates/modplayer-ui/src/widgets/controls.rs`
-- [ ] T023 Implement `paint_focus_ring(ctx)`: read `Memory::focused()` + `Context::read_response`, stroke one ring into a foreground layer, return silently when nothing is focused or the widget isn't visible (F1, F2, F4, F5) in `crates/modplayer-ui/src/widgets/controls.rs`
-- [ ] T024 [P] Wire `widgets::controls::paint_focus_ring(ui.ctx())` as the **last statement** of `App::ui` in `crates/modplayer-ui/src/app.rs`
+### Host widgets (depend on T013–T019; turn T011/T012 green)
 
-### Module-level integration tests (no call-site dependency)
-
-- [ ] T025 [P] Create `crates/modplayer-ui/tests/control_variants.rs` with: four variants pairwise-distinct triples (B3), variant colours come from roles (B4), a switch is not mistakable for any button variant (S4), the widget module uses only token values — no literal (L1), disabled controls show no hover/focus/pressed feedback (A5, F6, FR-020)
+- [ ] T020 Implement `button(ui, variant, text)` using `next_auto_id()` + `read_response` from last pass (research R4), compositing the overlay into the fill it hands `egui::Button` in `crates/modplayer-ui/src/widgets/controls.rs`
+- [ ] T021 Implement `SwitchKind` enum + `switch(ui, kind, on, label)`, emitting `WidgetInfo::selected(WidgetType::Checkbox | SelectableLabel, …)` per `kind` (data-model.md §8) in `crates/modplayer-ui/src/widgets/controls.rs`
+- [ ] T022 Implement `row_frame()`: reserve a shape index before content, `set` it after — zero layout change (research R5) in `crates/modplayer-ui/src/widgets/controls.rs`
+- [ ] T023 Implement `destructive_gap()` (`ui.add_space(DESTRUCTIVE_GAP)`) in `crates/modplayer-ui/src/widgets/controls.rs`
+- [ ] T024 Implement `paint_focus_ring(ctx)`: read `Memory::focused()` + `Context::read_response`, stroke one ring into a foreground layer, return silently when nothing is focused or the widget isn't visible (F1, F2, F4, F5) in `crates/modplayer-ui/src/widgets/controls.rs`
+- [ ] T025 [P] Wire `widgets::controls::paint_focus_ring(ui.ctx())` as the **last statement** of `App::ui` in `crates/modplayer-ui/src/app.rs`
 
 **Checkpoint**: `theme::controls`, the re-differentiated `Style`, the three host widgets, and the focus-ring pass all compile and pass their own tests. Every user story below is now just call-site edits.
 
@@ -219,7 +218,7 @@ Single crate, `crates/modplayer-ui/`. All source paths are relative to the repos
 
 - **US1 (P1)**: Foundational only. No dependency on US2–US5.
 - **US2 (P1)**: Foundational only. Independent of US1, but `plugin_panels.rs` (T031) and `markers.rs`/`queue_view.rs`/`effects_view.rs` are touched by more than one story — see **Same-file notes** below.
-- **US3 (P2)**: Foundational only (uses `row_frame` from T021). Touches `markers.rs`, `queue_view.rs`, `plugins_view.rs` after US1/US2 if run in priority order.
+- **US3 (P2)**: Foundational only (uses `row_frame` from T022). Touches `markers.rs`, `queue_view.rs`, `plugins_view.rs` after US1/US2 if run in priority order.
 - **US4 (P2)**: Foundational only. Fully isolated to `widgets/peak_meter.rs` and `widgets/chain_meters.rs` — no file overlap with any other story.
 - **US5 (P3)**: Foundational only. `queue_view.rs` overlaps US2 (T038) and US3 (T046).
 
@@ -241,9 +240,9 @@ If stories are implemented strictly in priority order (US1 → US2 → US3 → U
 ### Parallel Opportunities
 
 - T001/T002 (Setup) — different files.
-- T004–T009 are all the same file (`theme/controls.rs`) and are **not parallel** with each other; T010 (`style.rs`) is parallel with all of them.
-- T011–T016 are the same file and **not parallel** with each other; T017 (`style.rs`) is parallel.
-- T018–T023 are the same file and **not parallel** with each other; T024 (`app.rs`) is parallel.
+- T004–T009 are all the same file (`theme/controls.rs`) and are **not parallel** with each other; T010 (`style.rs`), T011 (`widgets/controls.rs`) and T012 (`tests/control_variants.rs`) are each a different file and parallel with all of them and with each other.
+- T013–T018 are the same file and **not parallel** with each other; T019 (`style.rs`) is parallel.
+- T020–T024 are the same file and **not parallel** with each other (and all follow T011's tests in that file); T025 (`app.rs`) is parallel.
 - Within US1: T029–T032 are four different files and fully parallel; T028 is a fifth, independent file.
 - Within US2: T035/T036/T038/T040/T041 are five different files and parallel with each other; T037 must follow T036 (same file); T042 must follow T031 from US1 (same file).
 - Within US3: T046/T047/T048 are parallel with each other but each must follow that file's earlier story task (see same-file notes); T045 (`rows.rs`) is untouched elsewhere and fully independent.
@@ -302,7 +301,7 @@ Once Foundational is done: Developer A takes US1, Developer B takes US4 (fully i
 
 - `Default` is the do-nothing variant (design note 3): **no task touches an FR-005 call site.** The ~60 buttons not named in FR-002–FR-004 already render `default` via `recolor_widget` and stay untouched.
 - Every number this feature introduces lives in `theme/controls.rs` (L1, L2); if an implementation task finds itself typing a number into `widgets/controls.rs`, a view file, or a meter, the number belongs in `theme/controls.rs` instead (design note 2).
-- `next_auto_id()` and the widget it names must stay adjacent (research R4) — do not insert an allocation between them in T019/T020.
+- `next_auto_id()` and the widget it names must stay adjacent (research R4) — do not insert an allocation between them in T020/T021.
 - No task introduces animation, easing, or a transition duration (FR-021, Y1).
 - Commit after each task or logical group; stop at any checkpoint to validate that story independently.
 - T058/T059 (manual scenarios) are the implementing agent's own responsibility per Governance — not automatable, not skippable, and never satisfied by automated evidence alone.
