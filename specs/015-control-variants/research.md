@@ -538,3 +538,27 @@ dependency), so "visually distinguishable" is verified as *values* by
 tests and as *pixels* by the manual scenarios. A screenshot-diff gate
 would be a new dependency and a new CI surface for a feature whose entire
 payload is already expressible as values — rejected on Constitution X.
+
+**Addendum, 2026-09-23 (tasks.md T058's executed walk)**: on that day's
+host, none of M1–M10 could even be attempted — the process never reached
+`eframe::run_native`. `sample <pid> 1` pinned the main thread inside
+`modplayer_account::service::AccountService::launch_resolve_session` →
+`modplayer_secure_store::keyring_store::KeyringSecureStore::get` →
+`SecKeychainFindGenericPassword` → `mach_msg_trap`, blocked for 60+ s of
+active (not idle) CPU across two launch attempts (a plain background job
+and one via `launchctl asuser 501`, to rule out a foreign security-session
+artifact of the launching shell). `Quartz.CGWindowListCopyWindowInfo`
+found no window for the process at any point. The equivalent lookup run
+directly (`security find-generic-password -s ModPlayer -a
+session-credential -w`) returns instantly with "item not found" (exit
+44), so the in-process call is wedging on something the bare CLI path
+does not — most likely a keychain-access-consent prompt the ad-hoc-signed
+dev binary cannot get answered with no interactive session to show it in.
+This sits entirely inside `modplayer_account`/`modplayer_secure_store`,
+neither of which this feature touches (plan.md § Project Structure); it
+is a pre-existing host/toolchain precondition, the same class of risk
+014 already carried forward as "the sign-in gate", just tripped one step
+earlier this time (before any window forms, rather than after Welcome).
+Recorded per Governance as M1–M10 not executed, no keychain state
+touched, no session fabricated. See plan.md § Complexity Tracking D11 and
+quickstart.md § 4's 2026-09-23 update.

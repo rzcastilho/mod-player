@@ -112,7 +112,32 @@ demo mode to reach the rows (a source change outside this feature's
 scope, FR-017).
 
 **M1 is reachable regardless** — the Welcome screen precedes the sign-in
-gate, so US5's primary-variant evidence can always be captured.
+gate, so US5's primary-variant evidence can always be captured — **unless
+the window itself never forms** (see the 2026-09-23 update below, where it
+did not).
+
+**Update, 2026-09-23 (this feature's own manual walk, tasks.md T058)**: on
+that day's host, the block was strictly worse than 014's revoked session.
+The app process never reached `eframe::run_native` at all: its main thread
+parked indefinitely in `modplayer::main` → `AccountService::launch` →
+`AccountService::launch_resolve_session` → `KeyringSecureStore::get` →
+`SecKeychainFindGenericPassword` → `mach_msg_trap` (confirmed with
+`sample <pid> 1`), for 60+ seconds of active `%CPU` (not an idle/asleep
+process) across two independent launches — one plain background launch,
+one via `launchctl asuser 501` to rule out a foreign security-session
+cause. `Quartz.CGWindowListCopyWindowInfo(kCGWindowListOptionAll, …)`
+showed **zero** windows for the process's PID at any point in either run.
+Calling the same Keychain lookup directly (`security
+find-generic-password -s ModPlayer -a session-credential -w`) returned in
+under a second with "item not found" (exit 44), so the hang is specific to
+the in-process `SecKeychainFindGenericPassword` call — most likely an
+unattended keychain-access-consent prompt from the ad-hoc-signed dev
+binary that has no session to render or dismiss it in a non-interactive
+launch. Because window creation is downstream of this call, **M1 was not
+reachable either** that day, contrary to the paragraph above. All of
+M1–M10 were recorded **not executed**, with no keychain state modified and
+no signed-in state fabricated to route around it (Governance). See
+plan.md § Complexity Tracking (D11) and research.md § R16 addendum.
 
 **Live token for `#[ignore = "manual"]` probes** (not needed by any
 scenario here, listed for completeness):
