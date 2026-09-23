@@ -163,12 +163,12 @@ Single crate, `crates/modplayer-ui/`. All source paths are relative to the repos
 
 ### Tests for User Story 4 (write first — must fail red)
 
-- [ ] T049 [US4] Create `crates/modplayer-ui/tests/meter_bands.rs` with `fill_is_segmented_by_db_position` (M6), `rightmost_column_is_danger_over_the_boundary` (M7), `each_meter_uses_its_own_boundary` (M8), `rms_bands_and_is_not_dimmed` (M9), `both_meters_draw_both_marks` (K1), `ceiling_tick_is_two_px` (K2), `ceiling_tick_is_not_warn_fg` (K5), `zero_db_mark_is_inset` (K6), `mark_positions` (K7)
+- [X] T049 [US4] Create `crates/modplayer-ui/tests/meter_bands.rs` with `fill_is_segmented_by_db_position` (M6), `rightmost_column_is_danger_over_the_boundary` (M7), `each_meter_uses_its_own_boundary` (M8), `rms_bands_and_is_not_dimmed` (M9), `both_meters_draw_both_marks` (K1), `ceiling_tick_is_two_px` (K2), `ceiling_tick_is_not_warn_fg` (K5), `zero_db_mark_is_inset` (K6), `mark_positions` (K7)
 
 ### Implementation for User Story 4
 
-- [ ] T050 [US4] Segment the peak meter's fill by band, add the −6/0 dB marks (1 px) plus the ceiling tick (2 px) via `mark_color`, and **remove** the `warn_fg_color` ceiling tick (FR-012, FR-013, K5) in `crates/modplayer-ui/src/widgets/peak_meter.rs`
-- [ ] T051 [P] [US4] Segment `level_pair`'s peak **and** RMS sub-bars by band with a fixed 0 dBFS boundary, add both scale marks, **remove** the `gamma_multiply(0.7)` RMS dim, and stop reading `selection.bg_fill` on either sub-bar (FR-012, FR-012a) in `crates/modplayer-ui/src/widgets/chain_meters.rs`
+- [X] T050 [US4] Segment the peak meter's fill by band, add the −6/0 dB marks (1 px) plus the ceiling tick (2 px) via `mark_color`, and **remove** the `warn_fg_color` ceiling tick (FR-012, FR-013, K5) in `crates/modplayer-ui/src/widgets/peak_meter.rs`
+- [X] T051 [P] [US4] Segment `level_pair`'s peak **and** RMS sub-bars by band with a fixed 0 dBFS boundary, add both scale marks, **remove** the `gamma_multiply(0.7)` RMS dim, and stop reading `selection.bg_fill` on either sub-bar (FR-012, FR-012a) in `crates/modplayer-ui/src/widgets/chain_meters.rs`
 
 **Checkpoint**: `tests/meter_bands.rs` passes; both meters band correctly and keep their `mono` readouts and accessible values unchanged (R1, R2 — guarded by the existing, unmodified suites).
 
