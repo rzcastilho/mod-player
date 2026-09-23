@@ -595,6 +595,13 @@ fn show_marker_row<B: OutputBackend, H: SourceHost>(
     let row_name = row_accessible_name(row, rate);
     let row_id = ui.id().with(("markers-row", row.id));
 
+    // FR-009, contract I6: reserve the row's hover fill's paint order
+    // before content draws (research R5, FR-018) — this row already
+    // computes its own rect+response below (`row_response`, pre-dating
+    // this feature), reused as-is rather than re-allocated through
+    // `widgets::controls::row_frame` (design note 7).
+    let where_to_put_background = ui.painter().add(egui::Shape::Noop);
+
     let outer = ui.horizontal(|ui| {
         let color = theme::marker_color(row.color);
         if ui
@@ -665,6 +672,27 @@ fn show_marker_row<B: OutputBackend, H: SourceHost>(
         b.set_role(Role::ListItem);
         b.set_label(row_name.clone());
     });
+
+    if ui.is_rect_visible(outer.response.rect) {
+        let roles = theme::roles(ui.visuals());
+        let fill = if row_response.is_pointer_button_down_on() {
+            Some(
+                roles
+                    .surface_base
+                    .blend(theme::controls::pressed_fill(roles)),
+            )
+        } else if row_response.hovered() {
+            Some(roles.surface_base.blend(theme::controls::hover_fill(roles)))
+        } else {
+            None
+        };
+        if let Some(fill) = fill {
+            ui.painter().set(
+                where_to_put_background,
+                egui::Shape::rect_filled(outer.response.rect, egui::CornerRadius::ZERO, fill),
+            );
+        }
+    }
 }
 
 /// The Markers panel row's own accessible name (contracts/ui-markers.md

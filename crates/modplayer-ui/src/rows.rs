@@ -505,6 +505,12 @@ pub fn list_row(ui: &mut Ui, artwork: &mut ArtworkCache, entity: &RowEntity) -> 
     let row_id = ui.id().with(entity_salt(entity));
 
     let (_auto_id, rect) = ui.allocate_space(Vec2::new(ui.available_width(), height));
+    // Reserve the row's hover/pressed fill's paint order now, before any
+    // content draws (research R5, FR-018): `list_row` already owns `rect`
+    // and is about to compute `row_response` below, so both are reused
+    // as-is rather than re-allocated through `widgets::controls::row_frame`
+    // (design note 7).
+    let where_to_put_background = ui.painter().add(egui::Shape::Noop);
     let row_response = ui.interact(rect, row_id, Sense::click());
     // 007, contracts/ui-actions.md §2: claim this row's own keys
     // (`Shift+F10` for the actions menu, plus the toolkit set it would
@@ -530,6 +536,29 @@ pub fn list_row(ui: &mut Ui, artwork: &mut ArtworkCache, entity: &RowEntity) -> 
 
     let mut action = None;
     if ui.is_rect_visible(rect) {
+        // The row's own hover/pressed fill (FR-009, contract I6): painted
+        // into the shape index reserved above, beneath the content this
+        // block draws next — zero layout cost, `row_response`'s own
+        // fields only (I7), never `widget_state()`.
+        let roles = theme::roles(ui.visuals());
+        let fill = if row_response.is_pointer_button_down_on() {
+            Some(
+                roles
+                    .surface_base
+                    .blend(theme::controls::pressed_fill(roles)),
+            )
+        } else if row_response.hovered() {
+            Some(roles.surface_base.blend(theme::controls::hover_fill(roles)))
+        } else {
+            None
+        };
+        if let Some(fill) = fill {
+            ui.painter().set(
+                where_to_put_background,
+                egui::Shape::rect_filled(rect, egui::CornerRadius::ZERO, fill),
+            );
+        }
+
         let mut content_ui = ui.new_child(
             UiBuilder::new()
                 .max_rect(rect)

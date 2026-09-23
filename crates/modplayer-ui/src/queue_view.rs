@@ -13,7 +13,7 @@ use modplayer_audio_source::{Repeat, SourceHost};
 use modplayer_core::{Origin, PlaybackController, tr, tr_args};
 
 use crate::theme;
-use crate::widgets::controls::{SwitchKind, switch};
+use crate::widgets::controls::{SwitchKind, row_frame, switch};
 
 /// Draw the Queue panel, applying any header/row action directly to
 /// `controller`.
@@ -55,43 +55,48 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     }
 
     for row in &view.items {
-        ui.horizontal(|ui| {
-            // 014-design-tokens-and-type-scale (US2, T027, data-model.md §6
-            // "List row title"/"List row secondary line"): the row's own
-            // title is explicit `body`/`text_primary` (mirrors
-            // `rows::title_text`); the current marker, artist and badges
-            // are the row's secondary detail, `.weak()` like every other
-            // row's detail line — visually paired the same way.
-            if row.is_current {
-                ui.label(RichText::new(tr("queue-current")).weak());
-            }
-            ui.label(
-                RichText::new(tr_args("queue-row", &[("title", row.title.clone())]))
-                    .text_style(theme::text::BODY)
-                    .color(theme::roles(ui.visuals()).text_primary),
-            );
-            if !row.artist.is_empty() {
-                ui.label(RichText::new(row.artist.clone()).weak());
-            }
-            if row.origin == Origin::PlayNext {
-                ui.label(RichText::new(tr("queue-badge-play-next")).weak());
-            }
-            if row.unavailable {
-                ui.label(RichText::new(tr("queue-badge-unavailable")).weak());
-            }
+        // FR-009, contract I6: the row's hover/pressed fill, reserved and
+        // set beneath the row's own content — zero layout change.
+        let row_id = ui.id().with(("queue-row", row.uid));
+        row_frame(ui, row_id, |ui| {
+            ui.horizontal(|ui| {
+                // 014-design-tokens-and-type-scale (US2, T027, data-model.md §6
+                // "List row title"/"List row secondary line"): the row's own
+                // title is explicit `body`/`text_primary` (mirrors
+                // `rows::title_text`); the current marker, artist and badges
+                // are the row's secondary detail, `.weak()` like every other
+                // row's detail line — visually paired the same way.
+                if row.is_current {
+                    ui.label(RichText::new(tr("queue-current")).weak());
+                }
+                ui.label(
+                    RichText::new(tr_args("queue-row", &[("title", row.title.clone())]))
+                        .text_style(theme::text::BODY)
+                        .color(theme::roles(ui.visuals()).text_primary),
+                );
+                if !row.artist.is_empty() {
+                    ui.label(RichText::new(row.artist.clone()).weak());
+                }
+                if row.origin == Origin::PlayNext {
+                    ui.label(RichText::new(tr("queue-badge-play-next")).weak());
+                }
+                if row.unavailable {
+                    ui.label(RichText::new(tr("queue-badge-unavailable")).weak());
+                }
 
-            if ui.add(Button::new(tr("queue-move-up"))).clicked() {
-                controller.queue_move_up(row.uid);
-            }
-            if ui.add(Button::new(tr("queue-move-down"))).clicked() {
-                controller.queue_move_down(row.uid);
-            }
-            if !row.is_current && ui.add(Button::new(tr("queue-play-next"))).clicked() {
-                controller.queue_play_next(row.uid);
-            }
-            if ui.add(Button::new(tr("queue-remove"))).clicked() {
-                controller.queue_remove(row.uid);
-            }
+                if ui.add(Button::new(tr("queue-move-up"))).clicked() {
+                    controller.queue_move_up(row.uid);
+                }
+                if ui.add(Button::new(tr("queue-move-down"))).clicked() {
+                    controller.queue_move_down(row.uid);
+                }
+                if !row.is_current && ui.add(Button::new(tr("queue-play-next"))).clicked() {
+                    controller.queue_play_next(row.uid);
+                }
+                if ui.add(Button::new(tr("queue-remove"))).clicked() {
+                    controller.queue_remove(row.uid);
+                }
+            });
         });
     }
 }

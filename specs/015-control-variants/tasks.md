@@ -142,14 +142,14 @@ Single crate, `crates/modplayer-ui/`. All source paths are relative to the repos
 
 ### Tests for User Story 3 (write first — must fail red)
 
-- [ ] T044 [US3] Create `crates/modplayer-ui/tests/interaction_states.rs` with `three_states_are_three_increasing_fills` (I3), `row_frame_adds_no_layout` (I6), `host_controls_do_not_use_widget_state` (I7), `focus_ring_is_painted_once_app_wide` (F4), `no_ring_without_a_visible_focus` (F5), `ring_and_selection_do_not_overlap` (F3)
+- [X] T044 [US3] Create `crates/modplayer-ui/tests/interaction_states.rs` with `three_states_are_three_increasing_fills` (I3), `row_frame_adds_no_layout` (I6), `host_controls_do_not_use_widget_state` (I7), `focus_ring_is_painted_once_app_wide` (F4), `no_ring_without_a_visible_focus` (F5), `ring_and_selection_do_not_overlap` (F3)
 
 ### Implementation for User Story 3
 
-- [ ] T045 [US3] Wire row hover via `row_frame()` into `crates/modplayer-ui/src/rows.rs` (:502-510), reusing the row's existing rect + response
-- [ ] T046 [P] [US3] Wire row hover via `row_frame()` into the queue rows in `crates/modplayer-ui/src/queue_view.rs` (same file as T038 — sequential)
-- [ ] T047 [P] [US3] Wire row hover via `row_frame()` into the plugin rows in `crates/modplayer-ui/src/plugins_view.rs` (same file as T030/T035 — sequential)
-- [ ] T048 [P] [US3] Wire row hover via `row_frame()` into the marker rows in `crates/modplayer-ui/src/markers.rs` (same file as T028/T039 — sequential)
+- [X] T045 [US3] Wire row hover via `row_frame()` into `crates/modplayer-ui/src/rows.rs` (:502-510), reusing the row's existing rect + response
+- [X] T046 [P] [US3] Wire row hover via `row_frame()` into the queue rows in `crates/modplayer-ui/src/queue_view.rs` (same file as T038 — sequential)
+- [X] T047 [P] [US3] Wire row hover via `row_frame()` into the plugin rows in `crates/modplayer-ui/src/plugins_view.rs` (same file as T030/T035 — sequential)
+- [X] T048 [P] [US3] Wire row hover via `row_frame()` into the marker rows in `crates/modplayer-ui/src/markers.rs` (same file as T028/T039 — sequential)
 
 **Checkpoint**: `tests/interaction_states.rs` passes; hover/focus/pressed feedback (built entirely on Phase 2's foundational plumbing) is live on every interactive row and control app-wide.
 

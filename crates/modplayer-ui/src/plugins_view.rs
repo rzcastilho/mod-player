@@ -20,7 +20,7 @@ use modplayer_core::{Health, PlaybackController, PluginRow, Source, tr, tr_args}
 
 use crate::theme;
 use crate::theme::controls::Variant;
-use crate::widgets::controls::{SwitchKind, button, destructive_gap, switch};
+use crate::widgets::controls::{SwitchKind, button, destructive_gap, row_frame, switch};
 
 /// Draw the whole Plugins section: heading, either the empty state or one
 /// row per plugin (contracts/ui-plugins.md §2). Call once per frame while
@@ -74,31 +74,36 @@ fn show_row<B: OutputBackend, H: SourceHost>(
     controller: &mut PlaybackController<B, H>,
     row: &PluginRow,
 ) {
-    ui.horizontal(|ui| {
-        ui.label(&row.name);
-        ui.label(&row.version);
-        ui.label(tr(source_label_key(row.source)));
+    // FR-009, contract I6: the row's hover/pressed fill, reserved and set
+    // beneath the row's own content — zero layout change.
+    let row_id = ui.id().with(("plugins-row", row.id));
+    row_frame(ui, row_id, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(&row.name);
+            ui.label(&row.version);
+            ui.label(tr(source_label_key(row.source)));
 
-        show_enable_toggle(ui, controller, row);
+            show_enable_toggle(ui, controller, row);
 
-        if let Some(reason) = &row.invalid_reason {
-            ui.label(tr_args(
-                "plugins-invalid-manifest",
-                &[("reason", reason.to_string())],
-            ));
-            return;
-        }
+            if let Some(reason) = &row.invalid_reason {
+                ui.label(tr_args(
+                    "plugins-invalid-manifest",
+                    &[("reason", reason.to_string())],
+                ));
+                return;
+            }
 
-        if let Some(health) = row.health {
-            show_health(ui, health);
-        }
+            if let Some(health) = row.health {
+                show_health(ui, health);
+            }
 
-        ui.label(permissions_summary(row));
-        // 014-design-tokens-and-type-scale (US3, T040): CPU/memory figures
-        // are numeric readouts compared row-to-row — `mono` so their digits
-        // share one advance width and line up in a fixed-width column.
-        ui.label(theme::mono_text(cpu_label(row.cpu_pct_of_share)));
-        ui.label(theme::mono_text(memory_label(row.memory_bytes)));
+            ui.label(permissions_summary(row));
+            // 014-design-tokens-and-type-scale (US3, T040): CPU/memory figures
+            // are numeric readouts compared row-to-row — `mono` so their digits
+            // share one advance width and line up in a fixed-width column.
+            ui.label(theme::mono_text(cpu_label(row.cpu_pct_of_share)));
+            ui.label(theme::mono_text(memory_label(row.memory_bytes)));
+        });
     });
 
     show_panel_controls(ui, controller, row);
