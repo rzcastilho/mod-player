@@ -28,8 +28,10 @@ use modplayer_core::{LoopState, PlaybackController, tr, tr_args};
 
 use crate::actions::{self, Claim};
 use crate::theme;
+use crate::theme::controls::Variant;
 use crate::waveform::state::DETAIL_MIN_WINDOW_MS;
 use crate::waveform::{self, DetailWindow, MarkerDrag, TimeSpace, WaveformState};
+use crate::widgets::controls::{button, destructive_gap};
 
 /// The marker lane's fixed height (006, contracts/ui-markers.md §1).
 pub const LANE_HEIGHT: f32 = 14.0;
@@ -840,18 +842,22 @@ fn clear_all_controls<B: OutputBackend, H: SourceHost>(
             "markers-clear-confirm",
             &[("count", count.to_string())],
         ));
-        if ui.button(tr("markers-clear-yes")).clicked() {
+        if button(ui, Variant::Destructive, tr("markers-clear-yes")).clicked() {
             controller.clear_all_markers();
             waveform.clear_confirm = false;
         }
+        destructive_gap(ui);
         if ui.button(tr("markers-clear-no")).clicked() {
             waveform.clear_confirm = false;
         }
         if ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape)) {
             waveform.clear_confirm = false;
         }
-    } else if ui.button(tr("markers-clear-all")).clicked() {
-        waveform.clear_confirm = true;
+    } else {
+        destructive_gap(ui);
+        if button(ui, Variant::Destructive, tr("markers-clear-all")).clicked() {
+            waveform.clear_confirm = true;
+        }
     }
 }
 

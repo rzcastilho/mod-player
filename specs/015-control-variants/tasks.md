@@ -86,16 +86,16 @@ Single crate, `crates/modplayer-ui/`. All source paths are relative to the repos
 
 ### Tests for User Story 1 (write first — must fail red)
 
-- [ ] T026 [US1] Add `destructive_sites_are_exactly_fr003` (B6) to `crates/modplayer-ui/tests/control_variants.rs`
-- [ ] T027 [US1] Add `destructive_gap_at_named_instances` (B10) to `crates/modplayer-ui/tests/control_variants.rs`
+- [X] T026 [US1] Add `destructive_sites_are_exactly_fr003` (B6) to `crates/modplayer-ui/tests/control_variants.rs`
+- [X] T027 [US1] Add `destructive_gap_at_named_instances` (B10) to `crates/modplayer-ui/tests/control_variants.rs`
 
 ### Implementation for User Story 1
 
-- [ ] T028 [US1] Convert `markers-clear-all`→destructive + gap before it, `markers-clear-yes`→destructive + gap before `markers-clear-no` (:843, :853) in `crates/modplayer-ui/src/markers.rs`
-- [ ] T029 [P] [US1] Convert `effects-remove`→destructive + gap before it (:163) in `crates/modplayer-ui/src/effects_view.rs`
-- [ ] T030 [P] [US1] Convert `plugin-panel-disable`→destructive + gap, only while the label reads "Disable" (:161) in `crates/modplayer-ui/src/plugins_view.rs`
-- [ ] T031 [P] [US1] Convert `plugin-panel-disable`→destructive + gap, only while the label reads "Disable" (:291, the dock's own site — plan.md D4) in `crates/modplayer-ui/src/plugin_panels.rs`
-- [ ] T032 [P] [US1] Convert `account-sign-out`→destructive (:60) and the `signout-confirm` modal's confirming control→destructive, **removing** its existing `error_fg_color` call-site colour (:146) in `crates/modplayer-ui/src/settings/account.rs`
+- [X] T028 [US1] Convert `markers-clear-all`→destructive + gap before it, `markers-clear-yes`→destructive + gap before `markers-clear-no` (:843, :853) in `crates/modplayer-ui/src/markers.rs`
+- [X] T029 [P] [US1] Convert `effects-remove`→destructive + gap before it (:163) in `crates/modplayer-ui/src/effects_view.rs`
+- [X] T030 [P] [US1] Convert `plugin-panel-disable`→destructive + gap, only while the label reads "Disable" (:161) in `crates/modplayer-ui/src/plugins_view.rs`
+- [X] T031 [P] [US1] Convert `plugin-panel-disable`→destructive + gap, only while the label reads "Disable" (:291, the dock's own site — plan.md D4) in `crates/modplayer-ui/src/plugin_panels.rs`
+- [X] T032 [P] [US1] Convert `account-sign-out`→destructive (:60) and the `signout-confirm` modal's confirming control→destructive, **removing** its existing `error_fg_color` call-site colour (:146) in `crates/modplayer-ui/src/settings/account.rs`
 
 **Checkpoint**: `tests/control_variants.rs`'s destructive rules (B6, B10) pass; every destructive action in the app is visually distinct and gapped. This is the MVP.
 

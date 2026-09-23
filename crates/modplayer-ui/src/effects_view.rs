@@ -22,7 +22,9 @@ use modplayer_effects::catalog::{NodeKind, NodeOwner, ParamId, QualityMode};
 
 use crate::actions::{self, Claim};
 use crate::theme;
+use crate::theme::controls::Variant;
 use crate::widgets::chain_meters;
+use crate::widgets::controls::{button, destructive_gap};
 
 /// The kinds the "Add node…" control offers (contracts/ui-effect-
 /// chain.md §2: "a `ComboBox` of the six kinds").
@@ -160,7 +162,8 @@ fn show_row<B: OutputBackend, H: SourceHost>(
                 ui.label(egui::RichText::new(tr("effects-mode-note")).weak());
             }
 
-            if ui.button(tr("effects-remove")).clicked() {
+            destructive_gap(ui);
+            if button(ui, Variant::Destructive, tr("effects-remove")).clicked() {
                 let _ = controller.chain_remove_node(row.id);
             }
         });

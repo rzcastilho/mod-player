@@ -19,6 +19,8 @@ use modplayer_core::plugins::PanelRowControl;
 use modplayer_core::{Health, PlaybackController, PluginRow, Source, tr, tr_args};
 
 use crate::theme;
+use crate::theme::controls::Variant;
+use crate::widgets::controls::{button, destructive_gap};
 
 /// Draw the whole Plugins section: heading, either the empty state or one
 /// row per plugin (contracts/ui-plugins.md §2). Call once per frame while
@@ -155,13 +157,15 @@ fn show_enable_disable_toggle<B: OutputBackend, H: SourceHost>(
     controller: &mut PlaybackController<B, H>,
     panel: &PanelRowControl,
 ) {
-    let key = if panel.disabled {
-        "plugin-panel-enable"
+    if panel.disabled {
+        if ui.button(tr("plugin-panel-enable")).clicked() {
+            controller.plugin_panel_set_disabled(&panel.key, false);
+        }
     } else {
-        "plugin-panel-disable"
-    };
-    if ui.button(tr(key)).clicked() {
-        controller.plugin_panel_set_disabled(&panel.key, !panel.disabled);
+        destructive_gap(ui);
+        if button(ui, Variant::Destructive, tr("plugin-panel-disable")).clicked() {
+            controller.plugin_panel_set_disabled(&panel.key, true);
+        }
     }
 }
 

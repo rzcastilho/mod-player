@@ -5,12 +5,14 @@
 //! integration suite for button variants and the switch
 //! (contracts/control-variants.md), written **before** the values and
 //! widgets it pins (T013-T025) so the red -> green transition is real
-//! (Constitution VIII). This file grows further named tests in later
-//! phases (US1/US5); Phase 2 adds exactly the rules that do not depend on
-//! any call-site conversion: B3, B4, S4, L1, A5/F6.
+//! (Constitution VIII). Phase 2 added exactly the rules that do not
+//! depend on any call-site conversion: B3, B4, S4, L1, A5/F6. Phase 3
+//! (US1, T026-T027) adds the two rules that do: B6 (the FR-003
+//! destructive set is exact) and B10 (the destructive gap at each named
+//! instance). This file grows further named tests in later phases (US5).
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use egui::{Color32, Context, Event, Modifiers, PointerButton, RawInput, Rect, Stroke};
 use modplayer_ui::theme::controls::{self, Variant};
@@ -243,6 +245,228 @@ fn widget_module_uses_only_token_values() {
         hits.is_empty(),
         "widgets/controls.rs must consume theme::controls values by name, found:\n{}",
         hits.join("\n")
+    );
+}
+
+/// Every `.rs` file directly under `src/`, recursing into subdirectories
+/// (`settings/`), excluding no file — the same scope B6/B10 need to prove
+/// a *negative* (no other site turned destructive) as well as the
+/// positive named set.
+fn walk_src_rs_files() -> Vec<PathBuf> {
+    fn walk(dir: PathBuf, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut out,
+    );
+    out
+}
+
+/// Every line index (0-based) in `contents` containing `needle`.
+fn lines_containing<'a>(contents: &'a str, needle: &str) -> Vec<(usize, &'a str)> {
+    contents
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.contains(needle))
+        .collect()
+}
+
+/// **B6** (contract control-variants.md): `Variant::Destructive` is used
+/// at exactly the FR-003 sites and nowhere else in `crates/modplayer-ui/
+/// src/**` — `markers-clear-all`/`markers-clear-yes` (`markers.rs`),
+/// `effects-remove` (`effects_view.rs`), `plugin-panel-disable` in *both*
+/// host sites (`plugins_view.rs`, `plugin_panels.rs` — plan.md D4), and
+/// `account-sign-out`/`signout-confirm` (`settings/account.rs`) — seven
+/// call sites for six named controls.
+#[test]
+fn destructive_sites_are_exactly_fr003() {
+    let expected: &[(&str, &[&str])] = &[
+        ("markers.rs", &["markers-clear-yes", "markers-clear-all"]),
+        ("effects_view.rs", &["effects-remove"]),
+        ("plugins_view.rs", &["plugin-panel-disable"]),
+        ("plugin_panels.rs", &["plugin-panel-disable"]),
+        (
+            "settings/account.rs",
+            &["account-sign-out", "signout-confirm"],
+        ),
+    ];
+
+    let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut contents_by_file = std::collections::HashMap::new();
+
+    for path in walk_src_rs_files() {
+        let contents = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+        let rel = path
+            .strip_prefix(&src_root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        contents_by_file.insert(rel, contents);
+    }
+
+    // Files that *define* the variant (its enum, `variant_paint`'s match
+    // arms, and their own `#[cfg(test)]` module) mention
+    // `Variant::Destructive` legitimately without being a call site —
+    // excluded from both the total count and the negative scan below,
+    // exactly as `theme::controls` is excluded from 014's literal scan.
+    let non_call_site_files = ["theme/controls.rs", "widgets/controls.rs"];
+
+    // Total occurrences: exactly one per expected key across the five
+    // call-site files (7 total).
+    let expected_total: usize = expected.iter().map(|(_, keys)| keys.len()).sum();
+    let actual_total: usize = contents_by_file
+        .iter()
+        .filter(|(rel, _)| !non_call_site_files.contains(&rel.as_str()))
+        .map(|(_, c)| lines_containing(c, "Variant::Destructive").len())
+        .sum();
+    assert_eq!(
+        actual_total, expected_total,
+        "expected exactly {expected_total} `Variant::Destructive` call sites across src/**, found {actual_total}"
+    );
+
+    for (rel, keys) in expected {
+        let contents = contents_by_file
+            .get(*rel)
+            .unwrap_or_else(|| panic!("{rel} was not found under src/"));
+        let destructive_count = lines_containing(contents, "Variant::Destructive").len();
+        assert_eq!(
+            destructive_count,
+            keys.len(),
+            "{rel}: expected {} Variant::Destructive site(s), found {destructive_count}",
+            keys.len()
+        );
+        for key in *keys {
+            let tr_key = format!("\"{key}\"");
+            let key_lines = lines_containing(contents, &tr_key);
+            assert!(
+                !key_lines.is_empty(),
+                "{rel}: expected a call site for tr(\"{key}\")"
+            );
+            let on_a_destructive_line = key_lines
+                .iter()
+                .any(|(_, line)| line.contains("Variant::Destructive"));
+            assert!(
+                on_a_destructive_line,
+                "{rel}: \"{key}\" is never paired with Variant::Destructive on the same line"
+            );
+        }
+    }
+
+    // No other file in src/** mentions `Variant::Destructive` at all.
+    for (rel, contents) in &contents_by_file {
+        if expected.iter().any(|(f, _)| f == rel) || non_call_site_files.contains(&rel.as_str()) {
+            continue;
+        }
+        assert!(
+            !contents.contains("Variant::Destructive"),
+            "{rel}: unexpected Variant::Destructive site outside the FR-003 set"
+        );
+    }
+
+    // `markers-clear-no` and the sign-out modal's `signout-cancel` must
+    // never themselves be destructive (B7-adjacent sanity: only the
+    // confirming half of a two-step destructive action is destructive).
+    let markers = contents_by_file
+        .get("markers.rs")
+        .unwrap_or_else(|| panic!("markers.rs must be scanned"));
+    let no_line = lines_containing(markers, "\"markers-clear-no\"")
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("markers-clear-no site must exist"));
+    assert!(
+        !no_line.1.contains("Variant::Destructive"),
+        "markers-clear-no must stay Default, not Destructive"
+    );
+}
+
+/// **B10** (contract control-variants.md, data-model.md §9.2): every named
+/// `DESTRUCTIVE_GAP` insertion sits immediately before the destructive
+/// control it separates from its non-destructive neighbour, and no other
+/// `destructive_gap` call exists anywhere else in `src/**`.
+#[test]
+fn destructive_gap_at_named_instances() {
+    let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+
+    let read = |rel: &str| -> String {
+        fs::read_to_string(src_root.join(rel))
+            .unwrap_or_else(|e| panic!("failed to read {rel}: {e}"))
+    };
+
+    // (file, the line whose *immediately preceding* non-blank line must be
+    // `destructive_gap(ui);`)
+    let named_instances: &[(&str, &str)] = &[
+        ("markers.rs", "\"markers-clear-all\""),
+        ("markers.rs", "\"markers-clear-no\""),
+        ("effects_view.rs", "\"effects-remove\""),
+        ("plugins_view.rs", "\"plugin-panel-disable\""),
+        ("plugin_panels.rs", "\"plugin-panel-disable\""),
+    ];
+
+    let mut cache = std::collections::HashMap::new();
+    for (file, _) in named_instances {
+        cache.entry(*file).or_insert_with(|| read(file));
+    }
+
+    for (file, needle) in named_instances {
+        let contents = &cache[file];
+        let lines: Vec<&str> = contents.lines().collect();
+        let (line_idx, _) = lines_containing(contents, needle)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("{file}: no line containing {needle}"));
+
+        let mut prev = line_idx;
+        let prev_trimmed = loop {
+            assert!(prev > 0, "{file}: {needle} has no preceding line at all");
+            prev -= 1;
+            let trimmed = lines[prev].trim();
+            if !trimmed.is_empty() {
+                break trimmed;
+            }
+        };
+        assert_eq!(
+            prev_trimmed, "destructive_gap(ui);",
+            "{file}: expected `destructive_gap(ui);` immediately before the {needle} line, found `{prev_trimmed}`"
+        );
+    }
+
+    // Exactly five `destructive_gap(ui)` call sites in all of `src/**` —
+    // the five named instances above and no more (settings/account.rs's
+    // two destructive sites have no row neighbour that needs one, plan.md
+    // §9.2). `widgets/controls.rs`'s own `pub fn destructive_gap(ui: &mut
+    // Ui)` definition is excluded — it is not a call site.
+    let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let total: usize = walk_src_rs_files()
+        .into_iter()
+        .filter(|path| {
+            path.strip_prefix(&src_root)
+                .map(|rel| rel != Path::new("widgets/controls.rs"))
+                .unwrap_or(true)
+        })
+        .map(|path| {
+            fs::read_to_string(&path)
+                .map(|c| lines_containing(&c, "destructive_gap(ui)").len())
+                .unwrap_or(0)
+        })
+        .sum();
+    assert_eq!(
+        total,
+        named_instances.len(),
+        "expected exactly {} destructive_gap(...) call sites in src/**, found {total}",
+        named_instances.len()
     );
 }
 

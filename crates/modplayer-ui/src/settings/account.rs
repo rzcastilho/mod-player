@@ -8,11 +8,13 @@
 //! US3 T086) can map them to notifications/screens exactly like the
 //! sign-in step's own commands do.
 
-use egui::{Id, Modal, RichText, Ui};
+use egui::{Id, Modal, Ui};
 use modplayer_account::{AccountEvent, AccountService, SessionState, Tier};
 use modplayer_core::{tr, tr_args};
 
 use crate::theme;
+use crate::theme::controls::Variant;
+use crate::widgets::controls::button;
 
 /// Draw the Settings › Account screen for the current session state.
 pub fn show(ui: &mut Ui, account: &mut AccountService) -> Vec<AccountEvent> {
@@ -57,7 +59,7 @@ fn show_signed_in(ui: &mut Ui, account: &mut AccountService) -> Vec<AccountEvent
 
     theme::divider(ui);
 
-    if ui.button(tr("account-sign-out")).clicked() {
+    if button(ui, Variant::Destructive, tr("account-sign-out")).clicked() {
         open_sign_out_modal(ui);
     }
 
@@ -142,9 +144,7 @@ fn show_sign_out_modal(ui: &mut Ui, account: &mut AccountService) -> Vec<Account
             if cancel.clicked() {
                 close = true;
             }
-            let sign_out = ui.add(egui::Button::new(
-                RichText::new(tr("signout-confirm")).color(ui.visuals().error_fg_color),
-            ));
+            let sign_out = button(ui, Variant::Destructive, tr("signout-confirm"));
             if sign_out.clicked() {
                 events = account.sign_out();
                 close = true;

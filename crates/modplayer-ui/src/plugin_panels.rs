@@ -26,6 +26,8 @@ use modplayer_plugin_runtime::events::SuspendCause;
 use crate::actions::{self, ChordPattern, Claim};
 use crate::plugin_assets;
 use crate::theme;
+use crate::theme::controls::Variant;
+use crate::widgets::controls::{button, destructive_gap};
 use crate::widgets::knob;
 
 /// L1: the docked column's fixed width.
@@ -288,7 +290,8 @@ fn show_header<B: OutputBackend, H: SourceHost>(
         if ui.button(tr("plugin-panel-close")).clicked() {
             controller.plugin_panel_close(&panel.key);
         }
-        if ui.button(tr("plugin-panel-disable")).clicked() {
+        destructive_gap(ui);
+        if button(ui, Variant::Destructive, tr("plugin-panel-disable")).clicked() {
             controller.plugin_panel_set_disabled(&panel.key, true);
         }
     });
