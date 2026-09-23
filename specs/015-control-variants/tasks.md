@@ -29,9 +29,9 @@ Single crate, `crates/modplayer-ui/`. All source paths are relative to the repos
 
 **Purpose**: Create the two new files this feature owns, with no logic yet, so Phase 2's tests have somewhere to fail from.
 
-- [ ] T001 Create `crates/modplayer-ui/src/theme/controls.rs`: SPDX header, module doc pointing at data-model.md §2–§7, no public items yet (Constitution VII)
-- [ ] T002 [P] Create `crates/modplayer-ui/src/widgets/controls.rs`: SPDX header, module doc pointing at data-model.md §7, no public items yet (Constitution VII)
-- [ ] T003 Wire `pub mod controls;` + re-exports into `crates/modplayer-ui/src/theme/mod.rs` and `crates/modplayer-ui/src/widgets/mod.rs`
+- [X] T001 Create `crates/modplayer-ui/src/theme/controls.rs`: SPDX header, module doc pointing at data-model.md §2–§7, no public items yet (Constitution VII)
+- [X] T002 [P] Create `crates/modplayer-ui/src/widgets/controls.rs`: SPDX header, module doc pointing at data-model.md §7, no public items yet (Constitution VII)
+- [X] T003 Wire `pub mod controls;` + re-exports into `crates/modplayer-ui/src/theme/mod.rs` and `crates/modplayer-ui/src/widgets/mod.rs`
 
 ---
 

@@ -23,6 +23,7 @@ use egui::{Context, Style, Theme as EguiTheme, ThemePreference};
 use modplayer_engine::Theme;
 
 pub mod contrast;
+pub mod controls;
 mod markers;
 pub mod style;
 pub mod tokens;
