@@ -13,6 +13,7 @@ use modplayer_audio_source::{Repeat, SourceHost};
 use modplayer_core::{Origin, PlaybackController, tr, tr_args};
 
 use crate::theme;
+use crate::widgets::controls::{SwitchKind, switch};
 
 /// Draw the Queue panel, applying any header/row action directly to
 /// `controller`.
@@ -23,11 +24,9 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     let view = controller.queue_view();
 
     ui.horizontal(|ui| {
-        if ui
-            .selectable_label(view.shuffle, tr("queue-shuffle"))
-            .clicked()
-        {
-            controller.set_shuffle(!view.shuffle);
+        let mut shuffle = view.shuffle;
+        if switch(ui, SwitchKind::Toggle, &mut shuffle, &tr("queue-shuffle")).changed() {
+            controller.set_shuffle(shuffle);
         }
 
         let repeat_key = match view.repeat {

@@ -109,26 +109,26 @@ Single crate, `crates/modplayer-ui/`. All source paths are relative to the repos
 
 ### Tests for User Story 2 (write first — must fail red)
 
-- [ ] T033 [US2] Create `crates/modplayer-ui/tests/control_inventory.rs` with `every_boolean_control_is_a_switch` (S5) and `no_selection_control_became_a_switch` (S6) — the source-level inventory (SC-010)
+- [X] T033 [US2] Create `crates/modplayer-ui/tests/control_inventory.rs` with `every_boolean_control_is_a_switch` (S5) and `no_selection_control_became_a_switch` (S6) — the source-level inventory (SC-010)
 
 ### Implementation for User Story 2 — FR-008 acceptance set
 
-- [ ] T034 [US2] Convert the Queue/Effects/Transport disclosure controls→switch (`SwitchKind::Toggle`, :145/:152/:159) in `crates/modplayer-ui/src/now_playing.rs`
-- [ ] T035 [P] [US2] Convert the plugin Enabled checkbox→switch (`SwitchKind::Checkbox`, :183) in `crates/modplayer-ui/src/plugins_view.rs`
-- [ ] T036 [P] [US2] Convert `effects-bypass`→switch (`SwitchKind::Toggle`, :140) in `crates/modplayer-ui/src/effects_view.rs`
+- [X] T034 [US2] Convert the Queue/Effects/Transport disclosure controls→switch (`SwitchKind::Toggle`, :145/:152/:159) in `crates/modplayer-ui/src/now_playing.rs`
+- [X] T035 [P] [US2] Convert the plugin Enabled checkbox→switch (`SwitchKind::Checkbox`, :183) in `crates/modplayer-ui/src/plugins_view.rs`
+- [X] T036 [P] [US2] Convert `effects-bypass`→switch (`SwitchKind::Toggle`, :140) in `crates/modplayer-ui/src/effects_view.rs`
 
 ### Implementation for User Story 2 — FR-008a app-wide boolean set
 
-- [ ] T037 [US2] Convert Formant/Mute/Mono-sum/Phase-invert/Channel-swap `toggle_value`s→switch (:290/:343/:549/:558/:567) in `crates/modplayer-ui/src/effects_view.rs` (same file as T036 — sequential)
-- [ ] T038 [P] [US2] Convert Shuffle→switch (`SwitchKind::Checkbox`, :27) in `crates/modplayer-ui/src/queue_view.rs`
-- [ ] T039 [P] [US2] Convert the loop-arm `Checkbox`→switch (:757) in `crates/modplayer-ui/src/markers.rs` (same file as T028 — sequential)
-- [ ] T040 [P] [US2] Convert the safe-volume `Checkbox`→switch (:166) in `crates/modplayer-ui/src/settings/audio.rs`
-- [ ] T041 [P] [US2] Convert the boolean plugin-setting fields→switch (:167) in `crates/modplayer-ui/src/settings/plugins.rs`
-- [ ] T042 [US2] Convert the plugin-contributed checkbox host line→switch (:363) in `crates/modplayer-ui/src/plugin_panels.rs` (same file as T031 — sequential)
+- [X] T037 [US2] Convert Formant/Mute/Mono-sum/Phase-invert/Channel-swap `toggle_value`s→switch (:290/:343/:549/:558/:567) in `crates/modplayer-ui/src/effects_view.rs` (same file as T036 — sequential)
+- [X] T038 [P] [US2] Convert Shuffle→switch (`SwitchKind::Toggle`, :27) in `crates/modplayer-ui/src/queue_view.rs` — data-model.md §8 and `accessibility.rs::queue_shuffle_toggle_reports_its_toggled_state` (unmodified) pin `Role::Button` for `queue-shuffle` (it renders via `selectable_label` today, design note 9); `SwitchKind::Checkbox` as literally written in this task line would regress that pinned role, so `Toggle` is used instead
+- [X] T039 [P] [US2] Convert the loop-arm `Checkbox`→switch (:757) in `crates/modplayer-ui/src/markers.rs` (same file as T028 — sequential)
+- [X] T040 [P] [US2] Convert the safe-volume `Checkbox`→switch (:166) in `crates/modplayer-ui/src/settings/audio.rs`
+- [X] T041 [P] [US2] Convert the boolean plugin-setting fields→switch (:167) in `crates/modplayer-ui/src/settings/plugins.rs`
+- [X] T042 [US2] Convert the plugin-contributed checkbox host line→switch (:363) in `crates/modplayer-ui/src/plugin_panels.rs` (same file as T031 — sequential)
 
 ### Verification for User Story 2
 
-- [ ] T043 [US2] Regenerate and diff `modplayer-capability-gateway`'s API reference; confirm **zero diff** against `crates/modplayer-capability-gateway/api/v1.toml` and `docs/plugin-api/v1.md` (S7, Principle IX untriggered)
+- [X] T043 [US2] Regenerate and diff `modplayer-capability-gateway`'s API reference; confirm **zero diff** against `crates/modplayer-capability-gateway/api/v1.toml` and `docs/plugin-api/v1.md` (S7, Principle IX untriggered)
 
 **Checkpoint**: `tests/control_inventory.rs` (S5, S6) passes — every named boolean is a switch, every named selection control is unconverted; `api_reference.rs` shows no diff (S7).
 

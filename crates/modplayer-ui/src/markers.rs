@@ -31,7 +31,7 @@ use crate::theme;
 use crate::theme::controls::Variant;
 use crate::waveform::state::DETAIL_MIN_WINDOW_MS;
 use crate::waveform::{self, DetailWindow, MarkerDrag, TimeSpace, WaveformState};
-use crate::widgets::controls::{button, destructive_gap};
+use crate::widgets::controls::{SwitchKind, button, destructive_gap, switch};
 
 /// The marker lane's fixed height (006, contracts/ui-markers.md §1).
 pub const LANE_HEIGHT: f32 = 14.0;
@@ -756,7 +756,11 @@ fn show_region_cells<B: OutputBackend, H: SourceHost>(
             tr("loop-arm")
         };
         let enabled = row.armed || row.armable;
-        let response = ui.add_enabled(enabled, egui::Checkbox::new(&mut armed, label));
+        let response = ui
+            .add_enabled_ui(enabled, |ui| {
+                switch(ui, SwitchKind::Checkbox, &mut armed, &label)
+            })
+            .inner;
         if response.changed() {
             if armed {
                 let _ = controller.arm_loop(region);

@@ -26,6 +26,7 @@ use crate::transport_view;
 use crate::waveform::{
     self, DetailWindow, DragOrigin, DragPreview, WaveformEvent, WaveformPaint, WaveformState,
 };
+use crate::widgets::controls::{SwitchKind, switch};
 use crate::widgets::initials::initials_placeholder;
 use crate::widgets::{peak_meter, volume};
 
@@ -141,26 +142,21 @@ pub fn show<B: OutputBackend, H: SourceHost>(
             controller.skip_forward();
         }
 
-        if ui
-            .selectable_label(queue_open, tr("queue-toggle"))
-            .clicked()
-        {
-            queue_open = !queue_open;
-        }
+        switch(ui, SwitchKind::Toggle, &mut queue_open, &tr("queue-toggle"));
 
-        if ui
-            .selectable_label(effects_open, tr("effects-toggle"))
-            .clicked()
-        {
-            effects_open = !effects_open;
-        }
+        switch(
+            ui,
+            SwitchKind::Toggle,
+            &mut effects_open,
+            &tr("effects-toggle"),
+        );
 
-        if ui
-            .selectable_label(transport_open, tr("transport-toggle"))
-            .clicked()
-        {
-            transport_open = !transport_open;
-        }
+        switch(
+            ui,
+            SwitchKind::Toggle,
+            &mut transport_open,
+            &tr("transport-toggle"),
+        );
     });
     ui.memory_mut(|memory| memory.data.insert_temp(queue_id, queue_open));
     ui.memory_mut(|memory| memory.data.insert_temp(effects_id, effects_open));

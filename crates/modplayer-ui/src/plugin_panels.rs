@@ -27,7 +27,7 @@ use crate::actions::{self, ChordPattern, Claim};
 use crate::plugin_assets;
 use crate::theme;
 use crate::theme::controls::Variant;
-use crate::widgets::controls::{button, destructive_gap};
+use crate::widgets::controls::{SwitchKind, button, destructive_gap, switch};
 use crate::widgets::knob;
 
 /// L1: the docked column's fixed width.
@@ -363,7 +363,7 @@ fn show_widget<B: OutputBackend, H: SourceHost>(
         }
         WidgetKind::Toggle => {
             let mut checked = matches!(widget.value, WidgetValue::Bool(true));
-            let response = ui.checkbox(&mut checked, &spec.label);
+            let response = switch(ui, SwitchKind::Checkbox, &mut checked, &spec.label);
             if response.changed() {
                 controller.plugin_panel_interaction(
                     plugin,

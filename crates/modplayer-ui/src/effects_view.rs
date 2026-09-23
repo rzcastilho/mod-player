@@ -24,7 +24,7 @@ use crate::actions::{self, Claim};
 use crate::theme;
 use crate::theme::controls::Variant;
 use crate::widgets::chain_meters;
-use crate::widgets::controls::{button, destructive_gap};
+use crate::widgets::controls::{SwitchKind, button, destructive_gap, switch};
 
 /// The kinds the "Add node…" control offers (contracts/ui-effect-
 /// chain.md §2: "a `ComboBox` of the six kinds").
@@ -138,10 +138,7 @@ fn show_row<B: OutputBackend, H: SourceHost>(
             ui.label(tr(owner_label_key(row.owner)));
 
             let mut bypassed = row.bypassed;
-            if ui
-                .toggle_value(&mut bypassed, tr("effects-bypass"))
-                .changed()
-            {
+            if switch(ui, SwitchKind::Toggle, &mut bypassed, &tr("effects-bypass")).changed() {
                 let _ = controller.chain_set_bypass(row.id, bypassed);
             }
             if row.auto_bypassed {
@@ -289,9 +286,13 @@ fn show_pitch_shift_params<B: OutputBackend, H: SourceHost>(
     }
 
     let mut formant = row.params[1] != 0.0;
-    if ui
-        .toggle_value(&mut formant, tr("effects-param-formant"))
-        .changed()
+    if switch(
+        ui,
+        SwitchKind::Toggle,
+        &mut formant,
+        &tr("effects-param-formant"),
+    )
+    .changed()
     {
         let _ = controller.chain_set_param(row.id, ParamId(1), f32::from(formant));
     }
@@ -342,10 +343,7 @@ fn show_gain_params<B: OutputBackend, H: SourceHost>(
     }
 
     let mut mute = row.params[1] != 0.0;
-    if ui
-        .toggle_value(&mut mute, tr("effects-param-mute"))
-        .changed()
-    {
+    if switch(ui, SwitchKind::Toggle, &mut mute, &tr("effects-param-mute")).changed() {
         let _ = controller.chain_set_param(row.id, ParamId(1), f32::from(mute));
     }
 }
@@ -548,27 +546,39 @@ fn show_stereo_params<B: OutputBackend, H: SourceHost>(
     }
 
     let mut mono_sum = row.params[2] != 0.0;
-    if ui
-        .toggle_value(&mut mono_sum, tr("effects-param-mono-sum"))
-        .changed()
+    if switch(
+        ui,
+        SwitchKind::Toggle,
+        &mut mono_sum,
+        &tr("effects-param-mono-sum"),
+    )
+    .changed()
     {
         let _ = controller.chain_set_param(row.id, ParamId(2), f32::from(mono_sum));
     }
 
     let mut phase_invert = row.params[3] != 0.0;
     ui.add_enabled_ui(mono_sum, |ui| {
-        if ui
-            .toggle_value(&mut phase_invert, tr("effects-param-phase-invert"))
-            .changed()
+        if switch(
+            ui,
+            SwitchKind::Toggle,
+            &mut phase_invert,
+            &tr("effects-param-phase-invert"),
+        )
+        .changed()
         {
             let _ = controller.chain_set_param(row.id, ParamId(3), f32::from(phase_invert));
         }
     });
 
     let mut channel_swap = row.params[4] != 0.0;
-    if ui
-        .toggle_value(&mut channel_swap, tr("effects-param-channel-swap"))
-        .changed()
+    if switch(
+        ui,
+        SwitchKind::Toggle,
+        &mut channel_swap,
+        &tr("effects-param-channel-swap"),
+    )
+    .changed()
     {
         let _ = controller.chain_set_param(row.id, ParamId(4), f32::from(channel_swap));
     }

@@ -20,7 +20,7 @@ use modplayer_core::{Health, PlaybackController, PluginRow, Source, tr, tr_args}
 
 use crate::theme;
 use crate::theme::controls::Variant;
-use crate::widgets::controls::{button, destructive_gap};
+use crate::widgets::controls::{SwitchKind, button, destructive_gap, switch};
 
 /// Draw the whole Plugins section: heading, either the empty state or one
 /// row per plugin (contracts/ui-plugins.md §2). Call once per frame while
@@ -182,10 +182,11 @@ fn show_enable_toggle<B: OutputBackend, H: SourceHost>(
 ) {
     let mut enabled = row.enabled;
     let label = tr_args("plugins-enable-toggle", &[("plugin", row.name.clone())]);
-    let response = ui.add_enabled(
-        row.invalid_reason.is_none(),
-        egui::Checkbox::new(&mut enabled, label),
-    );
+    let response = ui
+        .add_enabled_ui(row.invalid_reason.is_none(), |ui| {
+            switch(ui, SwitchKind::Checkbox, &mut enabled, &label)
+        })
+        .inner;
     if response.changed() {
         if enabled {
             controller.plugin_enable(row.id);

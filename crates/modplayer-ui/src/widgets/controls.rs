@@ -81,6 +81,15 @@ pub fn switch(ui: &mut Ui, kind: SwitchKind, on: &mut bool, label: &str) -> Resp
     let roles = tokens::roles(ui.visuals());
     let metrics = controls::switch_metrics();
 
+    // A dedicated id, read fresh every pass (research R4/R7): `ui.horizontal`
+    // below registers its own (non-focusable, `Sense::hover`) widget rect
+    // for its child `Ui`'s id, so re-using `inner.response.id` for the
+    // click-sensing `interact` below would double-register that same id —
+    // one hover-only entry and one force-registered click entry — which
+    // breaks egui's Tab focus-advance order past this control. A fresh id
+    // avoids the collision entirely.
+    let id = ui.next_auto_id();
+
     let inner = ui.horizontal(|ui| {
         let (track_rect, _reserved) = ui.allocate_exact_size(metrics.track, Sense::hover());
         if ui.is_rect_visible(track_rect) {
@@ -112,7 +121,7 @@ pub fn switch(ui: &mut Ui, kind: SwitchKind, on: &mut bool, label: &str) -> Resp
     let rect = inner.response.rect;
     // Host controls never read `widget_state()` (I7): the switch resolves
     // its own click from the `Response` it interacts for, this pass.
-    let mut response = ui.interact(rect, inner.response.id, Sense::click());
+    let mut response = ui.interact(rect, id, Sense::click());
     if response.clicked() {
         *on = !*on;
         response.mark_changed();

@@ -28,6 +28,7 @@ use modplayer_engine::{
 
 use crate::device_check::DeviceCheckScreen;
 use crate::theme;
+use crate::widgets::controls::{SwitchKind, switch};
 
 /// The three device-buffer presets shown in the combo, in display order
 /// (mirrors `device_check.rs`'s own `PRESETS`).
@@ -163,7 +164,12 @@ pub fn show<B: OutputBackend, H: SourceHost>(
         ui.label(tr("setting-safe-volume-desc"));
     });
     let mut safe_volume_enabled = cached.safe_volume.enabled;
-    let enabled_response = ui.checkbox(&mut safe_volume_enabled, tr("setting-safe-volume"));
+    let enabled_response = switch(
+        ui,
+        SwitchKind::Checkbox,
+        &mut safe_volume_enabled,
+        &tr("setting-safe-volume"),
+    );
     if focus == Some("audio.safe_volume_enabled") {
         enabled_response.request_focus();
     }
