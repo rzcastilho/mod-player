@@ -16,7 +16,7 @@ use modplayer_core::actions::ScopeState;
 use modplayer_core::markers::{CueSlot, RepeatCount, TrackMarkers};
 use modplayer_core::plugins::PluginId;
 use modplayer_core::settings::SettingsStore;
-use modplayer_core::{Intent, LoopState, PlaybackController, tr_args};
+use modplayer_core::{Intent, LoopState, PlaybackController, tr, tr_args};
 use modplayer_engine::{BufferPreset, DeviceId, FrameCount, SampleRate};
 use modplayer_ui::artwork::ArtworkCache;
 use modplayer_ui::waveform::{TimeSpace, WaveformState};
@@ -1575,5 +1575,75 @@ fn tab_focus_on_a_glyph_enables_the_marker_key_table() {
         controller.markers().and_then(|m| m.position_of(id)),
         Some(start + step),
         "and the nudge row then applies without any pointer input"
+    );
+}
+
+// -- 016-list-row-and-panel-components, US3 (Phase 5): the Markers panel
+// reads as a card -----------------------------------------------------
+
+/// C11 (contracts/panel-card.md): the Markers panel renders through the
+/// shared `panel_card` — exactly one `Role::Heading` node named
+/// `markers-panel` (with no other panel open by default, this is the only
+/// card in the frame) — and wrapping adds chrome only: the same buttons
+/// the panel always drew ("New loop", clear-all, the marker's colour
+/// swatch), no new collapse/expand affordance (Markers has none, FR-021).
+#[test]
+fn markers_panel_renders_as_a_card_with_no_added_interactive_controls() {
+    let (mut controller, _handle, _dirs) = active_controller("card");
+    controller.queue_replace(vec![track("a", 200_000)]);
+    controller
+        .add_point_marker()
+        .unwrap_or_else(|e| unreachable!("add_point_marker: {e}"));
+
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut artwork = ArtworkCache::new();
+    let mut waveform = WaveformState::default();
+
+    let mut output = ctx.run_ui(default_input(), |ui| {
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+    });
+    let update = output
+        .platform_output
+        .accesskit_update
+        .take()
+        .expect("accesskit_update should be populated once enabled");
+    output.drop_without_applying_deltas();
+
+    let heading_nodes: Vec<_> = update
+        .nodes
+        .iter()
+        .filter(|(_, node)| {
+            node.role() == Role::Heading && node.label() == Some(tr("markers-panel").as_str())
+        })
+        .collect();
+    assert_eq!(
+        heading_nodes.len(),
+        1,
+        "expected exactly one Markers panel heading node, got {}: {:?}",
+        heading_nodes.len(),
+        update.nodes
+    );
+
+    let button_names: Vec<String> = update
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.role() == Role::Button)
+        .filter_map(|(_, node)| node.label().or(node.value()).map(str::to_string))
+        .collect();
+    assert!(
+        button_names.iter().any(|n| n == &tr("markers-new-loop")),
+        "expected the New loop button, got {button_names:?}"
+    );
+    assert!(
+        button_names.iter().any(|n| n == &tr("markers-clear-all")),
+        "expected the clear-all button, got {button_names:?}"
+    );
+    assert!(
+        !button_names.iter().any(|n| {
+            let lower = n.to_lowercase();
+            lower.contains("collaps") || lower.contains("expand")
+        }),
+        "no collapse/expand control may be added to the Markers card: {button_names:?}"
     );
 }

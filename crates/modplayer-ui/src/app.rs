@@ -98,6 +98,14 @@ pub struct App<B: OutputBackend, H: SourceHost> {
     /// in this slice opens a detail view from another detail view, so one
     /// level is enough.
     library_detail: Option<detail_view::DetailTarget>,
+    /// The Search view's own frame-persistent state (US2: row selection,
+    /// cleared on a new query) — constructed once and reused like
+    /// `library_view`/`settings`.
+    search_view: search_view::SearchViewState,
+    /// The detail view's own frame-persistent state (US2: row selection,
+    /// cleared on a target change) — constructed once and reused like
+    /// `library_view`/`settings`.
+    detail_view: detail_view::DetailViewState,
     /// The Now Playing waveform widgets' own session state (005-now-
     /// playing-waveform, data-model.md §5.2: drag preview, detail window)
     /// — constructed once and reused like `library_view`/`settings`.
@@ -172,6 +180,8 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
             artwork: ArtworkCache::new(),
             library_view: library_view::LibraryViewState::default(),
             library_detail: None,
+            search_view: search_view::SearchViewState::default(),
+            detail_view: detail_view::DetailViewState::default(),
             waveform: WaveformState::default(),
         }
     }
@@ -532,6 +542,7 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
                     &mut self.controller,
                     &mut self.artwork,
                     &mut self.shell.focus_search_requested,
+                    &mut self.search_view,
                 );
             }
             Section::NowPlaying => now_playing::show(
@@ -573,7 +584,13 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
     /// scope (library_view.rs's doc comment).
     fn show_library(&mut self, ui: &mut Ui) {
         if let Some(target) = self.library_detail.clone() {
-            let outcome = detail_view::show(ui, &mut self.controller, &mut self.artwork, &target);
+            let outcome = detail_view::show(
+                ui,
+                &mut self.controller,
+                &mut self.artwork,
+                &target,
+                &mut self.detail_view,
+            );
             if outcome == DetailOutcome::Back {
                 self.library_detail = None;
             }

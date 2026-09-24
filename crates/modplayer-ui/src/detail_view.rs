@@ -14,7 +14,9 @@ use modplayer_core::{PlaybackController, TrackListState, tr, tr_args};
 
 use crate::artwork::ArtworkCache;
 use crate::library_view::apply_row_action;
-use crate::rows::{RowAction, RowEntity, RowEvent, list_row, virtualized_list};
+use crate::rows::{
+    RowAction, RowEntity, RowEvent, RowSelection, entity_key, list_row, virtualized_list,
+};
 use crate::theme;
 use crate::widgets::skeleton::{ROW_HEIGHT, skeleton_row};
 
@@ -47,14 +49,33 @@ pub enum DetailOutcome {
     Back,
 }
 
+/// This view's own frame-persistent state (US2, data-model.md §6): the
+/// selected row, and the target it was last reconciled against, so
+/// switching detail targets clears the selection (FR-028, contract S8).
+/// Never persisted.
+#[derive(Debug, Default)]
+pub struct DetailViewState {
+    pub selection: RowSelection,
+    pub last_target: Option<DetailTarget>,
+}
+
 /// Draw one detail view: the Back control, the header, then the track list
-/// (or "This playlist has no tracks" / a loading skeleton).
+/// (or "This playlist has no tracks" / a loading skeleton). `state` owns
+/// this view's selection (US2).
 pub fn show<B: OutputBackend, H: SourceHost>(
     ui: &mut Ui,
     controller: &mut PlaybackController<B, H>,
     artwork: &mut ArtworkCache,
     target: &DetailTarget,
+    state: &mut DetailViewState,
 ) -> DetailOutcome {
+    // FR-028, contract S8: a different detail target invalidates the
+    // previous target's row order — the selection no longer applies.
+    if state.last_target.as_ref() != Some(target) {
+        state.selection.clear();
+        state.last_target = Some(target.clone());
+    }
+
     let back_clicked = ui.button(tr("detail-back")).clicked();
     let back_key = ui.ctx().input(|i| {
         i.key_pressed(Key::Backspace) || (i.modifiers.alt && i.key_pressed(Key::ArrowLeft))
@@ -79,6 +100,11 @@ pub fn show<B: OutputBackend, H: SourceHost>(
                     ui.label(tr("playlist-no-tracks"));
                 }
             } else {
+                // Contract S3/S4, FR-012: re-check the selection against
+                // this frame's own track order before drawing.
+                state.selection.reconcile("detail-tracks", |i| {
+                    tracks.get(i).map(|t| t.id.as_str().to_string())
+                });
                 // Virtualised (US3 T071): only the tracks the viewport can
                 // currently show are laid out or fetch artwork, same as
                 // every other list (contracts/ui-surface.md §4/§7).
@@ -91,8 +117,14 @@ pub fn show<B: OutputBackend, H: SourceHost>(
                     None,
                     |ui, i| {
                         let entity = RowEntity::Track(tracks[i].clone());
-                        if let Some(RowEvent::Action(action)) = list_row(ui, artwork, &entity) {
-                            pending = Some((entity, action));
+                        let key = entity_key(&entity);
+                        let is_selected = state.selection.is_selected("detail-tracks", key, i);
+                        match list_row(ui, artwork, &entity, is_selected) {
+                            Some(RowEvent::Action(action)) => pending = Some((entity, action)),
+                            Some(RowEvent::Select) => {
+                                state.selection.select("detail-tracks", key, i);
+                            }
+                            Some(RowEvent::Open) | None => {}
                         }
                     },
                 );

@@ -284,7 +284,7 @@ fn e_and_header_toggle_panel_and_it_survives_track_change() {
 
     // The `E` action calls this directly (ui/tests/actions.rs pins the
     // dispatcher wiring itself); here it stands in for a keyboard `E`.
-    effects_view::toggle_effect_chain_panel(&ctx);
+    effects_view::toggle_effect_chain_panel(&mut controller);
     let opened = texts(&mut controller, &mut artwork, &mut waveform);
     assert!(
         opened.contains(&tr("effects-panel-title")),

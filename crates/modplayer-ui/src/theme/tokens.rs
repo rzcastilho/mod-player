@@ -164,6 +164,19 @@ pub fn body_measure(ctx: &egui::Context) -> f32 {
     72.0 * ctx.fonts_mut(|fonts| fonts.glyph_width(&font_id, '0'))
 }
 
+/// The trailing duration column's width, in `mono` `'0'` advances
+/// (data-model.md §2): wide enough for `"88:88:88"` — an `h:mm:ss` reading
+/// with two-digit hours — plus a hair of breathing room either side of the
+/// figures, never a minimum.
+pub const DURATION_FIGURES: f32 = 7.0;
+
+/// `DURATION_FIGURES` × the `mono` role's `'0'` advance width (FR-001,
+/// FR-024, data-model.md §2, contract L3): the list row's trailing column
+/// measure, beside `body_measure`.
+pub fn duration_measure(ctx: &egui::Context) -> f32 {
+    DURATION_FIGURES * ctx.fonts_mut(|fonts| fonts.glyph_width(&mono_font_id(), '0'))
+}
+
 /// `mono`-styled text for a numeric readout (contract U1, FR-005): every
 /// `ui.label`/`selected_text`/hover-text call site that renders a formatted
 /// timestamp, dB reading, CPU/memory figure or duration routes its string
@@ -339,6 +352,20 @@ mod tests {
                     "digits are not tabular: {widths:?}"
                 );
             }
+        });
+    }
+
+    #[test]
+    fn duration_measure_is_duration_figures_times_mono_zero_advance() {
+        egui::__run_test_ctx(|ctx| {
+            let font_id = mono_font_id();
+            let zero_width = ctx.fonts_mut(|fonts| fonts.glyph_width(&font_id, '0'));
+            let colon_width = ctx.fonts_mut(|fonts| fonts.glyph_width(&font_id, ':'));
+            assert_eq!(duration_measure(ctx), DURATION_FIGURES * zero_width);
+            assert!(
+                (colon_width - zero_width).abs() < 0.01,
+                "mono ':' does not share the digit advance: {colon_width} vs {zero_width}"
+            );
         });
     }
 

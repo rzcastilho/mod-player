@@ -20,8 +20,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use modplayer_audio_io::FakeBackend;
 use modplayer_audio_source_synthetic::SyntheticHost;
 use modplayer_core::settings::{
-    AudioSettings, DeviceName, DisclosureAcknowledgement, InvalidField, PanelPersisted,
-    PanelPlacement, RawPanel, RawSettings, SettingsStore, SettingsWarning,
+    AudioSettings, DeviceName, DisclosureAcknowledgement, InvalidField, NowPlayingPanels,
+    PanelPersisted, PanelPlacement, RawPanel, RawSettings, SettingsStore, SettingsWarning,
     generate_connect_device_id,
 };
 use modplayer_core::{Chord, FocusPolicy, HostAction, PlaybackController};
@@ -707,6 +707,36 @@ proptest! {
         let outcome = store.load();
         prop_assert_eq!(outcome.settings.plugin_panels, settings.plugin_panels);
         prop_assert!(outcome.warnings.is_empty());
+    }
+
+    // 016-list-row-and-panel-components (Constitution VIII, contracts/
+    // panel-card.md P9): an arbitrary `(effect_chain_open, transport_open,
+    // queue_open)` triple round-trips through a real save/load, with no
+    // warning and `SCHEMA_VERSION` unchanged — the MUST for new
+    // serialized state, beyond the example-based P4/P6 cases in
+    // `settings/model.rs`'s own unit tests.
+    #[test]
+    fn now_playing_panels_round_trip_proptest(
+        effect_chain_open in any::<bool>(),
+        transport_open in any::<bool>(),
+        queue_open in any::<bool>(),
+    ) {
+        let dir = TempDir::new();
+        let store = store_in(&dir);
+        let settings = AudioSettings {
+            now_playing_panels: NowPlayingPanels {
+                effect_chain_open,
+                transport_open,
+                queue_open,
+            },
+            ..AudioSettings::default()
+        };
+        prop_assert!(store.save(&settings).is_ok());
+
+        let outcome = store.load();
+        prop_assert_eq!(outcome.settings.now_playing_panels, settings.now_playing_panels);
+        prop_assert!(outcome.warnings.is_empty());
+        prop_assert_eq!(outcome.settings.schema_version, modplayer_core::settings::SCHEMA_VERSION);
     }
 }
 

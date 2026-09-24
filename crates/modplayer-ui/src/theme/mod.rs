@@ -30,8 +30,8 @@ pub mod tokens;
 
 pub use markers::{MARKER_PALETTE, marker_color, overlay_color, paint_host_glyph};
 pub use tokens::{
-    Roles, body_measure, divider_color, initials_font_id, mono_font_id, mono_text, radius, roles,
-    secondary_font_id, section_label, space, text,
+    Roles, body_measure, divider_color, duration_measure, initials_font_id, mono_font_id,
+    mono_text, radius, roles, secondary_font_id, section_label, space, text,
 };
 
 /// Map the domain `Theme` to egui's `ThemePreference` and apply it to `ctx`.

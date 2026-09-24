@@ -10,10 +10,12 @@
 
 use std::time::Duration;
 
-use egui::{Button, Id, RichText, Ui, Vec2};
+use egui::{Button, RichText, Ui, Vec2};
 use modplayer_audio_io::OutputBackend;
 use modplayer_audio_source::{SourceHealth, SourceHost};
-use modplayer_core::{ActiveState, AnalysisStatus, Intent, PlaybackController, tr, tr_args};
+use modplayer_core::{
+    ActiveState, AnalysisStatus, Intent, NowPlayingPanel, PlaybackController, tr, tr_args,
+};
 
 use crate::artwork::{ArtworkCache, ArtworkState};
 use crate::effects_view;
@@ -33,27 +35,16 @@ use crate::widgets::{peak_meter, volume};
 /// The artwork square's side length (matches `rows.rs`'s row artwork).
 const ARTWORK_SIZE: f32 = 96.0;
 
-/// Height kept free below the Effect Chain panel's scroll area for the
-/// master volume row, the peak meter and the Queue toggle's panel header,
-/// so an open panel never pushes them off the bottom of the window.
-const EFFECTS_PANEL_RESERVED_HEIGHT: f32 = 140.0;
-
-/// Persists the Queue panel's open/closed state across frames in egui's
-/// own per-viewer memory (ui-surface.md §2: reached from Now Playing via a
-/// toggle, no dedicated nav-rail section).
-fn queue_panel_open_id() -> Id {
-    Id::new("now-playing-queue-panel-open")
-}
-
 /// `Q` (007, `HostAction::ToggleQueue`, contracts/ui-actions.md §3):
-/// flips the same egui temp-memory flag the header's "Queue" toggle
-/// button reads/writes, so a keyboard toggle and a click stay in sync.
-pub fn toggle_queue_panel(ctx: &egui::Context) {
-    let id = queue_panel_open_id();
-    ctx.memory_mut(|memory| {
-        let open = memory.data.get_temp::<bool>(id).unwrap_or(false);
-        memory.data.insert_temp(id, !open);
-    });
+/// flips the persisted `[now_playing_panels] queue_open` flag through the
+/// controller, so a keyboard toggle and the header switch stay in sync and
+/// the state survives a restart (016-list-row-and-panel-components,
+/// FR-019).
+pub fn toggle_queue_panel<B: OutputBackend, H: SourceHost>(
+    controller: &mut PlaybackController<B, H>,
+) {
+    let open = controller.now_playing_panel_open(NowPlayingPanel::Queue);
+    controller.set_now_playing_panel_open(NowPlayingPanel::Queue, !open);
 }
 
 /// Draw the Now Playing screen, applying any transport/volume/seek change
@@ -90,77 +81,88 @@ pub fn show<B: OutputBackend, H: SourceHost>(
 
     let available = controller.transport_enabled();
 
-    let queue_id = queue_panel_open_id();
-    let mut queue_open = ui
-        .memory(|memory| memory.data.get_temp::<bool>(queue_id))
-        .unwrap_or(false);
-    let effects_id = effects_view::panel_open_id();
-    let mut effects_open = ui
-        .memory(|memory| memory.data.get_temp::<bool>(effects_id))
-        .unwrap_or(false);
-    let transport_id = transport_view::panel_open_id();
-    let mut transport_open = ui
-        .memory(|memory| memory.data.get_temp::<bool>(transport_id))
-        .unwrap_or(false);
+    // 016-list-row-and-panel-components (FR-019, P1): `settings.toml` is
+    // the single source of truth for these three flags — read through the
+    // controller accessor, never egui memory.
+    let mut queue_open = controller.now_playing_panel_open(NowPlayingPanel::Queue);
+    let mut effects_open = controller.now_playing_panel_open(NowPlayingPanel::EffectChain);
+    let mut transport_open = controller.now_playing_panel_open(NowPlayingPanel::Transport);
 
-    ui.horizontal(|ui| {
-        let playing = controller.transport_state().intent == Intent::Playing;
-        let play_pause_key = if playing {
-            "transport-pause"
-        } else {
-            "transport-play"
-        };
-        if ui
-            .add_enabled(available, Button::new(tr(play_pause_key)))
-            .clicked()
-        {
-            if playing {
-                controller.pause();
+    let toggled = ui
+        .horizontal(|ui| {
+            let playing = controller.transport_state().intent == Intent::Playing;
+            let play_pause_key = if playing {
+                "transport-pause"
             } else {
-                controller.play();
+                "transport-play"
+            };
+            if ui
+                .add_enabled(available, Button::new(tr(play_pause_key)))
+                .clicked()
+            {
+                if playing {
+                    controller.pause();
+                } else {
+                    controller.play();
+                }
             }
-        }
 
-        if ui
-            .add_enabled(available, Button::new(tr("transport-stop")))
-            .clicked()
-        {
-            controller.stop();
-        }
+            if ui
+                .add_enabled(available, Button::new(tr("transport-stop")))
+                .clicked()
+            {
+                controller.stop();
+            }
 
-        if ui
-            .add_enabled(available, Button::new(tr("transport-skip-back")))
-            .clicked()
-        {
-            controller.skip_back();
-        }
+            if ui
+                .add_enabled(available, Button::new(tr("transport-skip-back")))
+                .clicked()
+            {
+                controller.skip_back();
+            }
 
-        if ui
-            .add_enabled(available, Button::new(tr("transport-skip-forward")))
-            .clicked()
-        {
-            controller.skip_forward();
-        }
+            if ui
+                .add_enabled(available, Button::new(tr("transport-skip-forward")))
+                .clicked()
+            {
+                controller.skip_forward();
+            }
 
-        switch(ui, SwitchKind::Toggle, &mut queue_open, &tr("queue-toggle"));
+            let queue_changed =
+                switch(ui, SwitchKind::Toggle, &mut queue_open, &tr("queue-toggle")).changed();
 
-        switch(
-            ui,
-            SwitchKind::Toggle,
-            &mut effects_open,
-            &tr("effects-toggle"),
-        );
+            let effects_changed = switch(
+                ui,
+                SwitchKind::Toggle,
+                &mut effects_open,
+                &tr("effects-toggle"),
+            )
+            .changed();
 
-        switch(
-            ui,
-            SwitchKind::Toggle,
-            &mut transport_open,
-            &tr("transport-toggle"),
-        );
-    });
-    ui.memory_mut(|memory| memory.data.insert_temp(queue_id, queue_open));
-    ui.memory_mut(|memory| memory.data.insert_temp(effects_id, effects_open));
-    ui.memory_mut(|memory| memory.data.insert_temp(transport_id, transport_open));
+            let transport_changed = switch(
+                ui,
+                SwitchKind::Toggle,
+                &mut transport_open,
+                &tr("transport-toggle"),
+            )
+            .changed();
+
+            (queue_changed, effects_changed, transport_changed)
+        })
+        .inner;
+
+    // Persist only the flag(s) actually toggled this frame (contract P3) —
+    // never an unconditional write every frame, which would turn a cheap
+    // per-frame read into a disk write.
+    if toggled.0 {
+        controller.set_now_playing_panel_open(NowPlayingPanel::Queue, queue_open);
+    }
+    if toggled.1 {
+        controller.set_now_playing_panel_open(NowPlayingPanel::EffectChain, effects_open);
+    }
+    if toggled.2 {
+        controller.set_now_playing_panel_open(NowPlayingPanel::Transport, transport_open);
+    }
 
     if controller.current_track().is_some() {
         show_waveform(ui, controller, waveform, available, track_changed);
@@ -178,7 +180,8 @@ pub fn show<B: OutputBackend, H: SourceHost>(
         // "Add node…" row, master volume and the Queue panel fell off the
         // bottom with no way to reach them (2026-09-19 manual walk, M8/
         // M10). Capped so the controls below it stay on screen.
-        let max_height = (ui.available_height() - EFFECTS_PANEL_RESERVED_HEIGHT).max(160.0);
+        let reserved = effects_panel_reserved_height(ui, transport_open, queue_open);
+        let max_height = (ui.available_height() - reserved).max(160.0);
         egui::ScrollArea::vertical()
             .id_salt("now-playing-effect-chain-scroll")
             .max_height(max_height)
@@ -220,6 +223,41 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     if controller.transport_state().intent == Intent::Playing {
         ui.ctx().request_repaint_after(Duration::from_millis(16));
     }
+}
+
+/// The height to reserve below the Effect Chain panel's scroll area so an
+/// open panel never pushes the master volume row, the peak meter or the
+/// Queue panel off the bottom of the window
+/// (016-list-row-and-panel-components, FR-023, FR-024, data-model.md
+/// §10): a sum of spacing tokens and measured widget heights, plus
+/// `2 × space::LG` per card (Transport, Queue) now sitting in this region
+/// while it is open — replacing the old bare `EFFECTS_PANEL_RESERVED_
+/// HEIGHT: f32 = 140.0` literal, which is what let the 2026-09-19
+/// clipping defect recur once panel_card added an inset around the
+/// content below (C13).
+fn effects_panel_reserved_height(ui: &Ui, transport_open: bool, queue_open: bool) -> f32 {
+    let row_height = ui
+        .spacing()
+        .interact_size
+        .y
+        .max(ui.text_style_height(&egui::TextStyle::Body));
+    // Master volume: one horizontal row (caption + slider,
+    // `widgets/volume.rs`). Peak meter: a caption line above its own bar
+    // (`widgets/peak_meter.rs`), so it costs a row plus one text line.
+    let master_volume_row = row_height;
+    let peak_meter_rows = ui.text_style_height(&egui::TextStyle::Body) + row_height;
+
+    let mut reserved = theme::space::XL // gap before Transport (`show`, above)
+        + master_volume_row
+        + peak_meter_rows
+        + theme::space::XL; // gap before Queue (`show`, below)
+    if transport_open {
+        reserved += 2.0 * theme::space::LG; // Transport card's own inset
+    }
+    if queue_open {
+        reserved += 2.0 * theme::space::LG; // Queue card's own inset
+    }
+    reserved
 }
 
 fn show_heading<B: OutputBackend, H: SourceHost>(

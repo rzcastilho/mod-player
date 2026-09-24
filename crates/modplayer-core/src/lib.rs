@@ -33,7 +33,8 @@ pub use analysis::{
     WaveformPeaks,
 };
 pub use controller::{
-    ActiveDevice, LoopState, LoopStatus, PlaybackController, QueueRow, QueueView, TrackListState,
+    ActiveDevice, LoopState, LoopStatus, NowPlayingPanel, PlaybackController, QueueRow, QueueView,
+    TrackListState,
 };
 pub use device_policy::{DeviceResolution, DeviceWarning};
 pub use effects::{

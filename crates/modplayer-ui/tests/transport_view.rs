@@ -190,6 +190,18 @@ fn default_input() -> RawInput {
     }
 }
 
+/// 016-list-row-and-panel-components: `transport_view::show` now wraps its
+/// content in `panel_card`, whose header renders through `theme::
+/// section_label` — the `section` role text style only exists once the
+/// token `Style` is installed (mirrors `now_playing.rs`/`markers.rs`'s own
+/// identically-named helper; a bare `Context::default()` panics resolving
+/// it).
+fn fresh_ctx() -> Context {
+    let ctx = Context::default();
+    modplayer_ui::theme::apply_tokens(&ctx);
+    ctx
+}
+
 /// One AccessKit node's accessibility-relevant fields (mirrors
 /// `tests/accessibility.rs`/`tests/effects_view.rs`'s own `AccessNode`).
 #[derive(Debug, Clone)]
@@ -341,7 +353,7 @@ fn panel_lists_only_transport_control_plugins() {
         );
     }
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let nodes = render_panel(&ctx, &mut controller);
 
@@ -390,7 +402,7 @@ fn holder_and_requesting_badges_render() {
         .and_then(|r| r.request_order)
         .unwrap_or_else(|| unreachable!("focus-b must already be requesting (RT5)"));
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let nodes = render_panel(&ctx, &mut controller);
     find_one(
@@ -441,7 +453,7 @@ fn give_focus_click_changes_holder() {
         "focus-a must reach Active"
     );
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let nodes = render_panel(&ctx, &mut controller);
     let give = find_one(
@@ -484,7 +496,7 @@ fn take_back_click_returns_host() {
         "test setup: focus_give must grant focus-a"
     );
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let nodes = render_panel(&ctx, &mut controller);
     let take_back = find_one(&nodes, Role::Button, &tr("transport-take-back"));
@@ -510,7 +522,7 @@ fn policy_combo_persists_selection() {
     let (mut controller, _handle, _dir, _psd, _tsd) = fixture_controller("policy-combo-persists");
     controller.launch();
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let nodes = render_panel(&ctx, &mut controller);
     find_one(
@@ -570,7 +582,7 @@ fn empty_state_when_no_eligible_plugin() {
     );
     controller.plugin_disable(section_loop);
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let nodes = render_panel(&ctx, &mut controller);
     find_one(&nodes, Role::Label, &tr("transport-empty"));
@@ -622,7 +634,7 @@ fn suspended_holder_row_disappears_and_holder_reads_host() {
         "focus_give must grant focus-a"
     );
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let before = render_panel(&ctx, &mut controller);
     find_one(&before, Role::Label, "Focus fixture A");
@@ -654,5 +666,25 @@ fn suspended_holder_row_disappears_and_holder_reads_host() {
             "transport-holder",
             &[("holder", tr("transport-holder-host"))],
         ),
+    );
+}
+
+/// C7 (016-list-row-and-panel-components, contracts/panel-card.md, FR-018's
+/// stated correction): the panel's header is the shared card's
+/// `section`-role (`Role::Heading`) treatment, not the `title` role a bare
+/// `ui.heading()` gave it before.
+#[test]
+fn header_is_section_role_not_title_role() {
+    let (mut controller, _handle, _dir, _psd, _tsd) = fixture_controller("header-role");
+    controller.launch();
+
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let nodes = render_panel(&ctx, &mut controller);
+
+    find_one(&nodes, Role::Heading, &tr("transport-panel-title"));
+    assert!(
+        find_all(&nodes, Role::Label, &tr("transport-panel-title")).is_empty(),
+        "the header must not also expose a plain Label node: {nodes:?}"
     );
 }

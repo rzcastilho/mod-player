@@ -137,6 +137,12 @@ pub struct AudioSettings {
     /// absent; sign-out/revocation never touch it (S2), matching
     /// `disclosure`'s own precedent.
     pub getting_started_dismissed: bool,
+    /// `[now_playing_panels]` (016-list-row-and-panel-components, FR-019/
+    /// FR-020): the Effect Chain/Transport/Queue panels' open/closed
+    /// state. Absent ⇒ all three `false` (every panel closed), matching
+    /// today's `unwrap_or(false)` egui-memory lookups. Markers has no
+    /// toggle (FR-021) and is not represented here.
+    pub now_playing_panels: NowPlayingPanels,
     pub schema_version: u32,
 }
 
@@ -158,9 +164,21 @@ impl Default for AudioSettings {
             focus_policy: FocusPolicy::default(),
             plugin_panels: BTreeMap::new(),
             getting_started_dismissed: false,
+            now_playing_panels: NowPlayingPanels::default(),
             schema_version: SCHEMA_VERSION,
         }
     }
+}
+
+/// The Effect Chain/Transport/Queue panels' open/closed state
+/// (016-list-row-and-panel-components, FR-019/FR-020, data-model.md §11):
+/// the domain shape `AudioSettings` carries. Markers has no toggle
+/// (FR-021).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NowPlayingPanels {
+    pub effect_chain_open: bool,
+    pub transport_open: bool,
+    pub queue_open: bool,
 }
 
 /// `[markers] nudge_step_ms`'s default (data-model.md §5).
@@ -299,6 +317,11 @@ pub struct RawSettings {
     /// such section) load the default `false`.
     #[serde(default)]
     pub onboarding: RawOnboarding,
+    /// `[now_playing_panels]` (016-list-row-and-panel-components, FR-019/
+    /// FR-020): an optional table so older files (with no such section)
+    /// load every panel closed.
+    #[serde(default)]
+    pub now_playing_panels: RawNowPlayingPanels,
 }
 
 fn default_schema_version() -> u32 {
@@ -318,6 +341,7 @@ impl Default for RawSettings {
             keybindings: BTreeMap::new(),
             plugin_panels: BTreeMap::new(),
             onboarding: RawOnboarding::default(),
+            now_playing_panels: RawNowPlayingPanels::default(),
         }
     }
 }
@@ -500,6 +524,19 @@ pub struct RawOnboarding {
     pub getting_started_dismissed: bool,
 }
 
+/// The `[now_playing_panels]` section (016-list-row-and-panel-components,
+/// FR-019/FR-020): an optional table so older files (with no such
+/// section) load every panel closed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RawNowPlayingPanels {
+    #[serde(default)]
+    pub effect_chain_open: bool,
+    #[serde(default)]
+    pub transport_open: bool,
+    #[serde(default)]
+    pub queue_open: bool,
+}
+
 impl RawSettings {
     /// Serialize `settings` to its wire form.
     pub fn from_settings(settings: &AudioSettings) -> Self {
@@ -594,6 +631,11 @@ impl RawSettings {
                 .collect(),
             onboarding: RawOnboarding {
                 getting_started_dismissed: settings.getting_started_dismissed,
+            },
+            now_playing_panels: RawNowPlayingPanels {
+                effect_chain_open: settings.now_playing_panels.effect_chain_open,
+                transport_open: settings.now_playing_panels.transport_open,
+                queue_open: settings.now_playing_panels.queue_open,
             },
         }
     }
@@ -751,6 +793,11 @@ impl RawSettings {
             focus_policy,
             plugin_panels,
             getting_started_dismissed: self.onboarding.getting_started_dismissed,
+            now_playing_panels: NowPlayingPanels {
+                effect_chain_open: self.now_playing_panels.effect_chain_open,
+                transport_open: self.now_playing_panels.transport_open,
+                queue_open: self.now_playing_panels.queue_open,
+            },
             schema_version: self.schema_version,
         };
 
@@ -883,6 +930,49 @@ mod tests {
         raw.disclosure.acknowledged_at = Some("2026-09-15T13:00:00Z".to_string());
         let (settings, _invalid, _dropped) = raw.into_settings();
         assert_eq!(settings.disclosure, None);
+    }
+
+    /// P4 (016-list-row-and-panel-components, FR-020, Edge Case): a
+    /// `settings.toml` with no `[now_playing_panels]` section loads all
+    /// three panels closed — mirrors `plugin_panels_round_trip`'s own
+    /// "absent section" precedent.
+    #[test]
+    fn now_playing_panels_default_to_closed_when_absent() {
+        let (settings, invalid, dropped) = RawSettings::default().into_settings();
+        assert!(invalid.is_empty());
+        assert!(dropped.is_empty());
+        assert_eq!(settings.now_playing_panels, NowPlayingPanels::default());
+        assert!(!settings.now_playing_panels.effect_chain_open);
+        assert!(!settings.now_playing_panels.transport_open);
+        assert!(!settings.now_playing_panels.queue_open);
+    }
+
+    /// P6: the three panels persist and restore independently, in both
+    /// directions — changing one leaves the other two untouched.
+    #[test]
+    fn now_playing_panels_round_trip_independently() {
+        let mut only_effects = AudioSettings::default();
+        only_effects.now_playing_panels.effect_chain_open = true;
+        let raw = RawSettings::from_settings(&only_effects);
+        let (round_tripped, invalid, dropped) = raw.into_settings();
+        assert!(invalid.is_empty());
+        assert!(dropped.is_empty());
+        assert_eq!(round_tripped, only_effects);
+        assert!(round_tripped.now_playing_panels.effect_chain_open);
+        assert!(!round_tripped.now_playing_panels.transport_open);
+        assert!(!round_tripped.now_playing_panels.queue_open);
+
+        let mut transport_and_queue = AudioSettings::default();
+        transport_and_queue.now_playing_panels.transport_open = true;
+        transport_and_queue.now_playing_panels.queue_open = true;
+        let raw = RawSettings::from_settings(&transport_and_queue);
+        let (round_tripped, invalid, dropped) = raw.into_settings();
+        assert!(invalid.is_empty());
+        assert!(dropped.is_empty());
+        assert_eq!(round_tripped, transport_and_queue);
+        assert!(!round_tripped.now_playing_panels.effect_chain_open);
+        assert!(round_tripped.now_playing_panels.transport_open);
+        assert!(round_tripped.now_playing_panels.queue_open);
     }
 
     #[test]

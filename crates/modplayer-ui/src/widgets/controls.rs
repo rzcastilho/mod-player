@@ -6,9 +6,10 @@
 //! consume the values defined in `theme::controls` and never write a
 //! colour, alpha or stroke width of their own (FR-019).
 
+use egui::accesskit::{Role, Toggled};
 use egui::{
-    Button, Color32, Context, Id, LayerId, Order, Response, RichText, Sense, StrokeKind, Ui,
-    WidgetInfo, WidgetType, pos2,
+    Button, Color32, Context, Frame, Id, Label, LayerId, Order, Response, RichText, Sense,
+    StrokeKind, Ui, WidgetInfo, WidgetType, pos2,
 };
 
 use crate::theme::{controls, tokens};
@@ -175,6 +176,75 @@ pub fn row_frame<R>(ui: &mut Ui, id: Id, add: impl FnOnce(&mut Ui) -> R) -> (egu
 }
 
 // ---------------------------------------------------------------------
+// `tab` (016-list-row-and-panel-components, data-model.md §9,
+// contracts/tab-strip.md T1-T13)
+// ---------------------------------------------------------------------
+
+/// The Library tab strip's host widget (FR-013, FR-016, FR-034): draws
+/// `label`, then strokes [`controls::tab_underline`] along the widget's
+/// bottom edge when `selected` — a stroke, never a filled `accent`
+/// background (T1). Sets `Role::Tab`, the exact `label` as accessible
+/// name (T9 — no count suffix), and both `set_selected`/`set_toggled` on
+/// the active tab (T11) — what `selectable_label` gave for free via
+/// `WidgetInfo::selected` (`response.rs:976`), replaced by hand since
+/// this is no longer a `selectable_label` (research R6).
+pub fn tab(ui: &mut Ui, selected: bool, label: &str) -> Response {
+    let roles = tokens::roles(ui.visuals());
+    let response = ui.add(Label::new(label).sense(Sense::click()));
+
+    if selected && ui.is_rect_visible(response.rect) {
+        ui.painter().hline(
+            response.rect.x_range(),
+            response.rect.bottom(),
+            controls::tab_underline(roles),
+        );
+    }
+
+    ui.ctx().accesskit_node_builder(response.id, |b| {
+        b.set_role(Role::Tab);
+        b.set_label(label.to_string());
+        b.set_selected(selected);
+        b.set_toggled(if selected {
+            Toggled::True
+        } else {
+            Toggled::False
+        });
+    });
+
+    response
+}
+
+// ---------------------------------------------------------------------
+// `panel_card` (016-list-row-and-panel-components, data-model.md §10,
+// contracts/panel-card.md C1-C13)
+// ---------------------------------------------------------------------
+
+/// The one shared card every Now Playing block (Markers, Effect Chain,
+/// Transport, Queue) renders through (FR-017, FR-036): `roles.
+/// surface_raised` fill, `space::LG` padding on all four sides, `radius::
+/// MD` corner radius, and no stroke (C2), topped by a `section`-role
+/// uppercase header whose accessible name is pinned to the exact,
+/// un-uppercased `header` string (FR-018, C3/C4 — mirrors `markers.rs`'s
+/// own T030 pin, since `section_label` uppercases only the *painted*
+/// text). `add_contents` draws the panel's own body inside the same card,
+/// below the header.
+pub fn panel_card(ui: &mut Ui, header: &str, add_contents: impl FnOnce(&mut Ui)) {
+    let roles = tokens::roles(ui.visuals());
+    Frame::new()
+        .fill(roles.surface_raised)
+        .inner_margin(tokens::space::LG)
+        .corner_radius(tokens::radius::MD)
+        .show(ui, |ui| {
+            let heading = ui.label(tokens::section_label(header));
+            ui.ctx().accesskit_node_builder(heading.id, |b| {
+                b.set_role(Role::Heading);
+                b.set_label(header.to_string());
+            });
+            add_contents(ui);
+        });
+}
+
+// ---------------------------------------------------------------------
 // `destructive_gap` (data-model.md §7, FR-006)
 // ---------------------------------------------------------------------
 
@@ -334,5 +404,118 @@ mod tests {
             .iter()
             .any(|(_, node)| node.role() == Role::Button && node.toggled() == Some(Toggled::False));
         assert!(found, "expected a Role::Button node toggled false");
+    }
+
+    /// C2 (contracts/panel-card.md): `panel_card`'s frame fills with
+    /// `roles.surface_raised`, insets `space::LG` on every side (checked
+    /// against the header's own accesskit bounds — the first thing drawn
+    /// inside the frame's content area), uses `radius::MD` corner radius,
+    /// and draws no stroke — in both themes.
+    #[test]
+    fn panel_card_uses_surface_raised_lg_padding_md_radius_no_stroke() {
+        for dark_mode in [false, true] {
+            let ctx = Context::default();
+            crate::theme::apply_tokens(&ctx);
+            ctx.set_theme(if dark_mode {
+                egui::Theme::Dark
+            } else {
+                egui::Theme::Light
+            });
+            ctx.enable_accesskit();
+            let roles = tokens::for_dark_mode(dark_mode);
+
+            let mut output = ctx.run_ui(RawInput::default(), |ui| {
+                panel_card(ui, "Panel Header", |ui| {
+                    ui.label("body");
+                });
+            });
+            let update = output
+                .platform_output
+                .accesskit_update
+                .take()
+                .unwrap_or_else(|| {
+                    unreachable!("accesskit_update should be populated once enabled")
+                });
+
+            let bg = output
+                .shapes
+                .iter()
+                .find_map(|clipped| match &clipped.shape {
+                    egui::Shape::Rect(rect_shape) if rect_shape.fill == roles.surface_raised => {
+                        Some(rect_shape.clone())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("expected a surface_raised background rect"));
+            assert_eq!(
+                bg.corner_radius,
+                tokens::radius::MD,
+                "panel_card must use radius::MD"
+            );
+            assert_eq!(
+                bg.stroke.width, 0.0,
+                "panel_card must draw no stroke, got {:?}",
+                bg.stroke
+            );
+
+            let heading_bounds = update
+                .nodes
+                .iter()
+                .find(|(_, node)| node.role() == Role::Heading)
+                .and_then(|(_, node)| node.bounds())
+                .unwrap_or_else(|| panic!("expected a Role::Heading node with bounds"));
+            assert!(
+                (heading_bounds.x0 as f32 - bg.rect.left() - tokens::space::LG).abs() < 0.5,
+                "left padding must be space::LG: heading x0={}, bg left={}",
+                heading_bounds.x0,
+                bg.rect.left()
+            );
+            assert!(
+                (heading_bounds.y0 as f32 - bg.rect.top() - tokens::space::LG).abs() < 0.5,
+                "top padding must be space::LG: heading y0={}, bg top={}",
+                heading_bounds.y0,
+                bg.rect.top()
+            );
+
+            output.drop_without_applying_deltas();
+        }
+    }
+
+    /// C3/C4 (contracts/panel-card.md): the header renders through
+    /// `theme::section_label` (uppercase, `section` role) but its
+    /// accessible name stays the exact, un-uppercased string.
+    #[test]
+    fn panel_card_header_is_uppercase_section_role_with_exact_accessible_name() {
+        let ctx = Context::default();
+        crate::theme::apply_tokens(&ctx);
+        ctx.enable_accesskit();
+
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
+            panel_card(ui, "queue", |_ui| {});
+        });
+        let uppercase_painted = output.shapes.iter().any(|clipped| {
+            matches!(&clipped.shape, egui::Shape::Text(t) if t.galley.job.text == "QUEUE")
+        });
+        let update = output
+            .platform_output
+            .accesskit_update
+            .take()
+            .unwrap_or_else(|| unreachable!("accesskit_update should be populated once enabled"));
+        output.drop_without_applying_deltas();
+
+        assert!(
+            uppercase_painted,
+            "the header must be painted uppercase via theme::section_label"
+        );
+        let heading = update
+            .nodes
+            .iter()
+            .find(|(_, node)| node.role() == Role::Heading)
+            .unwrap_or_else(|| panic!("expected a Role::Heading node"));
+        assert_eq!(
+            heading.1.label(),
+            Some("queue"),
+            "the accessible name must be the exact, un-uppercased header string"
+        );
     }
 }

@@ -204,12 +204,16 @@ fn every_boolean_control_is_a_switch() {
 
 /// **S6**: every FR-008b one-of-N selection control (data-model.md §9.3)
 /// is left exactly as it was — still a `selectable_label`/`ComboBox`
-/// option, never a `switch(...)` call.
+/// option, never a `switch(...)` call. `library_view.rs`'s tab strip is
+/// the one deliberate exception: 016-list-row-and-panel-components'
+/// FR-013/contracts/tab-strip.md T1 restyles it from a filled
+/// `selectable_label` into the dedicated `widgets::controls::tab`
+/// underline widget — still not a boolean `switch(...)`, so `no_
+/// library_tab_became_a_switch` below covers it instead of this list.
 #[test]
 fn no_selection_control_became_a_switch() {
     // (file, an anchor line unique to the site).
     let sites: &[(&str, &str)] = &[
-        ("library_view.rs", "state.tab == tab"),
         ("shell.rs", "self.section == section"),
         ("settings/mod.rs", "screen.category == category"),
         ("settings/mod.rs", "tr(descriptor.category.label_key())"),
@@ -243,4 +247,26 @@ fn no_selection_control_became_a_switch() {
             "{file}: {anchor:?} must not have become a switch(...) call (FR-008b)"
         );
     }
+}
+
+/// **S6 exception** (016-list-row-and-panel-components, FR-013,
+/// contracts/tab-strip.md T1): the Library tab strip is a one-of-N
+/// selection control that intentionally left `selectable_label` behind —
+/// for a dedicated navigation-underline widget, not a boolean `switch`.
+/// Pins the same negative half of S6 (never `switch(...)`) plus the
+/// positive fact that replaces it (`widgets::controls::tab`).
+#[test]
+fn no_library_tab_became_a_switch() {
+    let contents = read("library_view.rs");
+    let idx = line_index(&contents, "state.tab == tab", "library_view.rs");
+    const RADIUS: usize = 5;
+    assert!(
+        window_contains(&contents, idx, RADIUS, "tab_widget("),
+        "library_view.rs: expected \"state.tab == tab\" to route through the \
+         tab widget (016 FR-013)"
+    );
+    assert!(
+        !window_contains(&contents, idx, RADIUS, "switch("),
+        "library_view.rs: the tab strip must not have become a switch(...) call (FR-008b)"
+    );
 }

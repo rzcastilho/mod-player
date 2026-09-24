@@ -31,7 +31,7 @@ use crate::theme;
 use crate::theme::controls::Variant;
 use crate::waveform::state::DETAIL_MIN_WINDOW_MS;
 use crate::waveform::{self, DetailWindow, MarkerDrag, TimeSpace, WaveformState};
-use crate::widgets::controls::{SwitchKind, button, destructive_gap, switch};
+use crate::widgets::controls::{SwitchKind, button, destructive_gap, panel_card, switch};
 
 /// The marker lane's fixed height (006, contracts/ui-markers.md §1).
 pub const LANE_HEIGHT: f32 = 14.0;
@@ -532,52 +532,47 @@ pub fn panel<B: OutputBackend, H: SourceHost>(
     controller: &mut PlaybackController<B, H>,
     waveform: &mut WaveformState,
 ) {
-    ui.horizontal(|ui| {
-        // 014-design-tokens-and-type-scale (US2, T030): the panel's chrome
-        // header becomes a `section` role (uppercase + tracking) rather
-        // than a full `title`, matching every other panel-header
-        // treatment (`settings/mod.rs`, `settings/controls.rs`) — the
-        // accessible name stays the exact, un-uppercased `markers-panel`
-        // string (`accessibility.rs::markers_panel_and_empty_state_are_
-        // exposed` pins this), so it's set explicitly rather than left to
-        // derive from the (now uppercased) painted text.
-        let heading = ui.label(theme::section_label(&tr("markers-panel")));
-        ui.ctx().accesskit_node_builder(heading.id, |b| {
-            b.set_role(Role::Heading);
-            b.set_label(tr("markers-panel"));
+    // 016-list-row-and-panel-components (FR-017/FR-018/FR-021, research
+    // R7): the shared card now draws the `markers-panel` header — the
+    // in-row `section_label` this panel used to draw itself is deleted, so
+    // it is never rendered twice. The "New loop"/clear-all controls keep
+    // their own row inside the card; Markers has no open/closed toggle
+    // (FR-021).
+    panel_card(ui, &tr("markers-panel"), |ui| {
+        ui.horizontal(|ui| {
+            if ui.button(tr("markers-new-loop")).clicked() {
+                let _ = controller.new_loop_region();
+            }
+            clear_all_controls(ui, controller, waveform);
         });
-        if ui.button(tr("markers-new-loop")).clicked() {
-            let _ = controller.new_loop_region();
+        if let Some(key) = waveform.marker_status {
+            ui.label(tr(key));
         }
-        clear_all_controls(ui, controller, waveform);
+
+        let count = controller.markers().map(TrackMarkers::count).unwrap_or(0);
+        if count == 0 {
+            ui.label(tr("markers-empty"));
+            return;
+        }
+
+        let rows: Vec<MarkerRowData> = controller
+            .markers()
+            .map(|markers| {
+                markers
+                    .markers()
+                    .iter()
+                    .map(MarkerRowData::from_marker)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        for row in rows {
+            show_marker_row(ui, controller, waveform, &row);
+            if let Some(region) = row.region {
+                show_region_cells(ui, controller, region);
+            }
+        }
     });
-    if let Some(key) = waveform.marker_status {
-        ui.label(tr(key));
-    }
-
-    let count = controller.markers().map(TrackMarkers::count).unwrap_or(0);
-    if count == 0 {
-        ui.label(tr("markers-empty"));
-        return;
-    }
-
-    let rows: Vec<MarkerRowData> = controller
-        .markers()
-        .map(|markers| {
-            markers
-                .markers()
-                .iter()
-                .map(MarkerRowData::from_marker)
-                .collect()
-        })
-        .unwrap_or_default();
-
-    for row in rows {
-        show_marker_row(ui, controller, waveform, &row);
-        if let Some(region) = row.region {
-            show_region_cells(ui, controller, region);
-        }
-    }
 }
 
 /// One marker's row (contracts/ui-markers.md §4): colour swatch (click

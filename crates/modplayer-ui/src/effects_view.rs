@@ -10,46 +10,42 @@
 //! Phase 5 (T073) completes the full six-kind catalog's controls:
 //! equalizer (8 bands), filter and stereo tools. The live meters/
 //! spectrum/overload header figures land in Phase 6 (T089). The
-//! "Add node…" selection is kept in egui temp memory (like
-//! [`panel_open_id`]) rather than an app-owned state struct, so no other
-//! screen needs to thread a new field through to reach this one.
+//! "Add node…" selection is kept in egui temp memory (a per-viewer
+//! convenience) rather than an app-owned state struct, so no other screen
+//! needs to thread a new field through to reach this one.
 
 use egui::{ComboBox, DragValue, Id, Key, Modifiers, Slider, Ui};
 use modplayer_audio_io::OutputBackend;
 use modplayer_audio_source::SourceHost;
-use modplayer_core::{ChainView, MeterSnapshot, NodeId, NodeRow, PlaybackController, tr, tr_args};
+use modplayer_core::{
+    ChainView, MeterSnapshot, NodeId, NodeRow, NowPlayingPanel, PlaybackController, tr, tr_args,
+};
 use modplayer_effects::catalog::{NodeKind, NodeOwner, ParamId, QualityMode};
 
 use crate::actions::{self, Claim};
-use crate::theme;
 use crate::theme::controls::Variant;
 use crate::widgets::chain_meters;
-use crate::widgets::controls::{SwitchKind, button, destructive_gap, switch};
+use crate::widgets::controls::{SwitchKind, button, destructive_gap, panel_card, switch};
 
 /// The kinds the "Add node…" control offers (contracts/ui-effect-
 /// chain.md §2: "a `ComboBox` of the six kinds").
 const ADDABLE_KINDS: [NodeKind; 6] = NodeKind::ALL;
 
-/// Persists the Effect Chain panel's open/closed state across frames in
-/// egui's own per-viewer memory (mirrors `now_playing.rs`'s
-/// `queue_panel_open_id`).
-pub fn panel_open_id() -> Id {
-    Id::new("now-playing-effect-chain-open")
-}
-
 /// `E` (007's `HostAction::ToggleEffectChain`, contracts/ui-effect-chain.md
-/// §1): flips the same egui temp-memory flag the header's "Effects" toggle
-/// button reads/writes, so a keyboard toggle and a click stay in sync.
-pub fn toggle_effect_chain_panel(ctx: &egui::Context) {
-    let id = panel_open_id();
-    ctx.memory_mut(|memory| {
-        let open = memory.data.get_temp::<bool>(id).unwrap_or(false);
-        memory.data.insert_temp(id, !open);
-    });
+/// §1): flips the persisted `[now_playing_panels] effect_chain_open` flag
+/// through the controller, so a keyboard toggle and the header switch stay
+/// in sync and the state survives a restart
+/// (016-list-row-and-panel-components, FR-019).
+pub fn toggle_effect_chain_panel<B: OutputBackend, H: SourceHost>(
+    controller: &mut PlaybackController<B, H>,
+) {
+    let open = controller.now_playing_panel_open(NowPlayingPanel::EffectChain);
+    controller.set_now_playing_panel_open(NowPlayingPanel::EffectChain, !open);
 }
 
 /// The egui memory id the "Add node…" combo's own selection persists
-/// under (a per-viewer convenience, like `panel_open_id`).
+/// under (a per-viewer convenience, unrelated to the panel's own
+/// persisted open/closed state).
 fn add_kind_memory_id() -> Id {
     Id::new("now-playing-effect-chain-add-kind")
 }
@@ -75,31 +71,30 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     let view = controller.chain_view();
     let meters = controller.chain_meters();
 
-    show_header(ui, &view, &meters);
+    // 016-list-row-and-panel-components (FR-017/FR-018, research R7): the
+    // shared card now draws the `effects-panel-title` header — the in-row
+    // `section_label` this panel used to draw itself is deleted, so it is
+    // never rendered twice. The CPU/overload/over-budget controls keep
+    // their own row inside the card.
+    panel_card(ui, &tr("effects-panel-title"), |ui| {
+        show_header(ui, &view, &meters);
 
-    for row in &view.nodes {
-        show_row(ui, controller, row);
-    }
+        for row in &view.nodes {
+            show_row(ui, controller, row);
+        }
 
-    show_add_row(ui, controller, view.nodes.len(), view.capacity);
+        show_add_row(ui, controller, view.nodes.len(), view.capacity);
+    });
 }
 
-/// The panel header (contracts/ui-effect-chain.md §2): title, whole-chain
-/// CPU figure, overload counter, an over-budget badge while `over_budget`,
-/// the pre-/post-chain level pairs and the 64-band spectrum — all read
-/// live from `RtShared` via `ChainView`/`MeterSnapshot` every frame.
+/// The panel header's chrome-under-the-title row (contracts/ui-effect-
+/// chain.md §2): whole-chain CPU figure, overload counter, an over-budget
+/// badge while `over_budget`, the pre-/post-chain level pairs and the
+/// 64-band spectrum — all read live from `RtShared` via `ChainView`/
+/// `MeterSnapshot` every frame. The title itself is drawn by the
+/// surrounding `panel_card`.
 fn show_header(ui: &mut Ui, view: &ChainView, meters: &MeterSnapshot) {
     ui.horizontal(|ui| {
-        // 014-design-tokens-and-type-scale (US2, T028, data-model.md §6:
-        // "Effect chain" is the named `section`-role example) — the
-        // accessible name is pinned back to the exact, un-uppercased
-        // title (FR-019), mirroring `markers::panel`'s T030 and
-        // `settings::controls::section_heading`.
-        let title = tr("effects-panel-title");
-        let heading = ui.label(theme::section_label(&title));
-        ui.ctx().accesskit_node_builder(heading.id, |b| {
-            b.set_label(title.clone());
-        });
         ui.label(tr_args(
             "effects-chain-cpu",
             &[("pct", format!("{:.0}", view.total_cost_pct))],

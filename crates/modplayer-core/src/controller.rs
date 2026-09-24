@@ -699,6 +699,23 @@ pub struct PlaybackController<B: OutputBackend, H: SourceHost> {
     /// and persisted, through `persist_settings`, on
     /// `dismiss_getting_started`.
     getting_started_dismissed: bool,
+
+    /// `[now_playing_panels]` shadow state
+    /// (016-list-row-and-panel-components, FR-019/FR-020): seeded from
+    /// `settings.now_playing_panels` at construction and persisted,
+    /// through `persist_settings`, on every `set_now_playing_panel_open`
+    /// call — mirrors `getting_started_dismissed`'s own precedent above.
+    now_playing_panels: crate::settings::NowPlayingPanels,
+}
+
+/// Which Now Playing block a persisted open/closed flag addresses
+/// (016-list-row-and-panel-components, FR-019, data-model.md §11). Markers
+/// has no toggle (FR-021) and is not a variant here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NowPlayingPanel {
+    EffectChain,
+    Transport,
+    Queue,
 }
 
 /// `transport.seek_forward_step`/`seek_backward_step`'s step size
@@ -858,6 +875,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
             transport_actor: TransportActor::default(),
             plugin_panels: settings.plugin_panels.clone(),
             getting_started_dismissed: settings.getting_started_dismissed,
+            now_playing_panels: settings.now_playing_panels,
         };
         // 006, contracts/marker-service.md §4: resolved unconditionally at
         // construction, like `AnalysisPaths::resolve()` just above —
@@ -2471,6 +2489,34 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
     pub fn dismiss_getting_started(&mut self) {
         self.getting_started_dismissed = true;
         self.persist_settings(|settings| settings.getting_started_dismissed = true);
+    }
+
+    /// Whether `panel` is currently open
+    /// (016-list-row-and-panel-components, FR-019, contract P2): read from
+    /// the cached shadow state seeded at construction, never a fresh disk
+    /// read.
+    #[must_use]
+    pub fn now_playing_panel_open(&self, panel: NowPlayingPanel) -> bool {
+        match panel {
+            NowPlayingPanel::EffectChain => self.now_playing_panels.effect_chain_open,
+            NowPlayingPanel::Transport => self.now_playing_panels.transport_open,
+            NowPlayingPanel::Queue => self.now_playing_panels.queue_open,
+        }
+    }
+
+    /// Set `panel`'s open/closed state and persist it immediately
+    /// (FR-019, contract P3): the control-row switch and the `Q`/`E`/`T`
+    /// shortcut both call this same setter, so a click and a shortcut can
+    /// never diverge. `settings.toml` is the single source of truth — no
+    /// mirror is kept anywhere else (FR-019, P1).
+    pub fn set_now_playing_panel_open(&mut self, panel: NowPlayingPanel, open: bool) {
+        match panel {
+            NowPlayingPanel::EffectChain => self.now_playing_panels.effect_chain_open = open,
+            NowPlayingPanel::Transport => self.now_playing_panels.transport_open = open,
+            NowPlayingPanel::Queue => self.now_playing_panels.queue_open = open,
+        }
+        let panels = self.now_playing_panels;
+        self.persist_settings(|settings| settings.now_playing_panels = panels);
     }
 
     /// The user's "Give focus" (FR-008, C8): a no-op unless `id` is a
@@ -4861,6 +4907,39 @@ mod tests {
         let shared = controller.shared();
         shared.advance_clock(42);
         assert_eq!(controller.shared().clock_frames(), 42);
+    }
+
+    /// P2 (016-list-row-and-panel-components, FR-019): `set_now_playing_
+    /// panel_open` then a settings-store reload reads back the same value,
+    /// for all three `NowPlayingPanel` variants, independently.
+    #[test]
+    fn now_playing_panel_open_persists_and_reloads() {
+        let store = fresh_store();
+        let path = store.path().to_path_buf();
+        let mut controller =
+            PlaybackController::new(FakeBackend::new(vec![]), SyntheticHost::new(44_100), store);
+        let panels = [
+            NowPlayingPanel::EffectChain,
+            NowPlayingPanel::Transport,
+            NowPlayingPanel::Queue,
+        ];
+        for panel in panels {
+            assert!(!controller.now_playing_panel_open(panel));
+            controller.set_now_playing_panel_open(panel, true);
+            assert!(controller.now_playing_panel_open(panel));
+        }
+
+        let reloaded = PlaybackController::new(
+            FakeBackend::new(vec![]),
+            SyntheticHost::new(44_100),
+            SettingsStore::with_path(path),
+        );
+        for panel in panels {
+            assert!(
+                reloaded.now_playing_panel_open(panel),
+                "{panel:?} must survive a reload"
+            );
+        }
     }
 
     #[test]

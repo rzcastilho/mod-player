@@ -451,7 +451,13 @@ pub fn invoke<B: OutputBackend, H: SourceHost>(
     controller: &mut PlaybackController<B, H>,
     shell: &mut Shell,
     waveform: &mut WaveformState,
-    ctx: &Context,
+    // 016-list-row-and-panel-components (research R9, contract P7): the
+    // three panel toggles below moved from an egui-memory flag (keyed on
+    // `ctx`) to a `controller`-persisted one, so this parameter has no
+    // remaining reader. `invoke`'s own signature stays unchanged —
+    // `dispatch_and_invoke` and every call site still pass it — in case a
+    // future host action needs it again.
+    _ctx: &Context,
 ) {
     let action = match inv.action {
         ActionId::Host(action) => action,
@@ -515,7 +521,7 @@ pub fn invoke<B: OutputBackend, H: SourceHost>(
         HostAction::NavNowPlaying => shell.section = Section::NowPlaying,
         HostAction::NavPlugins => shell.section = Section::Plugins,
         HostAction::NavSettings => shell.section = Section::Settings,
-        HostAction::ToggleQueue => now_playing::toggle_queue_panel(ctx),
+        HostAction::ToggleQueue => now_playing::toggle_queue_panel(controller),
         HostAction::FocusSearch => {
             shell.section = Section::Search;
             shell.focus_search_requested = true;
@@ -527,9 +533,13 @@ pub fn invoke<B: OutputBackend, H: SourceHost>(
         HostAction::TempoStepUp => controller.tempo_step(1),
         HostAction::TempoStepDown => controller.tempo_step(-1),
         // 008, contracts/ui-effect-chain.md §5.
-        HostAction::ToggleEffectChain => crate::effects_view::toggle_effect_chain_panel(ctx),
+        HostAction::ToggleEffectChain => {
+            crate::effects_view::toggle_effect_chain_panel(controller);
+        }
         // 010-transport-focus, contracts/ui-transport-panel.md §1.
-        HostAction::ToggleTransportPanel => crate::transport_view::toggle_transport_panel(ctx),
+        HostAction::ToggleTransportPanel => {
+            crate::transport_view::toggle_transport_panel(controller);
+        }
     }
 }
 

@@ -121,14 +121,18 @@ impl RowAction {
     }
 }
 
-/// What activating a row reports (contracts/ui-surface.md §4-5): a
-/// `RowAction` from the six-item menu, or `Open` — Enter/double-click on a
-/// non-track row (Enter is Play now only on track rows; Complexity
-/// Tracking "Enter on album/artist/playlist rows opens the detail view").
+/// What activating a row reports (contracts/ui-surface.md §4-5, contract
+/// list-row.md §8): a `RowAction` from the six-item menu, `Open` —
+/// Enter/double-click on a non-track row (Enter is Play now only on track
+/// rows; Complexity Tracking "Enter on album/artist/playlist rows opens the
+/// detail view") — or `Select`, a primary single click (FR-006). Precedence
+/// within one frame, in the order `list_row` returns them: `Action` ->
+/// `Open`/`Action(PlayNow)` -> `Select`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowEvent {
     Action(RowAction),
     Open,
+    Select,
 }
 
 /// The list Play now/Play next/Add to queue act on, and where playback
@@ -288,10 +292,12 @@ fn artwork_name(entity: &RowEntity) -> &str {
     }
 }
 
-/// A stable per-row id salt, so the same track/album/artist/playlist keeps
-/// its focus/menu-open state across frames as the surrounding list scrolls
-/// or reorders.
-fn entity_salt(entity: &RowEntity) -> &str {
+/// A stable per-row id/selection key, so the same track/album/artist/
+/// playlist keeps its focus/menu-open state across frames as the
+/// surrounding list scrolls or reorders, and so [`RowSelection`] can name
+/// the entity a stored selection points at (data-model.md §4). `pub` per
+/// contract S3/S6 — every view's own `RowSelection` bookkeeping needs it.
+pub fn entity_key(entity: &RowEntity) -> &str {
     match entity {
         RowEntity::Track(track) => track.id.as_str(),
         RowEntity::Album(album) => album.id.as_str(),
@@ -300,9 +306,129 @@ fn entity_salt(entity: &RowEntity) -> &str {
     }
 }
 
-fn format_duration(duration_ms: u32) -> String {
+/// The kind-correct tooltip key (contract A7, FR-010): `Track` rows get
+/// `row-open-hint-track` (a second click/Enter plays it); every other kind
+/// gets `row-open-hint-entity` (a second click/Enter opens it).
+fn open_hint_key(entity: &RowEntity) -> &'static str {
+    match entity {
+        RowEntity::Track(_) => "row-open-hint-track",
+        RowEntity::Album(_) | RowEntity::Artist(_) | RowEntity::Playlist(_) => {
+            "row-open-hint-entity"
+        }
+    }
+}
+
+/// `m:ss` below an hour, `h:mm:ss` at or above it (FR-033, data-model.md
+/// §3): `3_599_000 -> "59:59"`, `3_600_000 -> "1:00:00"`. Minutes/seconds
+/// are zero-padded in the hour form; minutes are not in the `m:ss` form
+/// (unchanged from before this rollover).
+///
+/// ```
+/// use modplayer_ui::rows::format_duration;
+///
+/// assert_eq!(format_duration(0), "0:00");
+/// assert_eq!(format_duration(3_599_000), "59:59");
+/// assert_eq!(format_duration(3_600_000), "1:00:00");
+/// assert_eq!(format_duration(3_855_000), "1:04:15");
+/// ```
+#[must_use]
+pub fn format_duration(duration_ms: u32) -> String {
     let total_seconds = duration_ms / 1000;
-    format!("{}:{:02}", total_seconds / 60, total_seconds % 60)
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
+/// One view's currently selected row, if any (data-model.md §4, contracts/
+/// list-row.md §S1-S12): exclusive by construction — a view holds exactly
+/// one `RowSelection`, so "at most one selected row per view" cannot be
+/// violated by a call site. Never persisted (FR-028, contract S9): no
+/// `Serialize`, no `settings.toml` field, no `ui.memory` write.
+///
+/// ```
+/// use modplayer_ui::rows::RowSelection;
+///
+/// let mut selection = RowSelection::default();
+/// selection.select("library-saved-tracks", "spotify:track:a", 3);
+/// assert!(selection.is_selected("library-saved-tracks", "spotify:track:a", 3));
+///
+/// // A different key at the same stored index (a reorder) clears it.
+/// selection.reconcile("library-saved-tracks", |_index| {
+///     Some("spotify:track:b".to_string())
+/// });
+/// assert!(!selection.is_selected("library-saved-tracks", "spotify:track:a", 3));
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RowSelection(Option<SelectedRow>);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SelectedRow {
+    /// The `virtualized_list` id salt of the list this selection lives in
+    /// (data-model.md §5) — distinguishes "different list, same view"
+    /// (contract S2) from "a different view entirely" (each of which owns
+    /// its own `RowSelection`).
+    list: String,
+    /// [`entity_key`] of the selected entity.
+    key: String,
+    /// The row's display index in `list`'s current order, at the time it
+    /// was selected — what [`RowSelection::reconcile`] re-checks every
+    /// frame (contract S3/S4).
+    index: usize,
+}
+
+impl RowSelection {
+    /// Whether the row at `index` in `list`, keyed `key`, is the one
+    /// currently selected (contract S6: two rows sharing a key but
+    /// differing in index are distinguishable).
+    #[must_use]
+    pub fn is_selected(&self, list: &str, key: &str, index: usize) -> bool {
+        matches!(
+            &self.0,
+            Some(selected)
+                if selected.list == list && selected.key == key && selected.index == index
+        )
+    }
+
+    /// Select `key` at `index` in `list`, replacing any prior selection —
+    /// in this list, in another list of the same view, or none at all
+    /// (contract S2, FR-006/FR-007).
+    pub fn select(&mut self, list: &str, key: &str, index: usize) {
+        self.0 = Some(SelectedRow {
+            list: list.to_string(),
+            key: key.to_string(),
+            index,
+        });
+    }
+
+    /// Clear the selection unconditionally (FR-028: tab/target/query
+    /// change).
+    pub fn clear(&mut self) {
+        self.0 = None;
+    }
+
+    /// Re-check the stored selection against `list`'s current order
+    /// (contract S3/S4, FR-012). O(1): `key_at` is invoked at most once,
+    /// only when `list` matches the stored salt (contract S5) — the
+    /// virtualization property `virtualized_list` depends on, so this never
+    /// scans the list it's guarding. Clears when `key_at(index)` returns a
+    /// different key (a reorder) or `None` (the row was removed, or the
+    /// list shrank past that index).
+    pub fn reconcile(&mut self, list: &str, key_at: impl FnOnce(usize) -> Option<String>) {
+        let Some(selected) = &self.0 else {
+            return;
+        };
+        if selected.list != list {
+            return;
+        }
+        if key_at(selected.index).as_deref() != Some(selected.key.as_str()) {
+            self.0 = None;
+        }
+    }
 }
 
 /// What the artwork square paints for a given [`ArtworkState`] (contracts/
@@ -370,78 +496,123 @@ fn title_text(ui: &Ui, text: &str) -> RichText {
         .color(theme::roles(ui.visuals()).text_primary)
 }
 
+/// A selected row's title override: same run, `text_on_accent` in place of
+/// whatever colour it already carries (contract A3, data-model.md §7).
+/// Unselected, `text` is returned unchanged.
+fn selected_or(text: RichText, selected: bool, roles: &theme::Roles) -> RichText {
+    if selected {
+        text.color(roles.text_on_accent)
+    } else {
+        text
+    }
+}
+
+/// A selected row's secondary-weight run: `text_on_accent` at full strength
+/// in place of the unselected `.weak()` (contract A1-A4, data-model.md §7)
+/// — a selected row's fill is `accent`, so a `.weak()` run would fall below
+/// the 4.5:1 floor.
+fn selected_or_weak(text: impl Into<RichText>, selected: bool, roles: &theme::Roles) -> RichText {
+    let text = text.into();
+    if selected {
+        text.color(roles.text_on_accent)
+    } else {
+        text.weak()
+    }
+}
+
+/// A Track row's secondary-line detail string (contract L5, FR-002):
+/// artists joined, plus the album when present — no duration suffix. The
+/// duration now lives in the row's own trailing column, not this line.
+fn track_detail(track: &TrackRef) -> String {
+    let mut detail = track.artists.join(", ");
+    if let Some(album) = &track.album {
+        detail.push_str(" — ");
+        detail.push_str(album);
+    }
+    detail
+}
+
+/// A Track row's trailing-column duration label (contract L5, FR-002): the
+/// `mono` role, via `theme::mono_text`, never a bare `RichText::new`.
+fn duration_label(track: &TrackRef) -> RichText {
+    theme::mono_text(format_duration(track.duration_ms))
+}
+
 /// Draw the per-kind content columns (contracts/ui-surface.md §5): a
 /// track is two lines — "title [E] [reason]" over
 /// "artists — album — m:ss" — so every field the contract lists fits
 /// `ROW_HEIGHT`; the wide kinds keep one field per line inside
-/// `WIDE_ROW_HEIGHT`.
-fn draw_content(ui: &mut Ui, entity: &RowEntity) {
+/// `WIDE_ROW_HEIGHT`. `selected` recolours every run `text_on_accent`
+/// (contract A3, data-model.md §7) — never `.weak()` — since the row's own
+/// fill becomes `accent` (FR-008, FR-031).
+fn draw_content(ui: &mut Ui, entity: &RowEntity, selected: bool) {
     ui.spacing_mut().item_spacing.y = 2.0;
+    let roles = theme::roles(ui.visuals());
     match entity {
         RowEntity::Track(track) => {
             let reason = availability_reason(track.availability);
             let unavailable = reason.is_some();
             ui.horizontal(|ui| {
                 if unavailable {
-                    line(ui, RichText::new(&track.title).weak());
+                    let title = if selected {
+                        RichText::new(&track.title)
+                            .text_style(theme::text::BODY)
+                            .color(roles.text_on_accent)
+                    } else {
+                        RichText::new(&track.title).weak()
+                    };
+                    line(ui, title);
                 } else {
-                    let title = title_text(ui, &track.title);
+                    let title = selected_or(title_text(ui, &track.title), selected, roles);
                     line(ui, title);
                 }
                 if track.explicit {
-                    let response = ui.label("E");
+                    // The "E" badge is `text_primary` by default (no
+                    // `.weak()`) — selected recolours it, unselected stays
+                    // the plain default label (data-model.md §7).
+                    let response = if selected {
+                        ui.label(RichText::new("E").color(roles.text_on_accent))
+                    } else {
+                        ui.label("E")
+                    };
                     let explicit_label = tr("row-explicit");
                     ui.ctx()
                         .accesskit_node_builder(response.id, |b| b.set_label(explicit_label));
                 }
                 if let Some(reason) = reason {
-                    line(ui, RichText::new(reason).weak());
+                    line(ui, selected_or_weak(reason, selected, roles));
                 }
             });
-            let mut detail = track.artists.join(", ");
-            if let Some(album) = &track.album {
-                detail.push_str(" — ");
-                detail.push_str(album);
-            }
-            ui.horizontal(|ui| {
-                line(ui, RichText::new(detail).weak());
-                line(ui, RichText::new(" — ").weak());
-                // 014-design-tokens-and-type-scale (US3, T045, data-model.md
-                // §6 "duration" — the field this track-detail line ends
-                // with, shared by every screen that lists tracks through
-                // this row): `mono` so the digits line up in a fixed-width
-                // column across rows, layered on the existing `.weak()`
-                // secondary weight.
-                line(
-                    ui,
-                    theme::mono_text(format_duration(track.duration_ms)).weak(),
-                );
-            });
+            // Contract L5, FR-002: the secondary line is artists/album only
+            // — the duration moved to the row's own trailing column (drawn
+            // in `list_row`, beside the "…" menu), so it no longer ends
+            // this line with a `" — m:ss"` suffix.
+            line(ui, selected_or_weak(track_detail(track), selected, roles));
         }
         RowEntity::Album(album) => {
-            let title = title_text(ui, &album.name);
+            let title = selected_or(title_text(ui, &album.name), selected, roles);
             line(ui, title);
-            line(ui, RichText::new(album.artists.join(", ")).weak());
+            line(
+                ui,
+                selected_or_weak(album.artists.join(", "), selected, roles),
+            );
             if let Some(release) = &album.release_date {
-                line(ui, RichText::new(release.year.to_string()).weak());
+                line(
+                    ui,
+                    selected_or_weak(release.year.to_string(), selected, roles),
+                );
             }
         }
         RowEntity::Artist(artist) => {
-            let title = title_text(ui, &artist.name);
+            let title = selected_or(title_text(ui, &artist.name), selected, roles);
             line(ui, title);
         }
         RowEntity::Playlist(playlist) => {
-            let title = title_text(ui, &playlist.name);
+            let title = selected_or(title_text(ui, &playlist.name), selected, roles);
             line(ui, title);
             if !playlist.editable {
-                line(
-                    ui,
-                    RichText::new(tr_args(
-                        "playlist-owner",
-                        &[("name", playlist.owner_name.clone())],
-                    ))
-                    .weak(),
-                );
+                let owner = tr_args("playlist-owner", &[("name", playlist.owner_name.clone())]);
+                line(ui, selected_or_weak(owner, selected, roles));
             }
         }
     }
@@ -486,23 +657,42 @@ fn actions_menu(ui: &mut Ui, accessible_name: &str, open_request: bool) -> Optio
     chosen
 }
 
+/// The middle text column's width (contract L1, FR-001, data-model.md §1):
+/// `available` minus the trailing region — the "…" menu's reserved width
+/// and the duration column's own measure — never negative. Takes no
+/// `RowEntity`/row-height parameter at all, so it is, by construction, the
+/// same subtraction for every row kind and both row heights (contract L2).
+fn content_column_width(available_width: f32, ctx: &egui::Context) -> f32 {
+    (available_width - ACTIONS_RESERVED_WIDTH - theme::duration_measure(ctx)).max(0.0)
+}
+
 /// The one row widget every catalog list renders through (contracts/ui-
-/// surface.md §5, FR-004): artwork, per-kind content, an accessible
-/// `ListItem` name including the availability reason, and the trailing
-/// six-action menu — reachable by the "…" button (U+2026 — the midline
-/// U+22EF is not in egui's bundled fonts and drew as tofu on the
-/// 2026-09-17 manual walk), right-click, or
-/// `Shift+F10` while the row has focus. Enter/double-click plays a track
-/// row now, or opens a non-track row's detail (`RowEvent::Open`,
-/// Complexity Tracking "Enter on album/artist/playlist rows opens the
-/// detail view").
+/// surface.md §5, FR-004, contracts/list-row.md): artwork, per-kind
+/// content, an accessible `ListItem` name including the availability
+/// reason, and the trailing six-action menu — reachable by the "…" button
+/// (U+2026 — the midline U+22EF is not in egui's bundled fonts and drew as
+/// tofu on the 2026-09-17 manual walk), right-click, or `Shift+F10` while
+/// the row has focus. A single primary click reports `RowEvent::Select`
+/// (FR-006); double-click/Enter plays a track row now, or opens a
+/// non-track row's detail (`RowEvent::Open`, Complexity Tracking "Enter on
+/// album/artist/playlist rows opens the detail view"). `selected` recolours
+/// the row's fill and every text run `accent`/`text_on_accent`
+/// (FR-008/FR-031) and marks the accesskit node accordingly (FR-011) —
+/// the caller owns the view's own [`RowSelection`] and decides `selected`
+/// from it (data-model.md §4/§6).
 ///
 /// Applies nothing itself: the caller matches the returned [`RowEvent`]
-/// and drives `PlaybackController`/`NotificationCenter` (design note 6).
-pub fn list_row(ui: &mut Ui, artwork: &mut ArtworkCache, entity: &RowEntity) -> Option<RowEvent> {
+/// and drives `PlaybackController`/`NotificationCenter`/`RowSelection`
+/// (design note 6).
+pub fn list_row(
+    ui: &mut Ui,
+    artwork: &mut ArtworkCache,
+    entity: &RowEntity,
+    selected: bool,
+) -> Option<RowEvent> {
     let height = row_height(entity);
     let name = accessible_name(entity);
-    let row_id = ui.id().with(entity_salt(entity));
+    let row_id = ui.id().with(entity_key(entity));
 
     let (_auto_id, rect) = ui.allocate_space(Vec2::new(ui.available_width(), height));
     // Reserve the row's hover/pressed fill's paint order now, before any
@@ -512,6 +702,10 @@ pub fn list_row(ui: &mut Ui, artwork: &mut ArtworkCache, entity: &RowEntity) -> 
     // (design note 7).
     let where_to_put_background = ui.painter().add(egui::Shape::Noop);
     let row_response = ui.interact(rect, row_id, Sense::click());
+    // Contract A7/FR-010: every row states, on hover, that a second click
+    // or Enter opens (or plays) it. A rendered tooltip can't be driven
+    // headlessly (research R13) — this is manual scenario M4.
+    let row_response = row_response.on_hover_text(tr(open_hint_key(entity)));
     // 007, contracts/ui-actions.md §2: claim this row's own keys
     // (`Shift+F10` for the actions menu, plus the toolkit set it would
     // get anyway) so the dispatcher never intercepts them.
@@ -524,6 +718,9 @@ pub fn list_row(ui: &mut Ui, artwork: &mut ArtworkCache, entity: &RowEntity) -> 
     ui.ctx().accesskit_node_builder(row_response.id, |b| {
         b.set_role(Role::ListItem);
         b.set_label(name.clone());
+        // Contract A5, FR-011: role/label stay exactly as above (FR-025) —
+        // this is the only new thing the node gains.
+        b.set_selected(selected);
     });
 
     // Computed before drawing content, so the actions menu (drawn inside
@@ -536,19 +733,25 @@ pub fn list_row(ui: &mut Ui, artwork: &mut ArtworkCache, entity: &RowEntity) -> 
 
     let mut action = None;
     if ui.is_rect_visible(rect) {
-        // The row's own hover/pressed fill (FR-009, contract I6): painted
-        // into the shape index reserved above, beneath the content this
-        // block draws next — zero layout cost, `row_response`'s own
-        // fields only (I7), never `widget_state()`.
+        // The row's own hover/pressed/selected fill (FR-008, FR-009,
+        // contract A1/A2/I6): painted into the shape index reserved above,
+        // beneath the content this block draws next — zero layout cost,
+        // `row_response`'s own fields only (I7), never `widget_state()`.
+        // Selected rows fill `accent`; hover/pressed still blend *over*
+        // that base exactly as they do over `surface_base` when unselected
+        // (data-model.md §7) — no new colour or alpha (FR-024).
         let roles = theme::roles(ui.visuals());
+        let base = if selected {
+            roles.accent
+        } else {
+            roles.surface_base
+        };
         let fill = if row_response.is_pointer_button_down_on() {
-            Some(
-                roles
-                    .surface_base
-                    .blend(theme::controls::pressed_fill(roles)),
-            )
+            Some(base.blend(theme::controls::pressed_fill(roles)))
         } else if row_response.hovered() {
-            Some(roles.surface_base.blend(theme::controls::hover_fill(roles)))
+            Some(base.blend(theme::controls::hover_fill(roles)))
+        } else if selected {
+            Some(base)
         } else {
             None
         };
@@ -565,16 +768,37 @@ pub fn list_row(ui: &mut Ui, artwork: &mut ArtworkCache, entity: &RowEntity) -> 
                 .layout(Layout::left_to_right(Align::Center)),
         );
         draw_artwork(&mut content_ui, artwork, entity);
-        // Reserve the trailing "…" button's width so the text column
-        // truncates instead of running underneath it.
-        let text_width = (content_ui.available_width() - ACTIONS_RESERVED_WIDTH).max(0.0);
+        // Reserve the trailing region — the duration column plus the "…"
+        // button's width — so the text column truncates before either
+        // (contract L1/L2, FR-001/FR-003).
+        let text_width = content_column_width(content_ui.available_width(), content_ui.ctx());
         content_ui.vertical(|ui| {
             ui.set_max_width(text_width);
             ui.set_min_width(text_width);
-            draw_content(ui, entity);
+            draw_content(ui, entity, selected);
         });
         content_ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             action = actions_menu(ui, &name, open_via_row);
+            // The trailing duration column (contract L1/L5, FR-001/FR-002):
+            // a fixed `duration_measure` width ahead of the "…" menu, right-
+            // aligned. Only a Track row draws a figure into it; Album/
+            // Artist/Playlist rows reserve the same width and leave it
+            // empty, so the trailing edge lines up identically for every
+            // row kind (contract L2).
+            let duration_width = theme::duration_measure(ui.ctx());
+            ui.allocate_ui_with_layout(
+                Vec2::new(duration_width, height),
+                Layout::right_to_left(Align::Center),
+                |ui| {
+                    if let RowEntity::Track(track) = entity {
+                        ui.add(Label::new(selected_or_weak(
+                            duration_label(track),
+                            selected,
+                            roles,
+                        )));
+                    }
+                },
+            );
         });
     }
 
@@ -589,6 +813,18 @@ pub fn list_row(ui: &mut Ui, artwork: &mut ArtworkCache, entity: &RowEntity) -> 
             RowEntity::Track(_) => RowEvent::Action(RowAction::PlayNow),
             RowEntity::Album(_) | RowEntity::Artist(_) | RowEntity::Playlist(_) => RowEvent::Open,
         });
+    }
+
+    // Contract S1/S7: a plain primary click selects and nothing else — the
+    // actions menu's own button (drawn after `row_response` above, so it
+    // wins egui's "in tie, pick last = topmost" hit-test) never reaches
+    // here, so it never reports `Select`.
+    if row_response.clicked() {
+        // Contract S12: a primary click also takes keyboard focus, so an
+        // immediately-following Enter activates this row (`has_focus() &&
+        // Enter` above) rather than whatever last held focus.
+        row_response.request_focus();
+        return Some(RowEvent::Select);
     }
 
     None
@@ -849,7 +1085,7 @@ mod tests {
         let entity = RowEntity::Track(track("spotify:track:a", Availability::Available));
 
         let mut output = ctx.run_ui(RawInput::default(), |ui| {
-            list_row(ui, &mut cache, &entity);
+            list_row(ui, &mut cache, &entity, false);
         });
         let update = output
             .platform_output
@@ -989,6 +1225,233 @@ mod tests {
         assert_eq!(
             artwork_decision(Some(ArtworkState::Ready(texture_id)), "Abbey Road"),
             ArtworkDecision::Texture(texture_id)
+        );
+    }
+
+    // -- Three-column grid (contract L1/L2/L5, FR-001-003) ------------------
+
+    #[test]
+    fn content_column_width_follows_the_l1_formula() {
+        egui::__run_test_ctx(|ctx| {
+            for available in [1000.0_f32, 300.0, 50.0, 0.0] {
+                let expected =
+                    (available - ACTIONS_RESERVED_WIDTH - theme::duration_measure(ctx)).max(0.0);
+                assert_eq!(content_column_width(available, ctx), expected);
+            }
+            // The formula takes no row-height/entity parameter at all, so it
+            // holds identically whether the row draws at `ROW_HEIGHT`
+            // (Track) or `WIDE_ROW_HEIGHT` (Album/Artist/Playlist).
+            assert_ne!(
+                row_height(&RowEntity::Track(track(
+                    "spotify:track:a",
+                    Availability::Available
+                ))),
+                row_height(&RowEntity::Album(album("Abbey Road")))
+            );
+        });
+    }
+
+    #[test]
+    fn content_column_width_is_identical_for_every_row_kind() {
+        egui::__run_test_ctx(|ctx| {
+            let available = 400.0;
+            let artist = RowEntity::Artist(ArtistRef {
+                id: ArtistId::new("spotify:artist:a").unwrap(),
+                name: "Radiohead".to_string(),
+                artwork_url: None,
+            });
+            let playlist = RowEntity::Playlist(PlaylistRef {
+                id: PlaylistId::new("spotify:playlist:a").unwrap(),
+                name: "Road Trip".to_string(),
+                owner_name: "Alex".to_string(),
+                editable: true,
+                artwork_url: None,
+                track_count: 0,
+                revision: None,
+            });
+            let kinds = [
+                RowEntity::Track(track("spotify:track:a", Availability::Available)),
+                RowEntity::Album(album("Abbey Road")),
+                artist,
+                playlist,
+            ];
+            let widths: Vec<f32> = kinds
+                .iter()
+                .map(|_kind| content_column_width(available, ctx))
+                .collect();
+            for w in &widths {
+                assert!((w - widths[0]).abs() < f32::EPSILON, "{widths:?}");
+            }
+        });
+    }
+
+    #[test]
+    fn track_detail_excludes_the_duration_suffix() {
+        let mut t = track("spotify:track:a", Availability::Available);
+        t.duration_ms = 65_000; // "1:05"
+        let detail = track_detail(&t);
+        assert_eq!(
+            detail,
+            format!("{} — {}", t.artists.join(", "), t.album.clone().unwrap())
+        );
+        assert!(!detail.ends_with(&format_duration(t.duration_ms)));
+    }
+
+    #[test]
+    fn duration_label_is_built_through_mono_text() {
+        let mut t = track("spotify:track:a", Availability::Available);
+        t.duration_ms = 65_000;
+        assert_eq!(
+            duration_label(&t),
+            theme::mono_text(format_duration(t.duration_ms))
+        );
+    }
+
+    // -- format_duration rollover (contract L4, FR-033) --------------------
+
+    #[test]
+    fn format_duration_rolls_over_at_exactly_sixty_minutes() {
+        assert_eq!(format_duration(0), "0:00");
+        assert_eq!(format_duration(3_599_000), "59:59");
+        assert_eq!(format_duration(3_600_000), "1:00:00");
+        assert_eq!(format_duration(3_855_000), "1:04:15");
+    }
+
+    // -- Tooltip key selector (contract A7, FR-010) -------------------------
+
+    #[test]
+    fn open_hint_key_is_track_specific_else_the_shared_entity_hint() {
+        let track_entity = RowEntity::Track(track("spotify:track:a", Availability::Available));
+        assert_eq!(open_hint_key(&track_entity), "row-open-hint-track");
+
+        let album_entity = RowEntity::Album(album("Abbey Road"));
+        assert_eq!(open_hint_key(&album_entity), "row-open-hint-entity");
+
+        let artist_entity = RowEntity::Artist(ArtistRef {
+            id: ArtistId::new("spotify:artist:a").unwrap(),
+            name: "Radiohead".to_string(),
+            artwork_url: None,
+        });
+        assert_eq!(open_hint_key(&artist_entity), "row-open-hint-entity");
+
+        let playlist_entity = RowEntity::Playlist(PlaylistRef {
+            id: PlaylistId::new("spotify:playlist:a").unwrap(),
+            name: "Road Trip".to_string(),
+            owner_name: "Alex".to_string(),
+            editable: true,
+            artwork_url: None,
+            track_count: 0,
+            revision: None,
+        });
+        assert_eq!(open_hint_key(&playlist_entity), "row-open-hint-entity");
+    }
+
+    // -- RowSelection (contracts/list-row.md S2-S6, S9) ---------------------
+
+    #[test]
+    fn selecting_twice_leaves_exactly_one_row_selected_even_across_lists() {
+        let mut selection = RowSelection::default();
+        selection.select("library-saved-tracks", "spotify:track:a", 0);
+        assert!(selection.is_selected("library-saved-tracks", "spotify:track:a", 0));
+
+        // A second `select` — even in a different list of the same view —
+        // overwrites the one field (contract S2, Clarification 2).
+        selection.select("library-saved-albums", "spotify:album:a", 2);
+        assert!(!selection.is_selected("library-saved-tracks", "spotify:track:a", 0));
+        assert!(selection.is_selected("library-saved-albums", "spotify:album:a", 2));
+    }
+
+    #[test]
+    fn is_selected_distinguishes_the_same_key_at_two_indices() {
+        let mut selection = RowSelection::default();
+        selection.select("library-saved-tracks", "spotify:track:a", 3);
+        assert!(selection.is_selected("library-saved-tracks", "spotify:track:a", 3));
+        assert!(!selection.is_selected("library-saved-tracks", "spotify:track:a", 7));
+    }
+
+    #[test]
+    fn reconcile_keeps_the_selection_when_the_stored_index_still_matches() {
+        let mut selection = RowSelection::default();
+        selection.select("library-saved-tracks", "spotify:track:a", 40);
+        // Outside any plausible rendered range — reconcile is keyed on the
+        // stored index, not on what a viewport currently shows (S3).
+        selection.reconcile("library-saved-tracks", |i| {
+            assert_eq!(i, 40);
+            Some("spotify:track:a".to_string())
+        });
+        assert!(selection.is_selected("library-saved-tracks", "spotify:track:a", 40));
+    }
+
+    #[test]
+    fn reconcile_clears_on_a_different_key_at_the_stored_index() {
+        let mut selection = RowSelection::default();
+        selection.select("library-saved-tracks", "spotify:track:a", 0);
+        selection.reconcile("library-saved-tracks", |_i| {
+            Some("spotify:track:b".to_string())
+        });
+        assert!(!selection.is_selected("library-saved-tracks", "spotify:track:a", 0));
+    }
+
+    #[test]
+    fn reconcile_clears_on_none_removal_or_a_shrunk_list() {
+        let mut selection = RowSelection::default();
+        selection.select("library-saved-tracks", "spotify:track:a", 0);
+        selection.reconcile("library-saved-tracks", |_i| None);
+        assert!(!selection.is_selected("library-saved-tracks", "spotify:track:a", 0));
+    }
+
+    #[test]
+    fn reconcile_calls_key_at_at_most_once_and_only_on_a_matching_salt() {
+        use std::cell::Cell;
+
+        let calls = Cell::new(0);
+        let mut selection = RowSelection::default();
+        selection.select("library-saved-tracks", "spotify:track:a", 0);
+
+        // A non-matching salt must never invoke `key_at` (O(1), contract
+        // S5) — `FnOnce` alone can't prove zero calls, so this closure
+        // records its own invocation count instead.
+        selection.reconcile("library-saved-albums", |i| {
+            calls.set(calls.get() + 1);
+            Some(format!("should-not-be-called-{i}"))
+        });
+        assert_eq!(
+            calls.get(),
+            0,
+            "key_at must not run for a non-matching list"
+        );
+        assert!(selection.is_selected("library-saved-tracks", "spotify:track:a", 0));
+
+        selection.reconcile("library-saved-tracks", |i| {
+            calls.set(calls.get() + 1);
+            (i == 0).then(|| "spotify:track:a".to_string())
+        });
+        assert_eq!(
+            calls.get(),
+            1,
+            "key_at must run exactly once for a matching list"
+        );
+    }
+
+    #[test]
+    fn row_selection_has_no_settings_sourced_construction_path() {
+        // Contract S9, FR-028: `RowSelection` is never persisted — pinned
+        // structurally, not just by this runtime check: neither
+        // `RowSelection` nor `SelectedRow` derives `Serialize`/
+        // `Deserialize` (data-model.md §4), and `modplayer-ui` does not
+        // even depend on `serde` for it. At runtime, its only two states
+        // are `Default` (empty) and whatever `select`/`reconcile` produce
+        // this session — there is no `From<RawSettings>` or
+        // settings-store-sourced constructor to hydrate one from
+        // `settings.toml`.
+        let mut selection = RowSelection::default();
+        assert_eq!(selection, RowSelection::default());
+        selection.select("library-saved-tracks", "spotify:track:a", 0);
+        selection.clear();
+        assert_eq!(
+            selection,
+            RowSelection::default(),
+            "the only way back to the empty state is `clear`, never a persisted value"
         );
     }
 }

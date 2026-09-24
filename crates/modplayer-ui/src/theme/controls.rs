@@ -106,6 +106,16 @@ pub const FOCUS_RING_WIDTH: f32 = 2.0;
 /// sits between control and ring.
 pub const FOCUS_RING_GAP: f32 = 1.0;
 
+/// The Library tab strip's active-tab underline (016-list-row-and-panel-
+/// components, data-model.md §9, contracts/tab-strip.md T3): `accent`, no
+/// new colour, no eleventh role.
+pub fn tab_underline(roles: &Roles) -> Stroke {
+    Stroke::new(TAB_UNDERLINE_WIDTH, roles.accent)
+}
+
+/// The underline's thickness (FR-034) — never a literal at the call site.
+pub const TAB_UNDERLINE_WIDTH: f32 = 2.0;
+
 // ---------------------------------------------------------------------
 // §5 — The switch (FR-007)
 // ---------------------------------------------------------------------
@@ -447,6 +457,29 @@ mod tests {
         for roles in [&LIGHT, &DARK] {
             assert_eq!(mark_color(roles, true), roles.surface_base);
             assert_eq!(mark_color(roles, false), roles.text_secondary);
+        }
+    }
+
+    // -------------------------------------------------------------
+    // T053 — TAB_UNDERLINE_WIDTH / tab_underline (contracts/tab-strip.md
+    // T2/T3, FR-034, FR-024)
+    // -------------------------------------------------------------
+
+    /// T2: the underline's thickness is a named constant beside
+    /// `FOCUS_RING_WIDTH`, never a literal at the call site.
+    #[test]
+    fn tab_underline_width_is_a_named_constant() {
+        assert_eq!(TAB_UNDERLINE_WIDTH, 2.0);
+    }
+
+    /// T3: the underline's colour is the `accent` role — no new colour, no
+    /// eleventh role — in both themes.
+    #[test]
+    fn tab_underline_is_accent_stroke_both_themes() {
+        for roles in [&LIGHT, &DARK] {
+            let stroke = tab_underline(roles);
+            assert_eq!(stroke.width, TAB_UNDERLINE_WIDTH);
+            assert_eq!(stroke.color, roles.accent);
         }
     }
 }

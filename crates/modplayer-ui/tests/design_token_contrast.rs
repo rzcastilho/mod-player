@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 
 //! FR-018b, contracts/design-tokens.md C1-C7: every contrast floor this
 //! feature promises, pinned so a future value change fails the build
@@ -8,10 +9,14 @@
 //! `bg.blend(fg.gamma_multiply(alpha))` egui itself paints with
 //! (research R16).
 
-use egui::Color32;
+use egui::epaint::ClippedShape;
+use egui::{Color32, Context, RawInput, Shape};
+use modplayer_audio_source::{Availability, TrackId, TrackRef};
+use modplayer_ui::artwork::ArtworkCache;
+use modplayer_ui::rows::{RowEntity, list_row};
 use modplayer_ui::theme::MARKER_PALETTE;
 use modplayer_ui::theme::contrast::{composite, ratio};
-use modplayer_ui::theme::tokens::{DARK, LIGHT};
+use modplayer_ui::theme::tokens::{self, DARK, LIGHT};
 
 const TEXT_FLOOR: f32 = 4.5;
 const NON_TEXT_FLOOR: f32 = 3.0;
@@ -120,6 +125,90 @@ fn marker_palette_clears_three_to_one() {
 
 /// C7: `ratio` is symmetric, `1.0` for equal colours, `21.0` for black vs
 /// white.
+/// The widest selected-row case: a Track with an availability reason
+/// (region-locked) and an explicit "E" badge — every text run this row can
+/// draw (title, secondary line, duration, badge, reason) in one frame. An
+/// `artwork_url` keeps `draw_artwork` in its `Loading` state (a plain
+/// square, no text) rather than `Failed`'s initials placeholder, which
+/// paints outside this contract's named row text runs in the ambient
+/// `visuals().text_color()`, not `text_on_accent`.
+fn widest_track_entity(id: &str) -> RowEntity {
+    let mut track = TrackRef::new(
+        TrackId::new(format!("spotify:track:{id}")).unwrap(),
+        format!("Title {id}"),
+        vec!["Artist".to_string()],
+        None,
+        Some(format!("https://example.invalid/{id}.png")),
+        180_000,
+        Availability::UnavailableRegion,
+    );
+    track.explicit = true;
+    RowEntity::Track(track)
+}
+
+/// Every colour any *recoloured* text run in `shapes` resolved to (mirrors
+/// `tests/rows.rs`'s own `text_colors` helper): `RichText::color`/`.weak()`
+/// both bake into the `Galley`'s `LayoutJob` at layout time. Excludes
+/// `Color32::PLACEHOLDER` — egui's sentinel for a run with no explicit
+/// colour (e.g. the trailing "…" menu button's own label), resolved to the
+/// ambient widget colour only at paint time and not one of contract A4's
+/// named row text runs (title, secondary line, duration, badge, reason).
+fn text_colors(shapes: &[ClippedShape]) -> Vec<Color32> {
+    let mut colors: Vec<Color32> = shapes
+        .iter()
+        .filter_map(|clipped| match &clipped.shape {
+            Shape::Text(t) => Some(t.galley.job.sections.iter().map(|s| s.format.color)),
+            _ => None,
+        })
+        .flatten()
+        .filter(|c| *c != Color32::PLACEHOLDER)
+        .collect();
+    colors.sort_by_key(|c| c.to_array());
+    colors.dedup();
+    colors
+}
+
+/// A4 (FR-031, NFR-6.5, SC-011): every text run on a selected row — sampled
+/// on the widest case, a Track with an availability reason and an explicit
+/// badge — clears the 4.5:1 text floor against the row's `accent` fill, in
+/// both themes.
+#[test]
+fn selected_row_text_clears_the_floor_against_accent() {
+    for dark in [false, true] {
+        let ctx = Context::default();
+        let theme = if dark {
+            egui::Theme::Dark
+        } else {
+            egui::Theme::Light
+        };
+        ctx.set_theme(egui::ThemePreference::from(theme));
+        let roles = *tokens::for_dark_mode(dark);
+        let mut cache = ArtworkCache::new();
+        let entity = widest_track_entity(if dark {
+            "contrast-a4-dark"
+        } else {
+            "contrast-a4-light"
+        });
+
+        let output = ctx.run_ui(RawInput::default(), |ui| {
+            let _ = list_row(ui, &mut cache, &entity, true);
+        });
+        let colors = text_colors(&output.shapes);
+        output.drop_without_applying_deltas();
+        assert!(
+            !colors.is_empty(),
+            "dark={dark}: a selected row with a reason and badge must draw text runs"
+        );
+        for colour in colors {
+            let measured = ratio(colour, roles.accent);
+            assert!(
+                measured >= TEXT_FLOOR,
+                "dark={dark}: selected-row text {colour:?} vs accent = {measured:.2}, floor {TEXT_FLOOR}"
+            );
+        }
+    }
+}
+
 #[test]
 fn ratio_matches_the_wcag_reference() {
     assert!((ratio(Color32::WHITE, Color32::WHITE) - 1.0).abs() < 1e-3);

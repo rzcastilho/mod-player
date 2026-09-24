@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use egui::accesskit::Role;
-use egui::{Context, Event, OpenUrl, OutputCommand, PointerButton, Pos2, RawInput, Rect};
+use egui::{Context, Event, OpenUrl, OutputCommand, PointerButton, Pos2, RawInput, Rect, Ui};
 use modplayer_audio_io::{FakeBackend, FakeDevice};
 use modplayer_audio_source::{
     AlbumId, AlbumRef, ArtistId, ArtistRef, Availability, CatalogError, LibraryItem, LibraryPage,
@@ -28,6 +28,8 @@ use modplayer_ui::artwork::ArtworkCache;
 use modplayer_ui::detail_view::{self, DetailOutcome, DetailTarget};
 use modplayer_ui::getting_started::{self, GettingStartedOutcome};
 use modplayer_ui::library_view::{self, LibraryOutcome, LibraryTab, LibraryViewState};
+use modplayer_ui::rows::RowSelection;
+use modplayer_ui::theme;
 
 struct TempDir(PathBuf);
 
@@ -305,8 +307,9 @@ fn render_detail(
     let ctx = Context::default();
     ctx.enable_accesskit();
     let mut outcome = DetailOutcome::None;
+    let mut state = detail_view::DetailViewState::default();
     let output = ctx.run_ui(input, |ui| {
-        outcome = detail_view::show(ui, controller, artwork, target);
+        outcome = detail_view::show(ui, controller, artwork, target, &mut state);
     });
     (collect_nodes(&ctx, output), outcome)
 }
@@ -432,6 +435,208 @@ fn opens_on_saved_tracks_by_default() {
     );
 }
 
+// -- Tab strip: underline / counts (contracts/tab-strip.md T1, T4-T8) ---
+
+/// Every `Role::Label` node in `nodes` whose accessible name is purely
+/// ASCII digits — a tab count's own node (a sibling of the `Role::Tab`,
+/// FR-014/FR-016). `Role::Label` only: egui's accesskit output nests a
+/// `Role::TextRun` child carrying the same text, which would otherwise
+/// double-count each label.
+fn digit_labels(nodes: &[Node]) -> Vec<String> {
+    nodes
+        .iter()
+        .filter(|n| n.role == Role::Label)
+        .filter_map(Node::accessible_name)
+        .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+        .map(str::to_string)
+        .collect()
+}
+
+/// **T1** (FR-013): the active tab's paint is a stroke along its bottom
+/// edge, never a filled `accent` background — `selectable_label`'s old
+/// filled/toggle look must be gone.
+#[test]
+fn active_tab_paints_a_stroke_not_a_filled_accent_rect() {
+    for dark_mode in [false, true] {
+        let (mut controller, _handle, _dir) = active_controller("tab-stroke");
+        let mut artwork = ArtworkCache::new();
+        let mut state = LibraryViewState::default();
+
+        let ctx = Context::default();
+        theme::apply_tokens(&ctx);
+        ctx.set_theme(if dark_mode {
+            egui::Theme::Dark
+        } else {
+            egui::Theme::Light
+        });
+        let roles = theme::tokens::for_dark_mode(dark_mode);
+
+        let output = ctx.run_ui(default_input(), |ui| {
+            let _ = library_view::show(ui, &mut controller, &mut artwork, &mut state);
+        });
+
+        let has_accent_filled_rect = output.shapes.iter().any(
+            |clipped| matches!(&clipped.shape, egui::Shape::Rect(r) if r.fill == roles.accent),
+        );
+        let has_accent_stroke = output.shapes.iter().any(|clipped| {
+            matches!(
+                &clipped.shape,
+                egui::Shape::LineSegment { stroke, .. } if stroke.color == roles.accent
+            )
+        });
+        output.drop_without_applying_deltas();
+
+        assert!(
+            !has_accent_filled_rect,
+            "dark={dark_mode}: the active tab must not paint a filled accent rect"
+        );
+        assert!(
+            has_accent_stroke,
+            "dark={dark_mode}: expected an accent-coloured underline stroke under the active tab"
+        );
+    }
+}
+
+/// **T5**: while `library_status().loading` is `true`, no tab shows a
+/// count at all.
+#[test]
+fn no_tab_shows_a_count_while_loading() {
+    let (store, dir) = fresh_store("tab-count-loading");
+    let paths = LibraryPaths::with_dir(dir.path().join("does-not-exist"));
+    let mut controller =
+        PlaybackController::new(FakeBackend::new(vec![]), SyntheticHost::new(44_100), store)
+            .with_library_paths(Some(paths));
+    assert!(controller.library_status().loading);
+
+    let mut artwork = ArtworkCache::new();
+    let mut state = LibraryViewState::default();
+    let (nodes, _outcome) = render_library(&mut controller, &mut artwork, &mut state);
+
+    assert!(
+        digit_labels(&nodes).is_empty(),
+        "no tab may show a count while loading: {nodes:?}"
+    );
+}
+
+/// **T4/T6**: once loading finishes, all five tabs show a count,
+/// including `0` for an empty-but-loaded list — a hidden count means "not
+/// yet known", never "none".
+#[test]
+fn every_tab_shows_a_count_once_loaded_including_zero() {
+    let (mut controller, handle, _dir) = active_controller("tab-count-loaded");
+    sync_library(&mut controller, &handle, vec![], vec![], vec![], vec![]);
+    assert!(!controller.library_status().loading);
+
+    let mut artwork = ArtworkCache::new();
+    let mut state = LibraryViewState::default();
+    let (nodes, _outcome) = render_library(&mut controller, &mut artwork, &mut state);
+
+    let counts = digit_labels(&nodes);
+    assert_eq!(
+        counts.len(),
+        5,
+        "all five tabs must show their own count once loading finishes: {nodes:?}"
+    );
+    assert!(
+        counts.iter().all(|c| c == "0"),
+        "an empty but loaded list must show 0, not hide the count: {counts:?}"
+    );
+}
+
+/// **T7**: a tab's count is exactly its own in-memory list length, and it
+/// updates in place as a later sync grows the set.
+#[test]
+fn a_tabs_count_is_its_own_list_length_and_updates_as_it_grows() {
+    let (mut controller, handle, _dir) = active_controller("tab-count-grows");
+    sync_library(
+        &mut controller,
+        &handle,
+        vec![LibraryItem::Track {
+            track: track("spotify:track:a", "Track A"),
+            added_at: None,
+        }],
+        vec![],
+        vec![],
+        vec![],
+    );
+    assert_eq!(controller.library().saved_tracks().len(), 1);
+
+    let mut artwork = ArtworkCache::new();
+    let mut state = LibraryViewState::default();
+    let (nodes, _outcome) = render_library(&mut controller, &mut artwork, &mut state);
+    assert!(
+        has_name(&nodes, "1"),
+        "Saved Tracks' count must equal its own list length (1): {nodes:?}"
+    );
+
+    sync_library(
+        &mut controller,
+        &handle,
+        vec![
+            LibraryItem::Track {
+                track: track("spotify:track:a", "Track A"),
+                added_at: None,
+            },
+            LibraryItem::Track {
+                track: track("spotify:track:b", "Track B"),
+                added_at: None,
+            },
+        ],
+        vec![],
+        vec![],
+        vec![],
+    );
+    assert_eq!(controller.library().saved_tracks().len(), 2);
+    let (nodes, _outcome) = render_library(&mut controller, &mut artwork, &mut state);
+    assert!(
+        has_name(&nodes, "2"),
+        "the count must update in place as a background sync grows the set: {nodes:?}"
+    );
+}
+
+/// **T8** (FR-015): a tab count renders through `theme::mono_text`.
+#[test]
+fn tab_counts_render_in_the_mono_role() {
+    let (mut controller, handle, _dir) = active_controller("tab-count-mono");
+    sync_library(
+        &mut controller,
+        &handle,
+        vec![LibraryItem::Track {
+            track: track("spotify:track:a", "Track A"),
+            added_at: None,
+        }],
+        vec![],
+        vec![],
+        vec![],
+    );
+
+    let mut artwork = ArtworkCache::new();
+    let mut state = LibraryViewState::default();
+    let ctx = Context::default();
+    let output = ctx.run_ui(default_input(), |ui| {
+        let _ = library_view::show(ui, &mut controller, &mut artwork, &mut state);
+    });
+
+    let mono_family = theme::tokens::mono_font_id().family;
+    let found = output.shapes.iter().any(|clipped| match &clipped.shape {
+        egui::Shape::Text(t) => {
+            t.galley.job.text == "1"
+                && t.galley
+                    .job
+                    .sections
+                    .iter()
+                    .any(|s| s.format.font_id.family == mono_family)
+        }
+        _ => false,
+    });
+    output.drop_without_applying_deltas();
+
+    assert!(
+        found,
+        "the Saved Tracks tab's count (\"1\") must render through theme::mono_text"
+    );
+}
+
 // -- Loading / first-sync-failed / retry --------------------------------
 
 #[test]
@@ -518,6 +723,168 @@ fn first_sync_failed_with_no_snapshot_shows_retry_fr021() {
     assert!(
         handle.record_commands().len() > commands_before,
         "Retry must issue a fresh FetchLibrary command"
+    );
+}
+
+// -- Selection (contract S8/S10) -------------------------------------------
+
+/// The bounds of the first node with `role`/`name` in the accesskit tree
+/// `output` carries, as a click-able `Pos2` centre (mirrors
+/// `getting_started_tutorial_opens_url`'s own discovery step).
+fn find_node_center(mut output: egui::FullOutput, role: Role, name: &str) -> Pos2 {
+    let update = output
+        .platform_output
+        .accesskit_update
+        .take()
+        .expect("accesskit_update should be populated once enabled");
+    output.drop_without_applying_deltas();
+    let bounds = update
+        .nodes
+        .iter()
+        .find(|(_, n)| n.role() == role && n.label() == Some(name))
+        .and_then(|(_, n)| n.bounds())
+        .unwrap_or_else(|| panic!("expected a {role:?} node named {name:?}"));
+    Pos2::new(
+        ((bounds.x0 + bounds.x1) / 2.0) as f32,
+        ((bounds.y0 + bounds.y1) / 2.0) as f32,
+    )
+}
+
+fn click_at(ctx: &Context, pos: Pos2, mut draw: impl FnMut(&mut Ui)) {
+    let mut press = default_input();
+    press.events.push(Event::PointerButton {
+        pos,
+        button: PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::default(),
+    });
+    ctx.run_ui(press, |ui| draw(ui))
+        .drop_without_applying_deltas();
+
+    let mut release = default_input();
+    release.events.push(Event::PointerButton {
+        pos,
+        button: PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::default(),
+    });
+    ctx.run_ui(release, |ui| draw(ui))
+        .drop_without_applying_deltas();
+}
+
+/// **S8** (FR-028): selecting a row, then switching the active tab, clears
+/// the selection — even though every tab shares one `RowSelection` field.
+#[test]
+fn selecting_a_row_then_switching_tabs_clears_the_selection() {
+    let (mut controller, handle, _dir) = active_controller("select-then-tab-switch");
+    sync_library(
+        &mut controller,
+        &handle,
+        vec![LibraryItem::Track {
+            track: track("spotify:track:a", "Track A"),
+            added_at: None,
+        }],
+        vec![],
+        vec![],
+        vec![],
+    );
+
+    let mut artwork = ArtworkCache::new();
+    let mut state = LibraryViewState::default();
+    assert_eq!(state.selection, RowSelection::default());
+
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+
+    let discover = ctx.run_ui(default_input(), |ui| {
+        let _ = library_view::show(ui, &mut controller, &mut artwork, &mut state);
+    });
+    let row_center = find_node_center(discover, Role::ListItem, "Track A — Artist");
+
+    click_at(&ctx, row_center, |ui| {
+        let _ = library_view::show(ui, &mut controller, &mut artwork, &mut state);
+    });
+    assert_ne!(
+        state.selection,
+        RowSelection::default(),
+        "a plain click must select the row"
+    );
+
+    let discover_tab = ctx.run_ui(default_input(), |ui| {
+        let _ = library_view::show(ui, &mut controller, &mut artwork, &mut state);
+    });
+    let tab_center = find_node_center(discover_tab, Role::Tab, &tr("library-tab-saved-albums"));
+
+    click_at(&ctx, tab_center, |ui| {
+        let _ = library_view::show(ui, &mut controller, &mut artwork, &mut state);
+    });
+    assert_eq!(
+        state.tab,
+        LibraryTab::SavedAlbums,
+        "the click must have switched tabs"
+    );
+    assert_eq!(
+        state.selection,
+        RowSelection::default(),
+        "switching tabs must clear the prior tab's selection"
+    );
+}
+
+/// **S10**: an un-hydrated (skeleton) row's frame produces no
+/// `Role::ListItem` node — and, since `skeleton_row` senses only hover, a
+/// click landing on it can never select anything.
+#[test]
+fn skeleton_rows_expose_no_list_item_and_never_select() {
+    let (store, dir) = fresh_store("skeleton-no-select");
+    let paths = LibraryPaths::with_dir(dir.path().join("does-not-exist"));
+    let mut controller =
+        PlaybackController::new(FakeBackend::new(vec![]), SyntheticHost::new(44_100), store)
+            .with_library_paths(Some(paths));
+    assert!(controller.library_status().loading);
+
+    let mut artwork = ArtworkCache::new();
+    let mut state = LibraryViewState::default();
+
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+
+    let discover = ctx.run_ui(default_input(), |ui| {
+        let _ = library_view::show(ui, &mut controller, &mut artwork, &mut state);
+    });
+    let update = discover
+        .platform_output
+        .accesskit_update
+        .clone()
+        .expect("accesskit_update should be populated once enabled");
+    let nodes = collect_nodes(&ctx, discover);
+    assert_eq!(
+        count(&nodes, Role::ListItem),
+        0,
+        "a fully-loading tab must render only skeleton rows: {nodes:?}"
+    );
+    // `skeleton_row` senses only hover, so — unlike `list_row`'s
+    // `Sense::click()` — egui never auto-fills its accesskit node's bounds
+    // (`Response::fill_accesskit_node_common` only runs for focusable
+    // widgets). Derive a point just below the (focusable, bounded) tab
+    // row instead: the tab strip is the only thing painted above the
+    // skeleton rows in the loading state.
+    let tab_bottom = update
+        .nodes
+        .iter()
+        .filter(|(_, n)| n.role() == Role::Tab)
+        .filter_map(|(_, n)| n.bounds())
+        .map(|b| b.y1 as f32)
+        .fold(0.0_f32, f32::max);
+    assert!(tab_bottom > 0.0, "expected at least one bounded Tab node");
+    let skeleton_point = Pos2::new(10.0, tab_bottom + 5.0);
+
+    click_at(&ctx, skeleton_point, |ui| {
+        let _ = library_view::show(ui, &mut controller, &mut artwork, &mut state);
+    });
+    assert_eq!(
+        state.selection,
+        RowSelection::default(),
+        "a click on a skeleton row must never select anything"
     );
 }
 
@@ -848,6 +1215,7 @@ fn wide_row_action_is_deferred_until_its_track_list_lands() {
     let mut state = LibraryViewState {
         tab: LibraryTab::Playlists,
         pending_action: Some((entity, RowAction::PlayNext)),
+        ..Default::default()
     };
     let mut artwork = ArtworkCache::new();
     // Still in flight: the parked action stays parked.
@@ -916,8 +1284,9 @@ fn album_detail_shows_header_and_tracks_in_album_order() {
     let ctx = Context::default();
     ctx.enable_accesskit();
     let mut outcome = DetailOutcome::None;
+    let mut state = detail_view::DetailViewState::default();
     let mut output = ctx.run_ui(default_input(), |ui| {
-        outcome = detail_view::show(ui, &mut controller, &mut artwork, &target);
+        outcome = detail_view::show(ui, &mut controller, &mut artwork, &target, &mut state);
     });
     let _ = outcome;
     let update = output

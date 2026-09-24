@@ -36,6 +36,7 @@ status-reconnecting = Reconnecting…
 ## Queue (Queue panel — Phase 4, US2)
 
 queue-toggle = Queue
+queue-panel-title = Queue
 queue-shuffle = Shuffle
 queue-repeat-off = Repeat off
 queue-repeat-one = Repeat one
