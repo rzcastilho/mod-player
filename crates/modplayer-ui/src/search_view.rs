@@ -21,9 +21,10 @@ use modplayer_core::{GroupState, PlaybackController, Severity, tr, tr_args};
 use crate::actions::{self, Claim};
 use crate::artwork::ArtworkCache;
 use crate::rows::{
-    ActingListOutcome, RowAction, RowEntity, RowEvent, TrackListLookup, acting_list, list_row,
-    virtualized_list,
+    ActingListOutcome, RowAction, RowEntity, RowEvent, RowSelection, TrackListLookup, acting_list,
+    entity_key, list_row, virtualized_list,
 };
+use crate::theme;
 use crate::widgets::skeleton::{ROW_HEIGHT, WIDE_ROW_HEIGHT, skeleton_row};
 
 /// A group's own scroll area is capped to this many rows tall (US3 T071,
@@ -40,15 +41,41 @@ const GROUP_ORDER: [SearchKind; 4] = [
     SearchKind::Playlist,
 ];
 
+/// This view's own frame-persistent state (US2, data-model.md §6): one
+/// selection shared by all four groups (contract S2 — exclusive across
+/// groups, not just within one), and the last query it was reconciled
+/// against, so a new query clears the selection (FR-028, contract S8).
+/// Never persisted.
+#[derive(Debug, Default)]
+pub struct SearchViewState {
+    pub selection: RowSelection,
+    pub last_query: String,
+}
+
+/// The `RowSelection` list salt for one `SearchKind` group (data-model.md
+/// §5: "one per `SearchKind` group") — distinct from the tuple id
+/// `virtualized_list`'s own scroll position keys off, since a selection
+/// salt must be a plain `&str`.
+fn selection_salt(kind: SearchKind) -> &'static str {
+    match kind {
+        SearchKind::Track => "search-tracks",
+        SearchKind::Album => "search-albums",
+        SearchKind::Artist => "search-artists",
+        SearchKind::Playlist => "search-playlists",
+    }
+}
+
 /// Draw the Search view: the search box, offline/no-results states, and
 /// every group with hits (contracts/ui-surface.md §2). `focus_requested`
 /// is `Shell::focus_search_requested` — consumed (set back to `false`)
-/// the frame the search box actually takes focus.
+/// the frame the search box actually takes focus. `state` owns this view's
+/// selection (US2).
 pub fn show<B: OutputBackend, H: SourceHost>(
     ui: &mut Ui,
     controller: &mut PlaybackController<B, H>,
     artwork: &mut ArtworkCache,
     focus_requested: &mut bool,
+    state: &mut SearchViewState,
 ) {
     let now = controller.now();
     // A full, owned snapshot: every further read in this function comes
@@ -57,6 +84,13 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     // the same pattern `queue_view::show`'s `controller.queue_view()`
     // snapshot uses.
     let session = controller.search().clone();
+
+    // FR-028, contract S8: a new query invalidates every group's rows, so
+    // the selection they carried no longer applies.
+    if session.query() != state.last_query.as_str() {
+        state.selection.clear();
+        state.last_query = session.query().to_string();
+    }
 
     let search_label = ui.label(tr("search-placeholder"));
     let mut query = session.raw_query().to_string();
@@ -80,7 +114,12 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     }
 
     if session.offline() {
-        ui.label(tr("search-offline"));
+        // FR-006, U2: empty-state copy, capped at the 72-character measure
+        // (research R17).
+        ui.scope(|ui| {
+            ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
+            ui.label(tr("search-offline"));
+        });
         return;
     }
 
@@ -94,15 +133,26 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     }
 
     if session.is_no_results() {
-        ui.label(tr_args(
-            "search-no-results",
-            &[("query", session.query().to_string())],
-        ));
+        // FR-006, U2: empty-state copy, capped at the 72-character measure.
+        ui.scope(|ui| {
+            ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
+            ui.label(tr_args(
+                "search-no-results",
+                &[("query", session.query().to_string())],
+            ));
+        });
         return;
     }
 
     for kind in GROUP_ORDER {
-        show_group(ui, controller, artwork, &session, kind);
+        show_group(
+            ui,
+            controller,
+            artwork,
+            &session,
+            kind,
+            &mut state.selection,
+        );
     }
 }
 
@@ -112,6 +162,7 @@ fn show_group<B: OutputBackend, H: SourceHost>(
     artwork: &mut ArtworkCache,
     session: &modplayer_core::SearchSession,
     kind: SearchKind,
+    selection: &mut RowSelection,
 ) {
     let group = session.group(kind).clone();
     match group {
@@ -128,7 +179,15 @@ fn show_group<B: OutputBackend, H: SourceHost>(
             loading_more,
         } => {
             draw_header(ui, kind);
-            draw_rows(ui, controller, artwork, session.query(), kind, &items);
+            draw_rows(
+                ui,
+                controller,
+                artwork,
+                session.query(),
+                kind,
+                &items,
+                selection,
+            );
             if next_offset.is_some() {
                 let label = tr_args("search-show-more", &[("group", tr(group_header_key(kind)))]);
                 let clicked = ui
@@ -145,7 +204,15 @@ fn show_group<B: OutputBackend, H: SourceHost>(
         GroupState::RateLimited { stale: None } => {}
         GroupState::RateLimited { stale: Some(items) } => {
             draw_header(ui, kind);
-            draw_rows(ui, controller, artwork, session.query(), kind, &items);
+            draw_rows(
+                ui,
+                controller,
+                artwork,
+                session.query(),
+                kind,
+                &items,
+                selection,
+            );
         }
     }
 }
@@ -157,6 +224,7 @@ fn draw_rows<B: OutputBackend, H: SourceHost>(
     query: &str,
     kind: SearchKind,
     items: &[SearchHit],
+    selection: &mut RowSelection,
 ) {
     // Only the Tracks group has any `TrackRef`s to build a loaded-list
     // acting list from (`rows::acting_list`'s "rows currently loaded in
@@ -167,6 +235,14 @@ fn draw_rows<B: OutputBackend, H: SourceHost>(
     // this is a plain clone of a page already held in memory).
     let loaded_tracks = track_hits(items);
     let mut pending: Option<(RowEntity, RowAction)> = None;
+    let salt = selection_salt(kind);
+    // Contract S3/S4, FR-012: re-check the selection against this group's
+    // own current order before drawing.
+    selection.reconcile(salt, |i| {
+        items
+            .get(i)
+            .map(|hit| entity_key(&hit_entity(hit)).to_string())
+    });
     // The query is part of the scroll area's identity so a new query's
     // rows start at the top instead of inheriting the previous result's
     // scroll offset (2026-09-17 manual walk, quickstart M2).
@@ -178,13 +254,17 @@ fn draw_rows<B: OutputBackend, H: SourceHost>(
         Some(skeleton_height(kind) * GROUP_VISIBLE_ROWS),
         |ui, i| {
             let entity = hit_entity(&items[i]);
-            if let Some(RowEvent::Action(action)) = list_row(ui, artwork, &entity) {
-                pending = Some((entity, action));
+            let key = entity_key(&entity);
+            let is_selected = selection.is_selected(salt, key, i);
+            match list_row(ui, artwork, &entity, is_selected) {
+                Some(RowEvent::Action(action)) => pending = Some((entity, action)),
+                Some(RowEvent::Select) => selection.select(salt, key, i),
+                // `RowEvent::Open` (Album/Artist/Playlist detail views land
+                // with US2, `detail_view.rs`, T064) has nothing to
+                // navigate to from this view — search results open no
+                // detail of their own in this slice.
+                Some(RowEvent::Open) | None => {}
             }
-            // `RowEvent::Open` (Album/Artist/Playlist detail views land
-            // with US2, `detail_view.rs`, T064) has nothing to navigate to
-            // from this view — search results open no detail of their own
-            // in this slice.
         },
     );
     if let Some((entity, action)) = pending {
@@ -282,9 +362,16 @@ fn group_header_key(kind: SearchKind) -> &'static str {
     }
 }
 
+/// 014-design-tokens-and-type-scale (US2, T026, data-model.md §6 "Panel/
+/// group headers" -> `theme::section_label`): each result group's own
+/// header renders through the `section` role like every other panel/group
+/// header (`markers::panel`'s "Markers", `settings::controls`'s category
+/// headings). The accessible name stays the exact, un-uppercased `text`
+/// (mirrors those same call sites) — set explicitly rather than left to
+/// derive from the now-uppercased painted text.
 fn draw_header(ui: &mut Ui, kind: SearchKind) {
     let text = tr(group_header_key(kind));
-    let response = ui.label(&text);
+    let response = ui.label(theme::section_label(&text));
     ui.ctx().accesskit_node_builder(response.id, |b| {
         b.set_role(Role::Header);
         b.set_label(text.clone());

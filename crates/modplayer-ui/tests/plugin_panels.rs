@@ -34,6 +34,17 @@ use modplayer_ui::plugin_panels;
 const UI_PANEL: &str = "org.modplayer.fixture.ui-panel";
 const PLUGIN_NAME: &str = "UI Panel fixture";
 
+/// 014-design-tokens-and-type-scale (US2, T034): a bare `Context::default()`
+/// has none of the token `Style`'s `Name("section")` text style installed,
+/// which the panel chrome header now reaches — panicking on layout
+/// otherwise. Install it once, exactly as `App::new`/`App::update` do
+/// (mirrors `controls.rs` test's identically-named helper).
+fn fresh_ctx() -> Context {
+    let ctx = Context::default();
+    modplayer_ui::theme::apply_tokens(&ctx);
+    ctx
+}
+
 struct TempDir(PathBuf);
 
 impl TempDir {
@@ -475,7 +486,7 @@ fn tempo_value(controller: &PlaybackController<FakeBackend, ScriptedHost>) -> Op
 #[test]
 fn every_kind_has_role_and_name() {
     let (mut controller, _dir, _psd, _tsd, _id) = launch_ui_panel("every-kind");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let nodes = render_dock(&ctx, &mut controller);
 
@@ -524,7 +535,7 @@ fn every_kind_has_role_and_name() {
 #[test]
 fn tempo_slider_announces() {
     let (mut controller, _dir, _psd, _tsd, _id) = launch_ui_panel("tempo-announces");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let nodes = render_dock(&ctx, &mut controller);
 
@@ -548,7 +559,7 @@ fn tempo_slider_announces() {
 #[test]
 fn arrows_step_and_emit() {
     let (mut controller, _dir, _psd, _tsd, id) = launch_ui_panel("arrows-step");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     render_dock(&ctx, &mut controller);
 
@@ -587,7 +598,7 @@ fn arrows_step_and_emit() {
 #[test]
 fn drag_emits_once() {
     let (mut controller, _dir, _psd, _tsd, id) = launch_ui_panel("drag-once");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let nodes = render_dock(&ctx, &mut controller);
     let tempo = find_one(&nodes, Role::Slider, "Tempo");
@@ -651,7 +662,7 @@ fn drag_emits_once() {
 #[test]
 fn list_selection_follows_focus() {
     let (mut controller, _dir, _psd, _tsd, id) = launch_ui_panel("list-selection");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let nodes = render_dock(&ctx, &mut controller);
     let mode_b = find_one(&nodes, Role::Button, "Mode B");
@@ -690,7 +701,7 @@ fn list_selection_follows_focus() {
 #[test]
 fn unclaimed_key_falls_through() {
     let (mut controller, _dir, _psd, _tsd, id) = launch_ui_panel("unclaimed-key");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     render_dock(&ctx, &mut controller);
     tab_focus_named(&ctx, &mut controller, "Tempo");
@@ -718,7 +729,7 @@ fn unclaimed_key_falls_through() {
 #[test]
 fn theme_switch_no_events() {
     let (mut controller, _dir, _psd, _tsd, id) = launch_ui_panel("theme-switch");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     render_dock(&ctx, &mut controller);
     let before = tempo_value(&controller);
@@ -778,7 +789,7 @@ fn dock_order_by_name_then_seq() {
     )
     .unwrap_or_else(|e| unreachable!("second panel must register: {e:?}"));
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let nodes = render_dock(&ctx, &mut controller);
 
@@ -845,7 +856,7 @@ fn float_clamped_into_window() {
         },
     );
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let nodes = render_floated(&ctx, &mut controller);
 
@@ -913,7 +924,7 @@ fn placeholder_on_suspend() {
         "the hang probe must suspend the fixture under a 3ms share"
     );
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let nodes = render_dock(&ctx, &mut controller);
 
@@ -943,7 +954,7 @@ fn placeholder_on_suspend() {
 #[test]
 fn header_attribution() {
     let (mut controller, _dir, _psd, _tsd, _id) = launch_ui_panel("header-attribution");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let nodes = render_dock(&ctx, &mut controller);
 
@@ -1042,7 +1053,7 @@ fn launch_section_loop(
 #[test]
 fn section_loop_panel_keyboard_and_names() {
     let (mut controller, _dir, _psd, _tsd, _id) = launch_section_loop("keyboard-and-names");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let nodes = render_dock(&ctx, &mut controller);
 

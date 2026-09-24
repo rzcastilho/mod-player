@@ -87,6 +87,18 @@ fn ready_controller(label: &str) -> (PlaybackController<FakeBackend, ScriptedHos
     (controller, dir)
 }
 
+/// 016-list-row-and-panel-components: `queue_view::show` now wraps its
+/// content in `panel_card`, whose header renders through `theme::
+/// section_label` — the `section` role text style only exists once the
+/// token `Style` is installed (mirrors `now_playing.rs`/`markers.rs`'s own
+/// identically-named helper; a bare `Context::default()` panics resolving
+/// it).
+fn fresh_ctx() -> Context {
+    let ctx = Context::default();
+    modplayer_ui::theme::apply_tokens(&ctx);
+    ctx
+}
+
 fn default_input() -> RawInput {
     RawInput {
         screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0))),
@@ -197,7 +209,7 @@ fn rows_render_in_effective_order_with_badges_and_current_marker() {
     controller.queue().current(); // sanity: a queue exists
     let _ = unavailable_id;
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let texts = rendered_texts(&ctx, &mut controller);
 
@@ -222,7 +234,7 @@ fn rows_render_in_effective_order_with_badges_and_current_marker() {
 #[test]
 fn empty_queue_shows_the_empty_state() {
     let (mut controller, _dir) = ready_controller("empty");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let texts = rendered_texts(&ctx, &mut controller);
     assert!(texts.contains(&tr("queue-empty")));
@@ -240,7 +252,7 @@ fn remove_button_on_the_current_row_advances_the_controllers_queue() {
         Some("spotify:track:a".to_string())
     );
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     // Rows render current-first, so the topmost "Remove" button belongs to
     // "a" (the current item).
@@ -272,7 +284,7 @@ fn move_down_button_reorders_the_controllers_queue() {
         vec!["spotify:track:a", "spotify:track:b", "spotify:track:c"]
     );
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     // Rows render current ("a") first, then "b", then "c" — the second
     // (index 1) "Move down" button belongs to "b".
@@ -302,7 +314,7 @@ fn shuffle_and_repeat_header_controls_mutate_the_controllers_queue() {
         modplayer_audio_source::Repeat::Off
     );
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let shuffle_bounds = nth_button_bounds(&ctx, &mut controller, &tr("queue-shuffle"), 0);
     click_at(&ctx, &mut controller, shuffle_bounds.center());
@@ -318,4 +330,31 @@ fn shuffle_and_repeat_header_controls_mutate_the_controllers_queue() {
         modplayer_audio_source::Repeat::One,
         "clicking the repeat-cycle button must advance Off -> One"
     );
+}
+
+/// C8 (016-list-row-and-panel-components, contracts/panel-card.md): the
+/// Queue panel gains a header reading "Queue", through the shared card.
+#[test]
+fn panel_shows_a_queue_header() {
+    let (mut controller, _dir) = ready_controller("header-title");
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+
+    let mut output = ctx.run_ui(default_input(), |ui| {
+        modplayer_ui::queue_view::show(ui, &mut controller);
+    });
+    let update = output
+        .platform_output
+        .accesskit_update
+        .take()
+        .expect("accesskit_update should be populated once enabled");
+    output.drop_without_applying_deltas();
+
+    let heading = update
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role() == Role::Heading)
+        .unwrap_or_else(|| panic!("expected a Role::Heading node, got {update:?}"));
+    assert_eq!(heading.1.label(), Some(tr("queue-panel-title").as_str()));
+    assert_eq!(tr("queue-panel-title"), "Queue");
 }

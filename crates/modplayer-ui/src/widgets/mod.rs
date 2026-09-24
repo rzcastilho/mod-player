@@ -9,6 +9,7 @@
 //! (contracts/ui-surface.md §6-7).
 
 pub mod chain_meters;
+pub mod controls;
 pub mod initials;
 pub mod knob;
 pub mod peak_meter;

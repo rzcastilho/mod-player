@@ -79,6 +79,7 @@ const PLAYBACK_KEYS: &[&str] = &[
     "banner-unknown-device",
     // Queue panel.
     "queue-toggle",
+    "queue-panel-title",
     "queue-shuffle",
     "queue-repeat-off",
     "queue-repeat-one",
@@ -532,6 +533,10 @@ const SETTINGS_SCREEN_KEYS: &[&str] = &[
     "setting-theme-system",
     "setting-theme-light",
     "setting-theme-dark",
+    // 017-high-contrast-appearance (US2, T023, contracts/appearance-
+    // setting.md A15): the checkbox below the Theme combo.
+    "setting-high-contrast",
+    "setting-high-contrast-desc",
     // Language category.
     "setting-locale",
     "setting-locale-desc",
@@ -674,6 +679,10 @@ const LIBRARY_KEYS: &[&str] = &[
     "action-search",
     "action-create",
     "playlist-no-tracks",
+    // 016-list-row-and-panel-components (US2, T012/T026, contracts/
+    // list-row.md A7): every row's kind-correct "how to open it" tooltip.
+    "row-open-hint-track",
+    "row-open-hint-entity",
 ];
 
 /// Library keys that take a Fluent placeholder — resolved via `tr_args`.

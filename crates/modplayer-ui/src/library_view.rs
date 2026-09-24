@@ -25,9 +25,11 @@ use modplayer_core::{PlaybackController, Severity, TrackListState, tr};
 
 use crate::artwork::ArtworkCache;
 use crate::rows::{
-    ActingListOutcome, RowAction, RowEntity, RowEvent, TrackListLookup, acting_list, list_row,
-    virtualized_list,
+    ActingListOutcome, RowAction, RowEntity, RowEvent, RowSelection, TrackListLookup, acting_list,
+    entity_key, list_row, virtualized_list,
 };
+use crate::theme;
+use crate::widgets::controls::tab as tab_widget;
 use crate::widgets::skeleton::{ROW_HEIGHT, WIDE_ROW_HEIGHT, skeleton_row};
 
 /// The five fixed-order tabs (contracts/ui-surface.md §3).
@@ -85,6 +87,11 @@ pub struct LibraryViewState {
     /// 2026-09-17 manual walk (quickstart M5) found wide-row menu actions
     /// otherwise silently ignored.
     pub pending_action: Option<(RowEntity, RowAction)>,
+    /// This view's single selected row, if any (US2, contracts/list-row.md
+    /// §S2/S8, data-model.md §6): one field for the whole view, so a
+    /// selection is exclusive across all five tabs by construction. Cleared
+    /// whenever the active tab changes (FR-028) — never persisted.
+    pub selection: RowSelection,
 }
 
 /// What activating something in this view asks the caller (`App`, T065) to
@@ -112,13 +119,32 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     let status = controller.library_status();
 
     ui.horizontal(|ui| {
+        // FR-014: a count is shown for every tab once loading finishes —
+        // `0` for an empty-but-loaded list, no count node at all while
+        // still loading (a hidden count means "not yet known", never
+        // "none"). Both `LibraryIndex` accessors below and `recently_
+        // played()` take `&self`, so this shared borrow coexists with the
+        // later one inside the loop.
+        let index = (!status.loading).then(|| controller.library());
         for tab in LibraryTab::ORDER {
-            let response = ui.selectable_label(state.tab == tab, tr(tab.label_key()));
-            ui.ctx().accesskit_node_builder(response.id, |b| {
-                b.set_role(Role::Tab);
-            });
-            if response.clicked() {
+            let selected = state.tab == tab;
+            let response = tab_widget(ui, selected, &tr(tab.label_key()));
+            if response.clicked() && state.tab != tab {
+                // FR-028, contract S8: a selection belongs to the tab it
+                // was made on — switching tabs always clears it, even
+                // though every tab shares one `RowSelection` field.
+                state.selection.clear();
                 state.tab = tab;
+            }
+            if let Some(index) = index {
+                let count = match tab {
+                    LibraryTab::SavedTracks => index.saved_tracks().len(),
+                    LibraryTab::SavedAlbums => index.saved_albums().len(),
+                    LibraryTab::FollowedArtists => index.followed_artists().len(),
+                    LibraryTab::Playlists => index.playlists().len(),
+                    LibraryTab::RecentlyPlayed => controller.recently_played().len(),
+                };
+                ui.label(theme::mono_text(count.to_string()));
             }
         }
     });
@@ -148,7 +174,12 @@ pub fn show<B: OutputBackend, H: SourceHost>(
         && index.followed_artists().is_empty()
         && index.playlists().is_empty();
     if whole_library_empty {
-        ui.label(tr("library-empty"));
+        // FR-006, U2: empty-state copy, capped at the 72-character measure
+        // (research R17) — never applied to row titles/table cells.
+        ui.scope(|ui| {
+            ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
+            ui.label(tr("library-empty"));
+        });
         if ui.button(tr("action-search")).clicked() {
             return LibraryOutcome::FocusSearch;
         }
@@ -168,11 +199,19 @@ pub fn show<B: OutputBackend, H: SourceHost>(
 
     let mut action: Option<(RowEntity, RowAction)> = None;
     let outcome = match state.tab {
-        LibraryTab::SavedTracks => show_saved_tracks(ui, controller, artwork),
-        LibraryTab::SavedAlbums => show_saved_albums(ui, controller, artwork, &mut action),
-        LibraryTab::FollowedArtists => show_followed_artists(ui, controller, artwork, &mut action),
-        LibraryTab::Playlists => show_playlists(ui, controller, artwork, &mut action),
-        LibraryTab::RecentlyPlayed => show_recently_played(ui, controller, artwork),
+        LibraryTab::SavedTracks => show_saved_tracks(ui, controller, artwork, &mut state.selection),
+        LibraryTab::SavedAlbums => {
+            show_saved_albums(ui, controller, artwork, &mut action, &mut state.selection)
+        }
+        LibraryTab::FollowedArtists => {
+            show_followed_artists(ui, controller, artwork, &mut action, &mut state.selection)
+        }
+        LibraryTab::Playlists => {
+            show_playlists(ui, controller, artwork, &mut action, &mut state.selection)
+        }
+        LibraryTab::RecentlyPlayed => {
+            show_recently_played(ui, controller, artwork, &mut state.selection)
+        }
     };
     if let Some((entity, action)) = action
         && apply_row_action(controller, &entity, &[], action) == RowActionOutcome::Deferred
@@ -206,7 +245,11 @@ pub enum RowActionOutcome {
 }
 
 fn empty_state_with_search(ui: &mut Ui, tab: LibraryTab) -> LibraryOutcome {
-    ui.label(tr(tab.empty_key()));
+    // FR-006, U2: empty-state copy, capped at the 72-character measure.
+    ui.scope(|ui| {
+        ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
+        ui.label(tr(tab.empty_key()));
+    });
     if ui.button(tr("action-search")).clicked() {
         return LibraryOutcome::FocusSearch;
     }
@@ -217,6 +260,7 @@ fn show_saved_tracks<B: OutputBackend, H: SourceHost>(
     ui: &mut Ui,
     controller: &mut PlaybackController<B, H>,
     artwork: &mut ArtworkCache,
+    selection: &mut RowSelection,
 ) -> LibraryOutcome {
     let ids: Vec<TrackId> = controller
         .library()
@@ -227,7 +271,20 @@ fn show_saved_tracks<B: OutputBackend, H: SourceHost>(
     if ids.is_empty() {
         return empty_state_with_search(ui, LibraryTab::SavedTracks);
     }
-    draw_virtualized_tracks(ui, controller, artwork, "library-saved-tracks", &ids);
+    // Contract S3/S4, FR-012: re-check the selection against this frame's
+    // own order before drawing — `key_at` never scans past the stored
+    // index (O(1)).
+    selection.reconcile("library-saved-tracks", |i| {
+        ids.get(i).map(|id| id.as_str().to_string())
+    });
+    draw_virtualized_tracks(
+        ui,
+        controller,
+        artwork,
+        "library-saved-tracks",
+        &ids,
+        selection,
+    );
     LibraryOutcome::None
 }
 
@@ -235,11 +292,15 @@ fn show_recently_played<B: OutputBackend, H: SourceHost>(
     ui: &mut Ui,
     controller: &mut PlaybackController<B, H>,
     artwork: &mut ArtworkCache,
+    selection: &mut RowSelection,
 ) -> LibraryOutcome {
     let tracks = controller.recently_played();
     if tracks.is_empty() {
         return empty_state_with_search(ui, LibraryTab::RecentlyPlayed);
     }
+    selection.reconcile("library-recently-played", |i| {
+        tracks.get(i).map(|t| t.id.as_str().to_string())
+    });
     let mut pending: Option<(RowEntity, RowAction)> = None;
     virtualized_list(
         ui,
@@ -249,8 +310,14 @@ fn show_recently_played<B: OutputBackend, H: SourceHost>(
         None,
         |ui, i| {
             let entity = RowEntity::Track(tracks[i].clone());
-            if let Some(RowEvent::Action(action)) = list_row(ui, artwork, &entity) {
-                pending = Some((entity, action));
+            let key = entity_key(&entity);
+            let is_selected = selection.is_selected("library-recently-played", key, i);
+            match list_row(ui, artwork, &entity, is_selected) {
+                Some(RowEvent::Action(action)) => pending = Some((entity, action)),
+                Some(RowEvent::Select) => {
+                    selection.select("library-recently-played", key, i);
+                }
+                Some(RowEvent::Open) | None => {}
             }
         },
     );
@@ -273,6 +340,7 @@ fn draw_virtualized_tracks<B: OutputBackend, H: SourceHost>(
     artwork: &mut ArtworkCache,
     id_salt: &str,
     ids: &[TrackId],
+    selection: &mut RowSelection,
 ) {
     let mut visible_missing = Vec::new();
     let mut pending: Option<(RowEntity, RowAction)> = None;
@@ -281,8 +349,12 @@ fn draw_virtualized_tracks<B: OutputBackend, H: SourceHost>(
         match controller.library().track(id) {
             Some(track) => {
                 let entity = RowEntity::Track(track.clone());
-                if let Some(RowEvent::Action(action)) = list_row(ui, artwork, &entity) {
-                    pending = Some((entity, action));
+                let key = entity_key(&entity);
+                let is_selected = selection.is_selected(id_salt, key, i);
+                match list_row(ui, artwork, &entity, is_selected) {
+                    Some(RowEvent::Action(action)) => pending = Some((entity, action)),
+                    Some(RowEvent::Select) => selection.select(id_salt, key, i),
+                    Some(RowEvent::Open) | None => {}
                 }
             }
             None => {
@@ -303,6 +375,7 @@ fn show_saved_albums<B: OutputBackend, H: SourceHost>(
     controller: &mut PlaybackController<B, H>,
     artwork: &mut ArtworkCache,
     action: &mut Option<(RowEntity, RowAction)>,
+    selection: &mut RowSelection,
 ) -> LibraryOutcome {
     let ids: Vec<AlbumId> = controller
         .library()
@@ -313,6 +386,9 @@ fn show_saved_albums<B: OutputBackend, H: SourceHost>(
     if ids.is_empty() {
         return empty_state_with_search(ui, LibraryTab::SavedAlbums);
     }
+    selection.reconcile("library-saved-albums", |i| {
+        ids.get(i).map(|id| id.as_str().to_string())
+    });
     // Only track ids are hydration targets the controller tracks visibility
     // for in this phase (contracts/library-and-search-core.md §1 names
     // `library_hydrate_visible(ids: &[TrackId])`); an un-hydrated album is
@@ -330,9 +406,14 @@ fn show_saved_albums<B: OutputBackend, H: SourceHost>(
             match controller.library().album(id).cloned() {
                 Some(album) => {
                     let entity = RowEntity::Album(album);
-                    match list_row(ui, artwork, &entity) {
+                    let key = entity_key(&entity);
+                    let is_selected = selection.is_selected("library-saved-albums", key, i);
+                    match list_row(ui, artwork, &entity, is_selected) {
                         Some(RowEvent::Open) => open_id = Some(id.clone()),
                         Some(RowEvent::Action(a)) => *action = Some((entity, a)),
+                        Some(RowEvent::Select) => {
+                            selection.select("library-saved-albums", key, i);
+                        }
                         None => {}
                     }
                 }
@@ -351,11 +432,15 @@ fn show_followed_artists<B: OutputBackend, H: SourceHost>(
     controller: &mut PlaybackController<B, H>,
     artwork: &mut ArtworkCache,
     action: &mut Option<(RowEntity, RowAction)>,
+    selection: &mut RowSelection,
 ) -> LibraryOutcome {
     let ids: Vec<ArtistId> = controller.library().followed_artists().to_vec();
     if ids.is_empty() {
         return empty_state_with_search(ui, LibraryTab::FollowedArtists);
     }
+    selection.reconcile("library-followed-artists", |i| {
+        ids.get(i).map(|id| id.as_str().to_string())
+    });
     let mut open_id: Option<ArtistId> = None;
     virtualized_list(
         ui,
@@ -368,9 +453,14 @@ fn show_followed_artists<B: OutputBackend, H: SourceHost>(
             match controller.library().artist(id).cloned() {
                 Some(artist) => {
                     let entity = RowEntity::Artist(artist);
-                    match list_row(ui, artwork, &entity) {
+                    let key = entity_key(&entity);
+                    let is_selected = selection.is_selected("library-followed-artists", key, i);
+                    match list_row(ui, artwork, &entity, is_selected) {
                         Some(RowEvent::Open) => open_id = Some(id.clone()),
                         Some(RowEvent::Action(a)) => *action = Some((entity, a)),
+                        Some(RowEvent::Select) => {
+                            selection.select("library-followed-artists", key, i);
+                        }
                         None => {}
                     }
                 }
@@ -389,10 +479,15 @@ fn show_playlists<B: OutputBackend, H: SourceHost>(
     controller: &mut PlaybackController<B, H>,
     artwork: &mut ArtworkCache,
     action: &mut Option<(RowEntity, RowAction)>,
+    selection: &mut RowSelection,
 ) -> LibraryOutcome {
     let ids: Vec<PlaylistId> = controller.library().playlists().to_vec();
     if ids.is_empty() {
-        ui.label(tr(LibraryTab::Playlists.empty_key()));
+        // FR-006, U2: empty-state copy, capped at the 72-character measure.
+        ui.scope(|ui| {
+            ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
+            ui.label(tr(LibraryTab::Playlists.empty_key()));
+        });
         // The "create one" action is a placeholder (FR-005/FR-017): no
         // playlist creation exists in this slice.
         if ui.button(tr("action-create")).clicked() {
@@ -402,6 +497,9 @@ fn show_playlists<B: OutputBackend, H: SourceHost>(
         }
         return LibraryOutcome::None;
     }
+    selection.reconcile("library-playlists", |i| {
+        ids.get(i).map(|id| id.as_str().to_string())
+    });
     let mut open_id: Option<PlaylistId> = None;
     virtualized_list(
         ui,
@@ -418,9 +516,12 @@ fn show_playlists<B: OutputBackend, H: SourceHost>(
                 return;
             };
             let entity = RowEntity::Playlist(playlist);
-            match list_row(ui, artwork, &entity) {
+            let key = entity_key(&entity);
+            let is_selected = selection.is_selected("library-playlists", key, i);
+            match list_row(ui, artwork, &entity, is_selected) {
                 Some(RowEvent::Open) => open_id = Some(id.clone()),
                 Some(RowEvent::Action(a)) => *action = Some((entity, a)),
+                Some(RowEvent::Select) => selection.select("library-playlists", key, i),
                 None => {}
             }
         },

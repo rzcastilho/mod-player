@@ -25,6 +25,9 @@ use modplayer_plugin_runtime::events::SuspendCause;
 
 use crate::actions::{self, ChordPattern, Claim};
 use crate::plugin_assets;
+use crate::theme;
+use crate::theme::controls::Variant;
+use crate::widgets::controls::{SwitchKind, button, destructive_gap, switch};
 use crate::widgets::knob;
 
 /// L1: the docked column's fixed width.
@@ -255,13 +258,22 @@ fn show_header<B: OutputBackend, H: SourceHost>(
             }
             _ => plugin_assets::generic_glyph(ui, ICON_SIZE),
         }
-        ui.label(tr_args(
+        // 014-design-tokens-and-type-scale (US2, T034): the chrome header
+        // is this panel's own `section`-role heading (data-model.md §6's
+        // "Panel/group headers" — the plugin-drawn body below it is out of
+        // scope, A9). The accessible name is pinned back to the exact,
+        // un-uppercased title (FR-019), mirroring `markers::panel`'s T030.
+        let header_text = tr_args(
             "plugin-panel-header",
             &[
                 ("plugin", panel.plugin_name.clone()),
                 ("title", panel.title.clone()),
             ],
-        ));
+        );
+        let header = ui.label(theme::section_label(&header_text));
+        ui.ctx().accesskit_node_builder(header.id, |b| {
+            b.set_label(header_text.clone());
+        });
 
         let float_key = match panel.placement {
             PanelPlacement::Docked => "plugin-panel-float",
@@ -278,7 +290,8 @@ fn show_header<B: OutputBackend, H: SourceHost>(
         if ui.button(tr("plugin-panel-close")).clicked() {
             controller.plugin_panel_close(&panel.key);
         }
-        if ui.button(tr("plugin-panel-disable")).clicked() {
+        destructive_gap(ui);
+        if button(ui, Variant::Destructive, tr("plugin-panel-disable")).clicked() {
             controller.plugin_panel_set_disabled(&panel.key, true);
         }
     });
@@ -350,7 +363,7 @@ fn show_widget<B: OutputBackend, H: SourceHost>(
         }
         WidgetKind::Toggle => {
             let mut checked = matches!(widget.value, WidgetValue::Bool(true));
-            let response = ui.checkbox(&mut checked, &spec.label);
+            let response = switch(ui, SwitchKind::Checkbox, &mut checked, &spec.label);
             if response.changed() {
                 controller.plugin_panel_interaction(
                     plugin,

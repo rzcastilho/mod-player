@@ -28,8 +28,10 @@ use modplayer_core::{LoopState, PlaybackController, tr, tr_args};
 
 use crate::actions::{self, Claim};
 use crate::theme;
+use crate::theme::controls::Variant;
 use crate::waveform::state::DETAIL_MIN_WINDOW_MS;
 use crate::waveform::{self, DetailWindow, MarkerDrag, TimeSpace, WaveformState};
+use crate::widgets::controls::{SwitchKind, button, destructive_gap, panel_card, switch};
 
 /// The marker lane's fixed height (006, contracts/ui-markers.md §1).
 pub const LANE_HEIGHT: f32 = 14.0;
@@ -76,12 +78,27 @@ pub fn lane<B: OutputBackend, H: SourceHost>(
         return;
     };
     let space = TimeSpace::new(rect, window, sample_rate);
+    let mark_color = marker_mark_color(ui.visuals());
+    // FR-011/FR-012 (017-high-contrast-appearance): `Some` only while high
+    // contrast is on — the single selection site (`theme::roles`) is the
+    // only place this lane branches on it (S3).
+    let roles = theme::roles(ui.visuals());
+    let outline = theme::markers::marker_outline(roles);
 
     for marker in markers.markers() {
         let color = theme::marker_color(marker.color);
         let x = space.x_of(marker.position);
         let focused = waveform.focused_marker == Some(marker.id);
-        paint_glyph(ui.painter(), marker.kind, x, rect, color, focused);
+        paint_glyph(
+            ui.painter(),
+            marker.kind,
+            x,
+            rect,
+            color,
+            focused,
+            mark_color,
+            outline,
+        );
 
         let glyph_id = Id::new(("marker-glyph", lane_kind, marker.id));
         let hit_rect =
@@ -203,9 +220,26 @@ fn glyph_accessible_name(marker: &Marker, sample_rate: u32) -> String {
     )
 }
 
+/// The colour for a marker glyph's focus outline / cue-slot digit
+/// (014-design-tokens-and-type-scale, US5, T063/T066, U5): drawn on top of
+/// the marker's own (arbitrary palette) fill colour, the same "mark on a
+/// colour fill" situation `theme::paint_host_glyph` is in — so this uses
+/// the same role, `text_on_accent`, rather than a literal `Color32::WHITE`.
+/// A pure `Visuals -> Color32` mapping so
+/// `type_roles::marker_labels_use_a_role_colour` can pin it directly.
+#[must_use]
+pub fn marker_mark_color(visuals: &egui::Visuals) -> Color32 {
+    theme::roles(visuals).text_on_accent
+}
+
 /// Paint one marker's glyph at `x` (006, contracts/ui-markers.md §3):
 /// region `[`/`]` brackets, a point's downward triangle, or a cue's
 /// numbered square — 2px-stroked (vs. 1.5px/plain) while `focused`.
+/// `outline` is `Some` only in high contrast (O1–O3, contracts/
+/// marker-outline.md §2, 017-high-contrast-appearance): each glyph gains
+/// a `text_primary` casing/stroke, its own palette `color` never changed
+/// (FR-011).
+#[allow(clippy::too_many_arguments)]
 fn paint_glyph(
     painter: &Painter,
     kind: MarkerKind,
@@ -213,37 +247,87 @@ fn paint_glyph(
     rect: Rect,
     color: Color32,
     focused: bool,
+    mark_color: Color32,
+    outline: Option<Stroke>,
 ) {
     match kind {
-        MarkerKind::RegionStart { .. } => paint_bracket(painter, x, rect, color, true, focused),
-        MarkerKind::RegionEnd { .. } => paint_bracket(painter, x, rect, color, false, focused),
-        MarkerKind::Point => paint_point_glyph(painter, x, rect, color, focused),
-        MarkerKind::Cue { slot } => paint_cue_glyph(painter, x, rect, color, slot.get(), focused),
+        MarkerKind::RegionStart { .. } => {
+            paint_bracket(painter, x, rect, color, true, focused, outline);
+        }
+        MarkerKind::RegionEnd { .. } => {
+            paint_bracket(painter, x, rect, color, false, focused, outline);
+        }
+        MarkerKind::Point => {
+            paint_point_glyph(painter, x, rect, color, focused, mark_color, outline)
+        }
+        MarkerKind::Cue { slot } => {
+            paint_cue_glyph(
+                painter,
+                x,
+                rect,
+                color,
+                slot.get(),
+                focused,
+                mark_color,
+                outline,
+            );
+        }
     }
 }
 
 /// One `[`/`]` bracket glyph: a vertical stem at `x` spanning `rect`'s
 /// full height, with a short tick at top and bottom pointing into the
 /// region (`open` = `[`, ticks point right; `open = false` = `]`, ticks
-/// point left).
-fn paint_bracket(painter: &Painter, x: f32, rect: Rect, color: Color32, open: bool, focused: bool) {
-    let stroke = Stroke::new(if focused { 2.0 } else { 1.5 }, color);
+/// point left). O1: in high contrast, the same polyline is cased first at
+/// `casing_width(w)` in the outline colour, underneath, so the
+/// focused/unfocused width delta (M9) survives identically in the casing.
+#[allow(clippy::too_many_arguments)]
+fn paint_bracket(
+    painter: &Painter,
+    x: f32,
+    rect: Rect,
+    color: Color32,
+    open: bool,
+    focused: bool,
+    outline: Option<Stroke>,
+) {
+    let width = if focused { 2.0 } else { 1.5 };
     let dx = if open {
         BRACKET_TICK_PX
     } else {
         -BRACKET_TICK_PX
     };
-    painter.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], stroke);
-    painter.line_segment([pos2(x, rect.top()), pos2(x + dx, rect.top())], stroke);
-    painter.line_segment(
+    let segments = [
+        [pos2(x, rect.top()), pos2(x, rect.bottom())],
+        [pos2(x, rect.top()), pos2(x + dx, rect.top())],
         [pos2(x, rect.bottom()), pos2(x + dx, rect.bottom())],
-        stroke,
-    );
+    ];
+    if let Some(outline) = outline {
+        let casing = Stroke::new(theme::markers::casing_width(width), outline.color);
+        for segment in segments {
+            painter.line_segment(segment, casing);
+        }
+    }
+    let stroke = Stroke::new(width, color);
+    for segment in segments {
+        painter.line_segment(segment, stroke);
+    }
 }
 
 /// A `Point` marker's glyph (contracts/ui-markers.md §3): a 10px downward
-/// triangle, apex pointing into the waveform below.
-fn paint_point_glyph(painter: &Painter, x: f32, rect: Rect, color: Color32, focused: bool) {
+/// triangle, apex pointing into the waveform below. O2: in high contrast
+/// the polygon's own stroke becomes the outline colour (contracts/
+/// marker-outline.md §2), taking over from the normal-mode focused/
+/// unfocused stroke (M9 does not pin this glyph).
+fn paint_point_glyph(
+    painter: &Painter,
+    x: f32,
+    rect: Rect,
+    color: Color32,
+    focused: bool,
+    mark_color: Color32,
+    outline: Option<Stroke>,
+) {
     const HALF_WIDTH: f32 = 5.0;
     const HEIGHT: f32 = 10.0;
     let top = rect.top();
@@ -252,25 +336,40 @@ fn paint_point_glyph(painter: &Painter, x: f32, rect: Rect, color: Color32, focu
         pos2(x + HALF_WIDTH, top),
         pos2(x, top + HEIGHT),
     ];
-    let outline = if focused {
-        Stroke::new(1.5, Color32::WHITE)
+    let stroke = outline.unwrap_or(if focused {
+        Stroke::new(1.5, mark_color)
     } else {
         Stroke::NONE
-    };
-    painter.add(egui::Shape::convex_polygon(points, color, outline));
+    });
+    painter.add(egui::Shape::convex_polygon(points, color, stroke));
 }
 
 /// A `Cue { slot }` marker's glyph (contracts/ui-markers.md §3): a 10px
-/// square with the slot digit.
-fn paint_cue_glyph(painter: &Painter, x: f32, rect: Rect, color: Color32, slot: u8, focused: bool) {
+/// square with the slot digit. O3: in high contrast, an extra outside
+/// `rect_stroke` in the outline colour — the inside focus stroke and the
+/// digit (`text_on_accent`, FR-020) are both unchanged.
+#[allow(clippy::too_many_arguments)]
+fn paint_cue_glyph(
+    painter: &Painter,
+    x: f32,
+    rect: Rect,
+    color: Color32,
+    slot: u8,
+    focused: bool,
+    mark_color: Color32,
+    outline: Option<Stroke>,
+) {
     const HALF: f32 = 5.0;
     let square = Rect::from_center_size(pos2(x, rect.center().y), vec2(HALF * 2.0, HALF * 2.0));
     painter.rect_filled(square, 1.0, color);
+    if let Some(outline) = outline {
+        painter.rect_stroke(square, 1.0, outline, egui::StrokeKind::Outside);
+    }
     if focused {
         painter.rect_stroke(
             square,
             1.0,
-            Stroke::new(1.5, Color32::WHITE),
+            Stroke::new(1.5, mark_color),
             egui::StrokeKind::Inside,
         );
     }
@@ -278,8 +377,8 @@ fn paint_cue_glyph(painter: &Painter, x: f32, rect: Rect, color: Color32, slot: 
         square.center(),
         egui::Align2::CENTER_CENTER,
         slot.to_string(),
-        egui::FontId::monospace(9.0),
-        Color32::WHITE,
+        theme::mono_font_id(),
+        mark_color,
     );
 }
 
@@ -338,13 +437,18 @@ pub fn handle_focused_marker_keys<B: OutputBackend, H: SourceHost>(
 /// palette colour, then the current region's span — outline when
 /// disarmed, hatched when armed-inactive, solid (translucent) when
 /// armed-active (data-model.md §3's table). A no-op with no markers/no
-/// current region.
+/// current region. `roles` is the applied style's role table
+/// (017-high-contrast-appearance, FR-011/FR-012): `theme::markers::
+/// marker_outline(roles)` is `Some` only in high contrast, and every
+/// palette fill/translucent-fill colour above stays byte-identical
+/// either way (M8) — only an extra casing/`rect_stroke` is added.
 pub fn paint_overlay(
     painter: &Painter,
     space: &TimeSpace,
     markers: Option<&TrackMarkers>,
     loop_state: u8,
     focused: Option<MarkerId>,
+    roles: &theme::Roles,
 ) {
     let Some(markers) = markers else {
         return;
@@ -353,17 +457,26 @@ pub fn paint_overlay(
     if rect.width() <= 0.0 || rect.height() <= 0.0 {
         return;
     }
+    let outline = theme::markers::marker_outline(roles);
 
     for marker in markers.markers() {
         let color = theme::marker_color(marker.color);
         let x = space.x_of(marker.position);
         let width = if focused == Some(marker.id) { 2.0 } else { 1.0 };
+        // O4: cased first, underneath, at `casing_width(width)` — the
+        // focused/unfocused delta survives identically (M9).
+        if let Some(outline) = outline {
+            painter.line_segment(
+                [pos2(x, rect.top()), pos2(x, rect.bottom())],
+                Stroke::new(theme::markers::casing_width(width), outline.color),
+            );
+        }
         painter.line_segment(
             [pos2(x, rect.top()), pos2(x, rect.bottom())],
             Stroke::new(width, color),
         );
         if marker.clamped {
-            paint_clamped_warning(painter, x, rect.top(), color);
+            paint_clamped_warning(painter, x, rect.top(), color, outline);
         }
     }
 
@@ -385,6 +498,11 @@ pub fn paint_overlay(
     match loop_state {
         2 => {
             painter.rect_filled(span_rect, 0.0, color.gamma_multiply(0.25));
+            // O5: the armed-active span's translucent fill is unchanged
+            // (M8); high contrast only adds this outline.
+            if let Some(outline) = outline {
+                painter.rect_stroke(span_rect, 0.0, outline, egui::StrokeKind::Inside);
+            }
         }
         1 => paint_hatched(painter, span_rect, color),
         _ => {
@@ -400,8 +518,16 @@ pub fn paint_overlay(
 
 /// The small warning triangle drawn at the top of a `clamped` marker's
 /// overlay line (006, FR-018, contracts/ui-markers.md §1): a filled
-/// triangle pointing down into the line, apex at `(x, top)`.
-fn paint_clamped_warning(painter: &Painter, x: f32, top: f32, color: Color32) {
+/// triangle pointing down into the line, apex at `(x, top)`. O6: in high
+/// contrast, `outline` becomes the polygon's own stroke — the fill
+/// colour is unchanged (M8).
+fn paint_clamped_warning(
+    painter: &Painter,
+    x: f32,
+    top: f32,
+    color: Color32,
+    outline: Option<Stroke>,
+) {
     const HALF_WIDTH: f32 = 4.0;
     const HEIGHT: f32 = 6.0;
     let points = vec![
@@ -409,7 +535,11 @@ fn paint_clamped_warning(painter: &Painter, x: f32, top: f32, color: Color32) {
         pos2(x - HALF_WIDTH, top + HEIGHT),
         pos2(x + HALF_WIDTH, top + HEIGHT),
     ];
-    painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
+    painter.add(egui::Shape::convex_polygon(
+        points,
+        color,
+        outline.unwrap_or(Stroke::NONE),
+    ));
 }
 
 /// A simple diagonal-line hatch (armed-inactive, data-model.md §3) —
@@ -491,40 +621,47 @@ pub fn panel<B: OutputBackend, H: SourceHost>(
     controller: &mut PlaybackController<B, H>,
     waveform: &mut WaveformState,
 ) {
-    ui.horizontal(|ui| {
-        ui.heading(tr("markers-panel"));
-        if ui.button(tr("markers-new-loop")).clicked() {
-            let _ = controller.new_loop_region();
+    // 016-list-row-and-panel-components (FR-017/FR-018/FR-021, research
+    // R7): the shared card now draws the `markers-panel` header — the
+    // in-row `section_label` this panel used to draw itself is deleted, so
+    // it is never rendered twice. The "New loop"/clear-all controls keep
+    // their own row inside the card; Markers has no open/closed toggle
+    // (FR-021).
+    panel_card(ui, &tr("markers-panel"), |ui| {
+        ui.horizontal(|ui| {
+            if ui.button(tr("markers-new-loop")).clicked() {
+                let _ = controller.new_loop_region();
+            }
+            clear_all_controls(ui, controller, waveform);
+        });
+        if let Some(key) = waveform.marker_status {
+            ui.label(tr(key));
         }
-        clear_all_controls(ui, controller, waveform);
+
+        let count = controller.markers().map(TrackMarkers::count).unwrap_or(0);
+        if count == 0 {
+            ui.label(tr("markers-empty"));
+            return;
+        }
+
+        let rows: Vec<MarkerRowData> = controller
+            .markers()
+            .map(|markers| {
+                markers
+                    .markers()
+                    .iter()
+                    .map(MarkerRowData::from_marker)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        for row in rows {
+            show_marker_row(ui, controller, waveform, &row);
+            if let Some(region) = row.region {
+                show_region_cells(ui, controller, region);
+            }
+        }
     });
-    if let Some(key) = waveform.marker_status {
-        ui.label(tr(key));
-    }
-
-    let count = controller.markers().map(TrackMarkers::count).unwrap_or(0);
-    if count == 0 {
-        ui.label(tr("markers-empty"));
-        return;
-    }
-
-    let rows: Vec<MarkerRowData> = controller
-        .markers()
-        .map(|markers| {
-            markers
-                .markers()
-                .iter()
-                .map(MarkerRowData::from_marker)
-                .collect()
-        })
-        .unwrap_or_default();
-
-    for row in rows {
-        show_marker_row(ui, controller, waveform, &row);
-        if let Some(region) = row.region {
-            show_region_cells(ui, controller, region);
-        }
-    }
 }
 
 /// One marker's row (contracts/ui-markers.md §4): colour swatch (click
@@ -541,6 +678,13 @@ fn show_marker_row<B: OutputBackend, H: SourceHost>(
     let rate = controller.source_sample_rate().max(1);
     let row_name = row_accessible_name(row, rate);
     let row_id = ui.id().with(("markers-row", row.id));
+
+    // FR-009, contract I6: reserve the row's hover fill's paint order
+    // before content draws (research R5, FR-018) — this row already
+    // computes its own rect+response below (`row_response`, pre-dating
+    // this feature), reused as-is rather than re-allocated through
+    // `widgets::controls::row_frame` (design note 7).
+    let where_to_put_background = ui.painter().add(egui::Shape::Noop);
 
     let outer = ui.horizontal(|ui| {
         let color = theme::marker_color(row.color);
@@ -612,6 +756,27 @@ fn show_marker_row<B: OutputBackend, H: SourceHost>(
         b.set_role(Role::ListItem);
         b.set_label(row_name.clone());
     });
+
+    if ui.is_rect_visible(outer.response.rect) {
+        let roles = theme::roles(ui.visuals());
+        let fill = if row_response.is_pointer_button_down_on() {
+            Some(
+                roles
+                    .surface_base
+                    .blend(theme::controls::pressed_fill(roles)),
+            )
+        } else if row_response.hovered() {
+            Some(roles.surface_base.blend(theme::controls::hover_fill(roles)))
+        } else {
+            None
+        };
+        if let Some(fill) = fill {
+            ui.painter().set(
+                where_to_put_background,
+                egui::Shape::rect_filled(outer.response.rect, egui::CornerRadius::ZERO, fill),
+            );
+        }
+    }
 }
 
 /// The Markers panel row's own accessible name (contracts/ui-markers.md
@@ -703,7 +868,11 @@ fn show_region_cells<B: OutputBackend, H: SourceHost>(
             tr("loop-arm")
         };
         let enabled = row.armed || row.armable;
-        let response = ui.add_enabled(enabled, egui::Checkbox::new(&mut armed, label));
+        let response = ui
+            .add_enabled_ui(enabled, |ui| {
+                switch(ui, SwitchKind::Checkbox, &mut armed, &label)
+            })
+            .inner;
         if response.changed() {
             if armed {
                 let _ = controller.arm_loop(region);
@@ -789,18 +958,22 @@ fn clear_all_controls<B: OutputBackend, H: SourceHost>(
             "markers-clear-confirm",
             &[("count", count.to_string())],
         ));
-        if ui.button(tr("markers-clear-yes")).clicked() {
+        if button(ui, Variant::Destructive, tr("markers-clear-yes")).clicked() {
             controller.clear_all_markers();
             waveform.clear_confirm = false;
         }
+        destructive_gap(ui);
         if ui.button(tr("markers-clear-no")).clicked() {
             waveform.clear_confirm = false;
         }
         if ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape)) {
             waveform.clear_confirm = false;
         }
-    } else if ui.button(tr("markers-clear-all")).clicked() {
-        waveform.clear_confirm = true;
+    } else {
+        destructive_gap(ui);
+        if button(ui, Variant::Destructive, tr("markers-clear-all")).clicked() {
+            waveform.clear_confirm = true;
+        }
     }
 }
 

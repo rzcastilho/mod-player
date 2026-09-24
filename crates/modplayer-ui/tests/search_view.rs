@@ -14,16 +14,27 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use egui::accesskit::Role;
-use egui::{Context, Pos2, RawInput, Rect};
+use egui::{Context, Event, PointerButton, Pos2, RawInput, Rect};
 use modplayer_audio_io::{FakeBackend, FakeDevice};
 use modplayer_audio_source::{
-    Availability, CatalogError, SearchGroupPage, SearchHit, SearchKind, SearchPage, TrackId,
-    TrackRef,
+    AlbumId, AlbumRef, Availability, CatalogError, SearchGroupPage, SearchHit, SearchKind,
+    SearchPage, TrackId, TrackRef,
 };
 use modplayer_audio_source_synthetic::ScriptedHost;
 use modplayer_core::settings::SettingsStore;
 use modplayer_core::{PlaybackController, tr, tr_args};
 use modplayer_engine::{BufferPreset, DeviceId, FrameCount, SampleRate};
+
+/// 014-design-tokens-and-type-scale (US2, T026): a bare `Context::default()`
+/// has none of the token `Style`'s `Name("section")` text style installed,
+/// which each result group's own header now reaches — panicking on layout
+/// otherwise. Install it once, exactly as `App::new`/`App::update` do
+/// (mirrors `controls.rs` test's identically-named helper).
+fn fresh_ctx() -> Context {
+    let ctx = Context::default();
+    modplayer_ui::theme::apply_tokens(&ctx);
+    ctx
+}
 
 struct TempDir(PathBuf);
 
@@ -162,11 +173,12 @@ fn render_nodes(
     controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
     focus: &mut bool,
 ) -> Vec<Node> {
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut artwork = modplayer_ui::artwork::ArtworkCache::new();
+    let mut state = modplayer_ui::search_view::SearchViewState::default();
     let mut output = ctx.run_ui(default_input(), |ui| {
-        modplayer_ui::search_view::show(ui, controller, &mut artwork, focus);
+        modplayer_ui::search_view::show(ui, controller, &mut artwork, focus, &mut state);
     });
     let update = output
         .platform_output
@@ -402,4 +414,226 @@ fn first_group_paints_within_budget() {
     let mut focus = false;
     let nodes = render_nodes(&mut controller, &mut focus);
     assert_eq!(count(nodes.as_slice(), Role::ListItem), 1);
+}
+
+// -- Selection (contract S2/S8) --------------------------------------------
+
+fn album_hit(id: &str, name: &str) -> SearchHit {
+    SearchHit::Album(AlbumRef {
+        id: AlbumId::new(format!("spotify:album:{id}")).unwrap(),
+        name: name.to_string(),
+        artists: vec!["Artist".to_string()],
+        artwork_url: None,
+        release_date: None,
+        track_count: 1,
+    })
+}
+
+/// Unlike `full_page`, both the Tracks and Albums groups carry a row, so a
+/// selection can move from one group to the other (contract S2).
+fn two_group_page(track_titles: &[&str], album_names: &[&str]) -> SearchPage {
+    SearchPage {
+        groups: vec![
+            SearchGroupPage {
+                kind: SearchKind::Track,
+                items: track_titles
+                    .iter()
+                    .enumerate()
+                    .map(|(i, title)| track_hit(&i.to_string(), title))
+                    .collect(),
+                next_offset: None,
+            },
+            SearchGroupPage {
+                kind: SearchKind::Album,
+                items: album_names
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| album_hit(&i.to_string(), name))
+                    .collect(),
+                next_offset: None,
+            },
+            SearchGroupPage {
+                kind: SearchKind::Artist,
+                items: vec![],
+                next_offset: None,
+            },
+            SearchGroupPage {
+                kind: SearchKind::Playlist,
+                items: vec![],
+                next_offset: None,
+            },
+        ],
+        unsupported: vec![],
+    }
+}
+
+/// One frame's `FullOutput`, using a persistent `ctx`/`state` (unlike
+/// `render_nodes`, which creates a fresh `SearchViewState` every call and
+/// so cannot observe a selection surviving across frames).
+fn render_output(
+    ctx: &Context,
+    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+    focus: &mut bool,
+    state: &mut modplayer_ui::search_view::SearchViewState,
+    input: RawInput,
+) -> egui::FullOutput {
+    let mut artwork = modplayer_ui::artwork::ArtworkCache::new();
+    ctx.run_ui(input, |ui| {
+        modplayer_ui::search_view::show(ui, controller, &mut artwork, focus, state);
+    })
+}
+
+/// The centre of the first `role`/`name` node's bounds in `output`
+/// (mirrors `library_view.rs`'s own `find_node_center`).
+fn find_node_center(output: &egui::FullOutput, role: Role, name: &str) -> Pos2 {
+    let update = output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("accesskit_update should be populated once enabled");
+    let bounds = update
+        .nodes
+        .iter()
+        .find(|(_, n)| n.role() == role && n.label() == Some(name))
+        .and_then(|(_, n)| n.bounds())
+        .unwrap_or_else(|| panic!("expected a {role:?} node named {name:?}"));
+    Pos2::new(
+        ((bounds.x0 + bounds.x1) / 2.0) as f32,
+        ((bounds.y0 + bounds.y1) / 2.0) as f32,
+    )
+}
+
+fn click_at(
+    ctx: &Context,
+    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+    focus: &mut bool,
+    state: &mut modplayer_ui::search_view::SearchViewState,
+    pos: Pos2,
+) {
+    let mut press = default_input();
+    press.events.push(Event::PointerButton {
+        pos,
+        button: PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::default(),
+    });
+    render_output(ctx, controller, focus, state, press).drop_without_applying_deltas();
+
+    let mut release = default_input();
+    release.events.push(Event::PointerButton {
+        pos,
+        button: PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::default(),
+    });
+    render_output(ctx, controller, focus, state, release).drop_without_applying_deltas();
+}
+
+/// **S2** (contract S2, FR-006/007): selecting a row in one of Search's
+/// four groups, then clicking a row in a different group, leaves only the
+/// second selected — the one `RowSelection` field is exclusive across all
+/// four groups, not just within one.
+#[test]
+fn selecting_a_row_in_a_different_group_replaces_the_selection() {
+    let (mut controller, handle, _dir) = active_controller("select-across-groups");
+    handle.script_search("abba", Ok(two_group_page(&["Dancing Queen"], &["Arrival"])));
+
+    let now = controller.now();
+    controller.search_mut().set_query("abba", now);
+    controller.set_clock(move || now + Duration::from_millis(200));
+    controller.tick();
+    controller.tick();
+
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut focus = false;
+    let mut state = modplayer_ui::search_view::SearchViewState::default();
+    assert_eq!(state.selection, modplayer_ui::rows::RowSelection::default());
+
+    let discover = render_output(
+        &ctx,
+        &mut controller,
+        &mut focus,
+        &mut state,
+        default_input(),
+    );
+    let track_center = find_node_center(&discover, Role::ListItem, "Dancing Queen — Artist");
+    let album_center = find_node_center(&discover, Role::ListItem, "Arrival — Artist");
+    discover.drop_without_applying_deltas();
+
+    click_at(&ctx, &mut controller, &mut focus, &mut state, track_center);
+    assert_ne!(
+        state.selection,
+        modplayer_ui::rows::RowSelection::default(),
+        "the Tracks row must be selected"
+    );
+    let after_track = state.selection.clone();
+
+    click_at(&ctx, &mut controller, &mut focus, &mut state, album_center);
+    assert_ne!(
+        state.selection,
+        modplayer_ui::rows::RowSelection::default(),
+        "the Albums row must be selected"
+    );
+    assert_ne!(
+        state.selection, after_track,
+        "selecting the Albums row must replace the Tracks row's selection, not add to it"
+    );
+}
+
+/// **S8** (FR-028): a new search query clears the selection.
+#[test]
+fn a_new_query_clears_the_selection() {
+    let (mut controller, handle, _dir) = active_controller("select-then-new-query");
+    handle.script_search("abba", Ok(full_page(&["Dancing Queen"])));
+    handle.script_search("queen", Ok(full_page(&["Bohemian Rhapsody"])));
+
+    let now = controller.now();
+    controller.search_mut().set_query("abba", now);
+    controller.set_clock(move || now + Duration::from_millis(200));
+    controller.tick();
+    controller.tick();
+
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut focus = false;
+    let mut state = modplayer_ui::search_view::SearchViewState::default();
+
+    let discover = render_output(
+        &ctx,
+        &mut controller,
+        &mut focus,
+        &mut state,
+        default_input(),
+    );
+    let track_center = find_node_center(&discover, Role::ListItem, "Dancing Queen — Artist");
+    discover.drop_without_applying_deltas();
+
+    click_at(&ctx, &mut controller, &mut focus, &mut state, track_center);
+    assert_ne!(
+        state.selection,
+        modplayer_ui::rows::RowSelection::default(),
+        "the row must be selected before the query changes"
+    );
+
+    controller
+        .search_mut()
+        .set_query("queen", now + Duration::from_millis(201));
+    controller.set_clock(move || now + Duration::from_millis(400));
+    controller.tick();
+    controller.tick();
+
+    let output = render_output(
+        &ctx,
+        &mut controller,
+        &mut focus,
+        &mut state,
+        default_input(),
+    );
+    output.drop_without_applying_deltas();
+    assert_eq!(
+        state.selection,
+        modplayer_ui::rows::RowSelection::default(),
+        "a new query must clear the prior query's selection"
+    );
 }

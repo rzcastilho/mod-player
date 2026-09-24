@@ -27,6 +27,18 @@ use modplayer_core::settings::SettingsStore;
 use modplayer_core::{PlaybackController, tr, tr_args};
 use modplayer_ui::settings::controls::{self, CaptureReject, CaptureRule, ControlsScreen};
 
+/// 014-design-tokens-and-type-scale (US2, T021-T023/T030/T032/T033): a
+/// bare `Context::default()` has none of the token `Style`'s
+/// `Name("display")`/`Name("section")` text styles installed, which every
+/// screen this suite renders now reaches — panicking on layout otherwise.
+/// Install them once, exactly as `App::new`/`App::update` do, so this
+/// suite exercises the same `Style` the real app runs under.
+fn fresh_ctx() -> Context {
+    let ctx = Context::default();
+    modplayer_ui::theme::apply_tokens(&ctx);
+    ctx
+}
+
 struct TempDir(PathBuf);
 
 impl TempDir {
@@ -80,7 +92,7 @@ fn default_input() -> RawInput {
 /// (research R14; `Chord::display`'s own dual-branch coverage lives in
 /// `modplayer-core`'s `chord_display_mac_and_other`).
 fn platform_now() -> Platform {
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     if ctx.os().is_mac() {
         Platform::Mac
     } else {
@@ -256,7 +268,7 @@ fn press_key<B: OutputBackend, H: SourceHost>(
 #[test]
 fn filter_matches_label_and_category_case_insensitively() {
     let (mut controller, _dir) = fresh_controller("filter-label");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     let mut screen = ControlsScreen {
@@ -297,7 +309,7 @@ fn filter_matches_label_and_category_case_insensitively() {
 #[test]
 fn filter_no_match_shows_line() {
     let (mut controller, _dir) = fresh_controller("filter-no-match");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     let mut screen = ControlsScreen {
@@ -317,7 +329,7 @@ fn filter_no_match_shows_line() {
 #[test]
 fn every_action_listed_grouped_by_category() {
     let (mut controller, _dir) = fresh_controller("every-action");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     let mut screen = ControlsScreen::default();
@@ -351,7 +363,7 @@ fn every_action_listed_grouped_by_category() {
 #[test]
 fn capture_accepts_chord_and_adds_chip() {
     let (mut controller, _dir) = fresh_controller("capture-accept");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut screen = ControlsScreen::default();
 
@@ -473,7 +485,7 @@ fn capture_rejects_duplicate_tab_and_mac_control_inline() {
 #[test]
 fn capture_esc_and_focus_loss_cancel() {
     let (mut controller, _dir) = fresh_controller("capture-esc");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut screen = ControlsScreen::default();
 
@@ -510,7 +522,7 @@ fn capture_esc_and_focus_loss_cancel() {
 
     // Focus loss (click elsewhere — the filter box): cancels the same way.
     let (mut controller2, _dir2) = fresh_controller("capture-focus-loss");
-    let ctx2 = Context::default();
+    let ctx2 = fresh_ctx();
     ctx2.enable_accesskit();
     let mut screen2 = ControlsScreen::default();
 
@@ -555,7 +567,7 @@ fn capture_esc_and_focus_loss_cancel() {
 #[test]
 fn remove_chip_immediately_allows_zero_bindings() {
     let (mut controller, _dir) = fresh_controller("remove-chip");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut screen = ControlsScreen::default();
 
@@ -578,7 +590,7 @@ fn remove_chip_immediately_allows_zero_bindings() {
 #[test]
 fn reset_action_restores_default_without_confirm() {
     let (mut controller, _dir) = fresh_controller("reset-action");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut screen = ControlsScreen::default();
 
@@ -611,7 +623,7 @@ fn reset_action_restores_default_without_confirm() {
 #[test]
 fn reset_all_two_step_confirm_cancel_esc_focus_loss() {
     let (mut controller, _dir) = fresh_controller("reset-all");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut screen = ControlsScreen::default();
 
@@ -707,7 +719,7 @@ fn reset_all_two_step_confirm_cancel_esc_focus_loss() {
 #[test]
 fn disabled_rows_greyed_rebindable_and_never_fire() {
     let (mut controller, _dir) = fresh_controller("disabled-rows");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut screen = ControlsScreen::default();
 
@@ -749,7 +761,7 @@ fn disabled_rows_greyed_rebindable_and_never_fire() {
 #[test]
 fn chips_display_platform_glyphs() {
     let (mut controller, _dir) = fresh_controller("chip-glyphs");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut screen = ControlsScreen::default();
 
@@ -773,7 +785,7 @@ fn chips_display_platform_glyphs() {
 #[test]
 fn conflict_flag_shows_on_both_rows() {
     let (mut controller, _dir) = fresh_controller("conflict-both-rows");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut screen = ControlsScreen::default();
 
@@ -822,7 +834,7 @@ fn conflict_flag_shows_on_both_rows() {
 #[test]
 fn capture_of_conflicting_chord_flags_both_and_names_partner() {
     let (mut controller, _dir) = fresh_controller("conflict-capture");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut screen = ControlsScreen::default();
 
@@ -1035,7 +1047,7 @@ fn plugin_group_rendered() {
         c.actions().plugin_action_registered(&action_id)
     }));
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut screen = ControlsScreen::default();
     let texts = rendered_texts(&ctx, &mut controller, &mut screen);
@@ -1075,7 +1087,7 @@ fn tier_conflict_text() {
             .is_conflicting(ActionId::Plugin(action_id.clone()), l)
     }));
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut screen = ControlsScreen::default();
     let texts = rendered_texts(&ctx, &mut controller, &mut screen);
@@ -1139,7 +1151,7 @@ fn greyed_when_suspended() {
         "the hang probe must suspend the fixture under a 1ms share"
     );
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut screen = ControlsScreen::default();
     let texts = rendered_texts(&ctx, &mut controller, &mut screen);

@@ -17,16 +17,28 @@ use egui::{Context, Event, Key, Modifiers, PointerButton, Pos2, RawInput, Rect};
 use modplayer_audio_io::{FakeBackend, FakeDevice};
 use modplayer_audio_source::{Availability, SourceCommand, SourceHealth, TrackId, TrackRef};
 use modplayer_audio_source_synthetic::{ScriptedHost, ScriptedHostHandle};
-use modplayer_core::actions::ScopeState;
+use modplayer_core::actions::{ActionId, HostAction, ScopeState};
 use modplayer_core::markers::{CueSlot, TrackMarkers};
 use modplayer_core::plugins::PluginId;
 use modplayer_core::settings::SettingsStore;
 use modplayer_core::transport::Intent;
-use modplayer_core::{NotRegisteredReason, PlaybackController, tr};
+use modplayer_core::{NotRegisteredReason, NowPlayingPanel, PlaybackController, tr};
 use modplayer_engine::{BufferPreset, DeviceId, FrameCount, SampleRate};
 use modplayer_ui::artwork::{ArtworkCache, ArtworkState};
 use modplayer_ui::waveform::{DetailWindow, DragOrigin, DragPreview, TimeSpace, WaveformState};
 use modplayer_ui::{Shell, actions};
+
+/// 014-design-tokens-and-type-scale (US2, T022): a bare `Context::default()`
+/// has none of the token `Style`'s `Name("display")` text style installed,
+/// which `now_playing::show`'s current-track title now reaches —
+/// panicking on layout otherwise. Install it once, exactly as
+/// `App::new`/`App::update` do (mirrors `controls.rs` test's
+/// identically-named helper).
+fn fresh_ctx() -> Context {
+    let ctx = Context::default();
+    modplayer_ui::theme::apply_tokens(&ctx);
+    ctx
+}
 
 struct TempDir(PathBuf);
 
@@ -162,7 +174,7 @@ fn rendered_texts<B: modplayer_audio_io::OutputBackend, H: modplayer_audio_sourc
     artwork: &mut ArtworkCache,
     waveform: &mut WaveformState,
 ) -> Vec<String> {
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut output = ctx.run_ui(default_input(), |ui| {
         modplayer_ui::now_playing::show(ui, controller, artwork, waveform);
@@ -195,7 +207,7 @@ fn rendered_painted_texts<
     artwork: &mut ArtworkCache,
     waveform: &mut WaveformState,
 ) -> Vec<String> {
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     let output = ctx.run_ui(default_input(), |ui| {
         modplayer_ui::now_playing::show(ui, controller, artwork, waveform);
     });
@@ -218,6 +230,22 @@ fn default_input() -> RawInput {
     }
 }
 
+/// A tall viewport for the Phase 5 (US3) card tests below: `egui::Frame`
+/// only paints its background when `ui.is_rect_visible` — `rect.
+/// intersects(clip_rect)` — so a panel far enough down a merely
+/// `default_input`-sized (800×600) screen would silently paint no card
+/// rect at all once a loaded track's heading/waveform/Markers block (this
+/// file's own tallest, most variable content) pushes it past the fold,
+/// even though its heading (an unconditional accesskit call, not gated on
+/// visibility) still shows up. Tall enough that every one of the four
+/// cards stays inside the clip rect regardless.
+fn tall_input() -> RawInput {
+    RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(960.0, 4000.0))),
+        ..Default::default()
+    }
+}
+
 /// One AccessKit node's role, gathered into an owned snapshot (mirrors
 /// `accessibility.rs`'s `AccessNode`, kept minimal here).
 struct NodeInfo {
@@ -230,7 +258,7 @@ fn render_nodes<B: modplayer_audio_io::OutputBackend, H: modplayer_audio_source:
     waveform: &mut WaveformState,
     input: RawInput,
 ) -> Vec<NodeInfo> {
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut output = ctx.run_ui(input, |ui| {
         modplayer_ui::now_playing::show(ui, controller, artwork, waveform);
@@ -448,7 +476,7 @@ fn artwork_falls_back_to_initials() {
 
     let url = "https://i.scdn.co/image/deadbeef";
     let mut artwork = ArtworkCache::new();
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     // The force-fail toggle short-circuits before any network call
     // (`fetch_and_decode`), so this converges almost immediately.
     let mut state = artwork.get(&ctx, url);
@@ -490,7 +518,7 @@ fn click_on_overview_seeks_to_exact_frame() {
 
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     let bounds = overview_bounds(&ctx, &mut controller, &mut artwork, &mut waveform);
@@ -541,7 +569,7 @@ fn drag_previews_without_seeking_and_esc_cancels() {
 
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     let bounds = overview_bounds(&ctx, &mut controller, &mut artwork, &mut waveform);
@@ -611,7 +639,7 @@ fn seek_slider_commits_once_per_release() {
 
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     let bounds = overview_bounds(&ctx, &mut controller, &mut artwork, &mut waveform);
@@ -878,7 +906,7 @@ fn pointer_zoom_on_detail_is_anchored_on_the_pointer_not_the_playhead() {
 
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     // First frame: establish the detail window and read its screen rect
@@ -1093,7 +1121,7 @@ fn keyboard_table_matches_pointer_results() {
         controller.queue_replace(vec![track("a", 200_000)]);
         let mut artwork = ArtworkCache::new();
         let mut waveform = WaveformState::default();
-        let ctx = Context::default();
+        let ctx = fresh_ctx();
         ctx.enable_accesskit();
 
         tab_focus_named(
@@ -1137,7 +1165,7 @@ fn keyboard_table_matches_pointer_results() {
     controller.queue_replace(vec![track("a", 200_000)]);
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     tab_focus_named(
@@ -1256,7 +1284,7 @@ fn keyboard_table_matches_pointer_results() {
         controller.tick();
         let artwork = ArtworkCache::new();
         let waveform = WaveformState::default();
-        let ctx = Context::default();
+        let ctx = fresh_ctx();
         ctx.enable_accesskit();
         (controller, dirs, artwork, waveform, ctx)
     }
@@ -1631,8 +1659,8 @@ fn transport_toggle_beside_queue_and_effects() {
 
 /// Toggling the Transport panel open survives a track change (mirrors
 /// 008's `e_and_header_toggle_panel_and_it_survives_track_change`) — its
-/// open/closed state lives in egui temp memory (keyed on one `Context`
-/// kept across every render below), not per-track state.
+/// open/closed state is persisted through the controller
+/// (016-list-row-and-panel-components, FR-019), not per-track state.
 #[test]
 fn transport_panel_survives_track_change() {
     let (mut controller, _handle, _dir) = active_controller("transport-panel-survives");
@@ -1640,7 +1668,7 @@ fn transport_panel_survives_track_change() {
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
 
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let texts = |controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
                  artwork: &mut ArtworkCache,
@@ -1669,7 +1697,7 @@ fn transport_panel_survives_track_change() {
         "the panel starts closed"
     );
 
-    modplayer_ui::transport_view::toggle_transport_panel(&ctx);
+    modplayer_ui::transport_view::toggle_transport_panel(&mut controller);
     let opened = texts(&mut controller, &mut artwork, &mut waveform);
     assert!(
         opened.contains(&tr("transport-panel-title")),
@@ -1682,4 +1710,505 @@ fn transport_panel_survives_track_change() {
         after_track_change.contains(&tr("transport-panel-title")),
         "the panel must survive a track change, got {after_track_change:?}"
     );
+}
+
+// -- 016-list-row-and-panel-components, Phase 5 (US3): the four Now
+// Playing blocks read as cards, and Effect Chain/Transport/Queue persist
+// their open/closed state (contracts/panel-card.md C5/C6/C9/C10/C13, P3)
+// -----------------------------------------------------------------------
+
+/// One AccessKit node's role/label/value/bounds (mirrors
+/// `effects_view.rs`'s own `AccessNode`) — the tests below need bounds (to
+/// click a control-row switch, or to check a widget's on-screen rect
+/// against a viewport), which `NodeInfo` above doesn't carry.
+struct PanelNode {
+    role: Role,
+    label: Option<String>,
+    value: Option<String>,
+    bounds: Option<Rect>,
+}
+
+impl PanelNode {
+    /// `Response::fill_accesskit_node_from_widget_info` puts `Role::Label`
+    /// text in `value` and every other role's in `label` (mirrors
+    /// `rendered_texts`'s own doc comment).
+    fn accessible_name(&self) -> Option<&str> {
+        self.label.as_deref().or(self.value.as_deref())
+    }
+}
+
+/// One frame's AccessKit nodes (with bounds) and raw painted shapes,
+/// gathered together so a card's fill rect and its heading node can be
+/// cross-checked in the same render.
+struct PanelFrame {
+    nodes: Vec<PanelNode>,
+    shapes: Vec<egui::Shape>,
+}
+
+fn render_panel_frame<
+    B: modplayer_audio_io::OutputBackend,
+    H: modplayer_audio_source::SourceHost,
+>(
+    ctx: &Context,
+    controller: &mut PlaybackController<B, H>,
+    artwork: &mut ArtworkCache,
+    waveform: &mut WaveformState,
+    input: RawInput,
+) -> PanelFrame {
+    ctx.enable_accesskit();
+    let mut output = ctx.run_ui(input, |ui| {
+        modplayer_ui::now_playing::show(ui, controller, artwork, waveform);
+    });
+    let update = output
+        .platform_output
+        .accesskit_update
+        .take()
+        .expect("accesskit_update should be populated once enabled");
+    let shapes: Vec<egui::Shape> = output.shapes.iter().map(|c| c.shape.clone()).collect();
+    output.drop_without_applying_deltas();
+
+    let nodes = update
+        .nodes
+        .iter()
+        .map(|(_, node)| PanelNode {
+            role: node.role(),
+            label: node.label().map(str::to_string),
+            value: node.value().map(str::to_string),
+            bounds: node.bounds().map(|b| {
+                Rect::from_min_max(
+                    Pos2::new(b.x0 as f32, b.y0 as f32),
+                    Pos2::new(b.x1 as f32, b.y1 as f32),
+                )
+            }),
+        })
+        .collect();
+    PanelFrame { nodes, shapes }
+}
+
+/// Every `Shape::Rect` filled with `roles.surface_raised`, `radius::MD`
+/// cornered and **stroked** — one per open `panel_card` (contract C2/C5).
+/// `roles.surface_raised` alone isn't enough of a signal: `theme/style.rs`
+/// also paints it as the default *inactive-widget* background (buttons,
+/// combo boxes), just with `radius::SM` and a 1 px divider `bg_stroke` —
+/// `panel_card`'s own frame draws neither (C2's "no stroke"), which is
+/// what actually tells the two apart here. No `set_theme` call in this
+/// file pins which of egui's two themes a headless `Context` resolves to,
+/// so both the light and dark `Roles.surface_raised` count.
+fn card_rects(shapes: &[egui::Shape]) -> Vec<Rect> {
+    let light = modplayer_ui::theme::roles(&egui::Visuals::light()).surface_raised;
+    let dark = modplayer_ui::theme::roles(&egui::Visuals::dark()).surface_raised;
+    shapes
+        .iter()
+        .filter_map(|shape| match shape {
+            egui::Shape::Rect(rect_shape)
+                if (rect_shape.fill == light || rect_shape.fill == dark)
+                    && rect_shape.corner_radius == modplayer_ui::theme::radius::MD
+                    && rect_shape.stroke.width < 0.5 =>
+            {
+                Some(rect_shape.rect)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn find_panel_node<'a>(nodes: &'a [PanelNode], role: Role, name: &str) -> Option<&'a PanelNode> {
+    nodes
+        .iter()
+        .find(|node| node.role == role && node.accessible_name() == Some(name))
+}
+
+/// Discard one frame's output — an untimed warm-up
+/// (mirrors `library_view.rs`'s own warm-up pattern): a freshly opened
+/// panel's `ScrollArea`/`Frame` sizing settles one frame after the id
+/// first appears, so a layout fact this file's card/bounds tests pin
+/// (a card's rect, a heading's position) is asserted against the *second*
+/// render on a given `ctx`, never the first.
+fn warm_up<B: modplayer_audio_io::OutputBackend, H: modplayer_audio_source::SourceHost>(
+    ctx: &Context,
+    controller: &mut PlaybackController<B, H>,
+    artwork: &mut ArtworkCache,
+    waveform: &mut WaveformState,
+    input: RawInput,
+) {
+    let output = ctx.run_ui(input, |ui| {
+        modplayer_ui::now_playing::show(ui, controller, artwork, waveform);
+    });
+    output.drop_without_applying_deltas();
+}
+
+/// Press then release the primary button at `pos`, in two separate frames
+/// (mirrors `effects_view.rs`'s own `click_at`).
+fn click_now_playing<
+    B: modplayer_audio_io::OutputBackend,
+    H: modplayer_audio_source::SourceHost,
+>(
+    ctx: &Context,
+    controller: &mut PlaybackController<B, H>,
+    artwork: &mut ArtworkCache,
+    waveform: &mut WaveformState,
+    pos: Pos2,
+) {
+    let mut press_input = default_input();
+    press_input.events.push(Event::PointerButton {
+        pos,
+        button: PointerButton::Primary,
+        pressed: true,
+        modifiers: Modifiers::default(),
+    });
+    let output = ctx.run_ui(press_input, |ui| {
+        modplayer_ui::now_playing::show(ui, controller, artwork, waveform);
+    });
+    output.drop_without_applying_deltas();
+
+    let mut release_input = default_input();
+    release_input.events.push(Event::PointerButton {
+        pos,
+        button: PointerButton::Primary,
+        pressed: false,
+        modifiers: Modifiers::default(),
+    });
+    let output = ctx.run_ui(release_input, |ui| {
+        modplayer_ui::now_playing::show(ui, controller, artwork, waveform);
+    });
+    output.drop_without_applying_deltas();
+}
+
+/// C5 (contracts/panel-card.md): with a track loaded and Effect Chain/
+/// Transport/Queue all open, all four Now Playing blocks (Markers, Effect
+/// Chain, Transport, Queue) render through the shared `panel_card` — four
+/// `roles.surface_raised`-filled rects in one frame.
+#[test]
+fn four_panels_render_as_cards_when_all_open() {
+    let (mut controller, _handle, _dirs) = active_controller("c5-four-cards");
+    controller.queue_replace(vec![track("a", 200_000)]);
+    controller.set_now_playing_panel_open(NowPlayingPanel::EffectChain, true);
+    controller.set_now_playing_panel_open(NowPlayingPanel::Transport, true);
+    controller.set_now_playing_panel_open(NowPlayingPanel::Queue, true);
+
+    let ctx = fresh_ctx();
+    let mut artwork = ArtworkCache::new();
+    let mut waveform = WaveformState::default();
+    warm_up(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        tall_input(),
+    );
+    let frame = render_panel_frame(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        tall_input(),
+    );
+
+    assert_eq!(
+        card_rects(&frame.shapes).len(),
+        4,
+        "expected one card per panel (Markers, Effect Chain, Transport, Queue)"
+    );
+}
+
+/// C6 (contracts/panel-card.md, research R7): no panel renders its header
+/// twice — exactly one `Role::Heading` node per panel, each with its
+/// expected name.
+#[test]
+fn each_open_panel_has_exactly_one_heading_node() {
+    let (mut controller, _handle, _dirs) = active_controller("c6-single-heading");
+    controller.queue_replace(vec![track("a", 200_000)]);
+    controller.set_now_playing_panel_open(NowPlayingPanel::EffectChain, true);
+    controller.set_now_playing_panel_open(NowPlayingPanel::Transport, true);
+    controller.set_now_playing_panel_open(NowPlayingPanel::Queue, true);
+
+    let ctx = fresh_ctx();
+    let mut artwork = ArtworkCache::new();
+    let mut waveform = WaveformState::default();
+    warm_up(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        tall_input(),
+    );
+    let frame = render_panel_frame(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        tall_input(),
+    );
+
+    for header in [
+        tr("markers-panel"),
+        tr("effects-panel-title"),
+        tr("transport-panel-title"),
+        tr("queue-panel-title"),
+    ] {
+        let matches = frame
+            .nodes
+            .iter()
+            .filter(|node| {
+                node.role == Role::Heading && node.accessible_name() == Some(header.as_str())
+            })
+            .count();
+        assert_eq!(
+            matches, 1,
+            "expected exactly one Heading node named `{header}`, got {matches}"
+        );
+    }
+}
+
+/// C9 (contracts/panel-card.md, FR-035): wrapping a panel in the shared
+/// card adds chrome only — no collapse/expand affordance is added to any
+/// header; the three control-row switches (and their `Q`/`E`/`T`
+/// shortcuts) remain the only way to open/close a panel (mirrors
+/// `markers.rs`'s own C11 "no added interactive controls" pattern).
+#[test]
+fn no_collapse_control_is_added_to_any_card_header() {
+    let (mut controller, _handle, _dirs) = active_controller("c9-no-collapse");
+    controller.queue_replace(vec![track("a", 200_000)]);
+    controller.set_now_playing_panel_open(NowPlayingPanel::EffectChain, true);
+    controller.set_now_playing_panel_open(NowPlayingPanel::Transport, true);
+    controller.set_now_playing_panel_open(NowPlayingPanel::Queue, true);
+
+    let ctx = fresh_ctx();
+    let mut artwork = ArtworkCache::new();
+    let mut waveform = WaveformState::default();
+    warm_up(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        tall_input(),
+    );
+    let frame = render_panel_frame(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        tall_input(),
+    );
+
+    let button_names: Vec<String> = frame
+        .nodes
+        .iter()
+        .filter(|node| node.role == Role::Button)
+        .filter_map(|node| node.accessible_name().map(str::to_string))
+        .collect();
+    assert!(
+        !button_names.iter().any(|name| {
+            let lower = name.to_lowercase();
+            lower.contains("collaps") || lower.contains("expand")
+        }),
+        "no collapse/expand control may be added to any panel card: {button_names:?}"
+    );
+
+    // The only three panel-open affordances left are the control-row
+    // switches — still present, unchanged.
+    for key in ["queue-toggle", "effects-toggle", "transport-toggle"] {
+        assert!(
+            button_names.contains(&tr(key)),
+            "expected the `{key}` switch, got {button_names:?}"
+        );
+    }
+}
+
+/// C10 (contracts/panel-card.md, FR-035): a closed panel draws nothing at
+/// all — not a header-only card. With no track loaded, Markers never
+/// renders either, and the three persisted panels all default closed.
+#[test]
+fn a_closed_panel_contributes_no_card_or_heading() {
+    let (mut controller, _handle, _dirs) = active_controller("c10-closed-panel");
+    assert!(!controller.now_playing_panel_open(NowPlayingPanel::EffectChain));
+    assert!(!controller.now_playing_panel_open(NowPlayingPanel::Transport));
+    assert!(!controller.now_playing_panel_open(NowPlayingPanel::Queue));
+
+    let ctx = fresh_ctx();
+    let mut artwork = ArtworkCache::new();
+    let mut waveform = WaveformState::default();
+    warm_up(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        default_input(),
+    );
+    let frame = render_panel_frame(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        default_input(),
+    );
+
+    assert_eq!(
+        card_rects(&frame.shapes).len(),
+        0,
+        "no panel is open: no card may render"
+    );
+    for header in [
+        tr("effects-panel-title"),
+        tr("transport-panel-title"),
+        tr("queue-panel-title"),
+    ] {
+        assert!(
+            !frame.nodes.iter().any(|node| node.role == Role::Heading
+                && node.accessible_name() == Some(header.as_str())),
+            "a closed panel must not expose its heading node: `{header}`"
+        );
+    }
+}
+
+/// C13 (contracts/panel-card.md, FR-023/FR-024, Edge Case): at a 960×640
+/// viewport with Effect Chain/Transport/Queue all open, the master-volume
+/// row, the peak meter and the Queue card all stay inside the viewport —
+/// `effects_panel_reserved_height` must book at least the old 140.0 plus
+/// the new card insets, so the 2026-09-19 clipping defect cannot recur.
+#[test]
+fn reserved_height_keeps_volume_meter_and_queue_card_in_a_960x640_viewport() {
+    // No track queued: the waveform/Markers block (`current_track().is_
+    // some()`-gated) stays out of the way, isolating what this contract
+    // actually pins — the reserved-height sum below the Effect Chain
+    // panel — from the unrelated, unbounded height of the waveform/
+    // Markers section above it.
+    let (mut controller, _handle, _dirs) = active_controller("c13-viewport");
+    controller.set_now_playing_panel_open(NowPlayingPanel::EffectChain, true);
+    controller.set_now_playing_panel_open(NowPlayingPanel::Transport, true);
+    controller.set_now_playing_panel_open(NowPlayingPanel::Queue, true);
+
+    let ctx = fresh_ctx();
+    let mut artwork = ArtworkCache::new();
+    let mut waveform = WaveformState::default();
+    let viewport = Rect::from_min_size(Pos2::ZERO, egui::vec2(960.0, 640.0));
+    let input = RawInput {
+        screen_rect: Some(viewport),
+        ..Default::default()
+    };
+    warm_up(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        input.clone(),
+    );
+    let frame = render_panel_frame(&ctx, &mut controller, &mut artwork, &mut waveform, input);
+
+    let master_volume = find_panel_node(&frame.nodes, Role::Label, &tr("master-volume"))
+        .and_then(|node| node.bounds)
+        .expect("the master-volume caption must render");
+    assert!(
+        viewport.contains_rect(master_volume),
+        "master-volume row must stay inside the viewport: {master_volume:?}"
+    );
+
+    let peak_meter = find_panel_node(&frame.nodes, Role::Label, &tr("peak-meter"))
+        .and_then(|node| node.bounds)
+        .expect("the peak-meter caption must render");
+    assert!(
+        viewport.contains_rect(peak_meter),
+        "peak meter must stay inside the viewport: {peak_meter:?}"
+    );
+
+    let queue_heading = find_panel_node(&frame.nodes, Role::Heading, &tr("queue-panel-title"))
+        .and_then(|node| node.bounds)
+        .expect("the Queue panel heading must render");
+    let queue_card = card_rects(&frame.shapes)
+        .into_iter()
+        .find(|rect| rect.y_range().contains(queue_heading.min.y))
+        .expect("expected a card rect containing the Queue heading");
+    assert!(
+        viewport.contains_rect(queue_card),
+        "the Queue card must stay inside the viewport: {queue_card:?}"
+    );
+}
+
+/// P3 (contracts/panel-card.md, FR-019, US3 Scenario 5): a click on the
+/// control-row switch and an invoked `HostAction::Toggle*` write through
+/// the same setter (`PlaybackController::set_now_playing_panel_open`) —
+/// either path persists to `settings.toml` immediately, so a fresh
+/// controller built over the same store reads back the change right away.
+#[test]
+fn switch_click_and_host_action_toggles_persist_through_a_settings_reload() {
+    let (mut controller, _handle, dirs) = active_controller("p3-persist");
+    controller.queue_replace(vec![track("a", 200_000)]);
+    let settings_path = dirs.0.path().join("settings.toml");
+
+    let ctx = fresh_ctx();
+    let mut artwork = ArtworkCache::new();
+    let mut waveform = WaveformState::default();
+
+    warm_up(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        default_input(),
+    );
+    let frame = render_panel_frame(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        default_input(),
+    );
+    let queue_switch = find_panel_node(&frame.nodes, Role::Button, &tr("queue-toggle"))
+        .and_then(|node| node.bounds)
+        .expect("the Queue switch must render");
+    click_now_playing(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        queue_switch.center(),
+    );
+
+    assert!(
+        controller.now_playing_panel_open(NowPlayingPanel::Queue),
+        "clicking the Queue switch must open it"
+    );
+    let reloaded = PlaybackController::new(
+        FakeBackend::new(vec![]),
+        ScriptedHost::new(),
+        SettingsStore::with_path(settings_path.clone()),
+    );
+    assert!(
+        reloaded.now_playing_panel_open(NowPlayingPanel::Queue),
+        "the switch's toggle must persist to settings.toml immediately"
+    );
+
+    let mut shell = Shell::default();
+    for (action, panel) in [
+        (HostAction::ToggleEffectChain, NowPlayingPanel::EffectChain),
+        (HostAction::ToggleTransportPanel, NowPlayingPanel::Transport),
+        (HostAction::ToggleQueue, NowPlayingPanel::Queue),
+    ] {
+        let before = controller.now_playing_panel_open(panel);
+        actions::invoke(
+            actions::Invocation {
+                action: ActionId::Host(action),
+                repeat: false,
+            },
+            &mut controller,
+            &mut shell,
+            &mut waveform,
+            &ctx,
+        );
+        assert_ne!(
+            controller.now_playing_panel_open(panel),
+            before,
+            "{action:?} must flip its panel"
+        );
+        let reloaded = PlaybackController::new(
+            FakeBackend::new(vec![]),
+            ScriptedHost::new(),
+            SettingsStore::with_path(settings_path.clone()),
+        );
+        assert_eq!(
+            reloaded.now_playing_panel_open(panel),
+            controller.now_playing_panel_open(panel),
+            "{action:?} must persist immediately, from the same setter the switch uses"
+        );
+    }
 }

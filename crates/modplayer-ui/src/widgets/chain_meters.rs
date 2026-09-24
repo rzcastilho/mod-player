@@ -7,9 +7,13 @@
 //! the caller reads `PlaybackController::chain_meters()` fresh each
 //! frame and hands the values in (data-model.md §2.5).
 
-use egui::{CornerRadius, Rect, Sense, StrokeKind, Ui, Vec2, WidgetInfo, WidgetType, pos2};
+use egui::{
+    CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, WidgetInfo, WidgetType, pos2,
+};
 use modplayer_core::{LevelPair, tr};
 
+use crate::theme::controls::{self, Band};
+use crate::theme::{self, Roles};
 use crate::widgets::peak_meter::{SCALE_MAX_DB, SCALE_MIN_DB};
 
 fn to_db(amplitude: f32) -> f32 {
@@ -51,25 +55,34 @@ pub fn level_pair(ui: &mut Ui, side_label_key: &str, level: LevelPair) {
         let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
         if ui.is_rect_visible(rect) {
             let painter = ui.painter();
-            let corner = CornerRadius::from(2u8);
+            let corner = theme::radius::SM;
+            let roles = theme::roles(ui.visuals());
             painter.rect_filled(rect, corner, ui.visuals().extreme_bg_color);
 
+            // Both sub-bars band identically (M9, FR-012a): fixed 0 dBFS
+            // boundary (no ceiling input), the RMS bar's `gamma_multiply(0.7)`
+            // dim removed, neither reads `selection.bg_fill` any more.
             let half = rect.width() / 2.0;
-            let peak_rect = Rect::from_min_size(
-                rect.min,
-                Vec2::new(half * fraction_of(peak_db), rect.height()),
-            );
-            painter.rect_filled(peak_rect, corner, ui.visuals().selection.bg_fill);
+            let peak_origin = rect.min;
+            let rms_origin = pos2(rect.left() + half, rect.top());
 
-            let rms_min = pos2(rect.left() + half, rect.top());
-            let rms_rect = Rect::from_min_size(
-                rms_min,
-                Vec2::new(half * fraction_of(rms_db), rect.height()),
-            );
-            painter.rect_filled(
-                rms_rect,
+            draw_meter_half(
+                painter,
+                peak_origin,
+                half,
+                rect.height(),
                 corner,
-                ui.visuals().selection.bg_fill.gamma_multiply(0.7),
+                roles,
+                peak_db,
+            );
+            draw_meter_half(
+                painter,
+                rms_origin,
+                half,
+                rect.height(),
+                corner,
+                roles,
+                rms_db,
             );
 
             painter.rect_stroke(
@@ -84,9 +97,103 @@ pub fn level_pair(ui: &mut Ui, side_label_key: &str, level: LevelPair) {
         });
         response.on_hover_text(accessible);
 
-        ui.label(peak_text);
-        ui.label(rms_text);
+        // 014-design-tokens-and-type-scale (US3, T042): peak/RMS meter
+        // readouts are numeric fields compared side by side — `mono` so
+        // their digits line up in a fixed-width column.
+        ui.label(theme::mono_text(peak_text));
+        ui.label(theme::mono_text(rms_text));
     });
+}
+
+/// One sub-bar's segmented fill plus its own −6/0 dB scale marks
+/// (data-model.md §6, contract M9): the same band selection and mark
+/// rules `peak_meter` uses, applied to a half-width track whose danger
+/// boundary is fixed at `SCALE_MAX_DB` (0 dBFS) — `level_pair` has no
+/// ceiling input (M8).
+fn draw_meter_half(
+    painter: &egui::Painter,
+    origin: Pos2,
+    width: f32,
+    height: f32,
+    corner: CornerRadius,
+    roles: &Roles,
+    level_db: f32,
+) {
+    let fill_right = origin.x + width * fraction_of(level_db);
+
+    let fill_rect =
+        Rect::from_min_size(origin, Vec2::new((fill_right - origin.x).max(0.0), height));
+    painter.rect_filled(
+        fill_rect,
+        corner,
+        controls::band_color(roles, Band::Positive),
+    );
+
+    let warning_right_db = level_db.min(SCALE_MAX_DB);
+    if warning_right_db > controls::BAND_WARNING_DB {
+        let warn_left = origin.x + width * fraction_of(controls::BAND_WARNING_DB);
+        let warn_right = origin.x + width * fraction_of(warning_right_db);
+        painter.rect_filled(
+            Rect::from_min_max(
+                pos2(warn_left, origin.y),
+                pos2(warn_right, origin.y + height),
+            ),
+            0.0,
+            controls::band_color(roles, Band::Warning),
+        );
+    }
+
+    if level_db >= SCALE_MAX_DB {
+        let danger_left = origin.x + width * fraction_of(SCALE_MAX_DB);
+        painter.rect_filled(
+            Rect::from_min_max(
+                pos2(danger_left, origin.y),
+                pos2(fill_right, origin.y + height),
+            ),
+            0.0,
+            controls::band_color(roles, Band::Danger),
+        );
+    }
+
+    let minus6_x = origin.x + width * fraction_of(controls::BAND_WARNING_DB);
+    paint_mark(
+        painter,
+        origin.y,
+        height,
+        minus6_x,
+        fill_right,
+        controls::SCALE_MARK_WIDTH,
+        roles,
+    );
+
+    let zero_x = origin.x + width - controls::SCALE_MARK_WIDTH;
+    paint_mark(
+        painter,
+        origin.y,
+        height,
+        zero_x,
+        fill_right,
+        controls::SCALE_MARK_WIDTH,
+        roles,
+    );
+}
+
+/// One scale mark (contract K3, shared with `peak_meter`): `surface.base`
+/// where the fill has reached `x`, `text.secondary` where it has not.
+fn paint_mark(
+    painter: &egui::Painter,
+    top: f32,
+    height: f32,
+    x: f32,
+    fill_right: f32,
+    width: f32,
+    roles: &Roles,
+) {
+    let filled = fill_right >= x;
+    painter.line_segment(
+        [pos2(x, top), pos2(x, top + height)],
+        Stroke::new(width, controls::mark_color(roles, filled)),
+    );
 }
 
 /// The nominal centre frequency 64 log-spaced bands (20 Hz–20 kHz)

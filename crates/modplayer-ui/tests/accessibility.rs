@@ -40,6 +40,18 @@ use modplayer_ui::library_view::{self, LibraryTab, LibraryViewState};
 use modplayer_ui::settings::controls::{self, ControlsScreen};
 use modplayer_ui::waveform::WaveformState;
 
+/// 014-design-tokens-and-type-scale (US2, T021-T024/T030-T033): a bare
+/// `Context::default()` has none of the token `Style`'s
+/// `Name("display")`/`Name("section")` text styles installed, which the
+/// screens this sweep renders now reach — panicking on layout otherwise.
+/// Install them once, exactly as `App::new`/`App::update` do (mirrors
+/// `controls.rs` test's identically-named helper).
+fn fresh_ctx() -> Context {
+    let ctx = Context::default();
+    modplayer_ui::theme::apply_tokens(&ctx);
+    ctx
+}
+
 struct TempDir(PathBuf);
 
 impl TempDir {
@@ -179,6 +191,7 @@ struct AccessNode {
     value: Option<String>,
     description: Option<String>,
     toggled: Option<Toggled>,
+    selected: Option<bool>,
     disabled: bool,
     labelled_by_something: bool,
 }
@@ -198,7 +211,7 @@ impl AccessNode {
 /// `rendered_texts`, kept structured instead of flattened to text so role/
 /// toggled/disabled state survive too).
 fn render_nodes(render: impl FnMut(&mut egui::Ui)) -> Vec<AccessNode> {
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut output = ctx.run_ui(default_input(), render);
     let update = output
@@ -217,6 +230,7 @@ fn render_nodes(render: impl FnMut(&mut egui::Ui)) -> Vec<AccessNode> {
             value: node.value().map(str::to_string),
             description: node.description().map(str::to_string),
             toggled: node.toggled(),
+            selected: node.is_selected(),
             disabled: node.is_disabled(),
             labelled_by_something: !node.labelled_by().is_empty(),
         })
@@ -351,6 +365,27 @@ fn queue_row_actions_expose_accessible_names() {
             "expected at least one `{key}` button, found none in {nodes:?}"
         );
     }
+}
+
+/// C4 (016-list-row-and-panel-components, contracts/panel-card.md): the
+/// Queue panel's header pins its exact, un-uppercased accessible name —
+/// the same shape as this file's own Transport-panel `Role::Heading` pin
+/// above (`transport_panel_controls_expose_accessible_names_and_states`)
+/// and `markers.rs`'s `markers-panel` pin, both of which stay passing
+/// unmodified alongside this addition.
+#[test]
+fn queue_panel_header_exposes_its_exact_accessible_name() {
+    let (mut controller, _handle, _dir) = active_controller("queue-panel-heading");
+    controller.queue_replace(vec![track("a"), track("b")]);
+
+    let nodes = render_nodes(|ui| modplayer_ui::queue_view::show(ui, &mut controller));
+    let title = find_one(&nodes, Role::Heading, &tr("queue-panel-title"));
+    assert!(!title.disabled, "{title:?}");
+    assert_eq!(
+        tr("queue-panel-title"),
+        "Queue",
+        "the un-uppercased header string must stay exactly \"Queue\""
+    );
 }
 
 /// 008 Phase 4 (US2, FR-015, contracts/ui-effect-chain.md §2): the Effect
@@ -719,9 +754,10 @@ fn search_box_exposes_a_text_input_labelled_search() {
     let (mut controller, _handle, _dir) = active_controller("search-box");
     let mut artwork = modplayer_ui::artwork::ArtworkCache::new();
     let mut focus = false;
+    let mut state = modplayer_ui::search_view::SearchViewState::default();
 
     let nodes = render_nodes(|ui| {
-        modplayer_ui::search_view::show(ui, &mut controller, &mut artwork, &mut focus);
+        modplayer_ui::search_view::show(ui, &mut controller, &mut artwork, &mut focus, &mut state);
     });
 
     let text_inputs: Vec<_> = nodes.iter().filter(|n| n.role == Role::TextInput).collect();
@@ -745,8 +781,9 @@ fn group_headers_expose_role_header_and_the_fixed_names() {
 
     let mut artwork = modplayer_ui::artwork::ArtworkCache::new();
     let mut focus = false;
+    let mut state = modplayer_ui::search_view::SearchViewState::default();
     let nodes = render_nodes(|ui| {
-        modplayer_ui::search_view::show(ui, &mut controller, &mut artwork, &mut focus);
+        modplayer_ui::search_view::show(ui, &mut controller, &mut artwork, &mut focus, &mut state);
     });
 
     find_one(&nodes, Role::Header, &tr("search-group-tracks"));
@@ -765,8 +802,9 @@ fn show_more_button_exposes_its_accessible_name_when_a_further_page_exists() {
 
     let mut artwork = modplayer_ui::artwork::ArtworkCache::new();
     let mut focus = false;
+    let mut state = modplayer_ui::search_view::SearchViewState::default();
     let nodes = render_nodes(|ui| {
-        modplayer_ui::search_view::show(ui, &mut controller, &mut artwork, &mut focus);
+        modplayer_ui::search_view::show(ui, &mut controller, &mut artwork, &mut focus, &mut state);
     });
 
     let expected = tr_args("search-show-more", &[("group", tr("search-group-tracks"))]);
@@ -781,8 +819,9 @@ fn each_row_exposes_a_list_item_and_an_actions_button() {
 
     let mut artwork = modplayer_ui::artwork::ArtworkCache::new();
     let mut focus = false;
+    let mut state = modplayer_ui::search_view::SearchViewState::default();
     let nodes = render_nodes(|ui| {
-        modplayer_ui::search_view::show(ui, &mut controller, &mut artwork, &mut focus);
+        modplayer_ui::search_view::show(ui, &mut controller, &mut artwork, &mut focus, &mut state);
     });
 
     let row_name = "Track 0 — Artist";
@@ -886,6 +925,55 @@ fn library_tabs_expose_role_tab_in_the_fixed_order() {
         "library-tab-recently-played",
     ] {
         find_one(&nodes, Role::Tab, &tr(key));
+    }
+}
+
+/// **T11** (FR-034, contracts/tab-strip.md): the active tab exposes both
+/// `set_selected(true)` and `set_toggled(Toggled::True)` — the underline
+/// is not the only carrier of "this tab is active" — while every inactive
+/// tab reports the `false` forms of both.
+#[test]
+fn active_library_tab_exposes_selected_and_toggled_true_others_false() {
+    let (mut controller, _handle, _dir) = active_controller("library-tab-selected-state");
+    let mut artwork = modplayer_ui::artwork::ArtworkCache::new();
+    let mut state = LibraryViewState {
+        tab: LibraryTab::SavedAlbums,
+        ..LibraryViewState::default()
+    };
+
+    let nodes = render_nodes(|ui| {
+        let _ = library_view::show(ui, &mut controller, &mut artwork, &mut state);
+    });
+
+    let active = find_one(&nodes, Role::Tab, &tr("library-tab-saved-albums"));
+    assert_eq!(
+        active.selected,
+        Some(true),
+        "the active tab must report set_selected(true): {active:?}"
+    );
+    assert_eq!(
+        active.toggled,
+        Some(Toggled::True),
+        "the active tab must report set_toggled(Toggled::True): {active:?}"
+    );
+
+    for key in [
+        "library-tab-saved-tracks",
+        "library-tab-followed-artists",
+        "library-tab-playlists",
+        "library-tab-recently-played",
+    ] {
+        let inactive = find_one(&nodes, Role::Tab, &tr(key));
+        assert_eq!(
+            inactive.selected,
+            Some(false),
+            "inactive tab {key:?} must report set_selected(false): {inactive:?}"
+        );
+        assert_eq!(
+            inactive.toggled,
+            Some(Toggled::False),
+            "inactive tab {key:?} must report set_toggled(Toggled::False): {inactive:?}"
+        );
     }
 }
 
@@ -1002,13 +1090,14 @@ fn detail_back_button_exposes_its_accessible_name() {
 
     let mut artwork = modplayer_ui::artwork::ArtworkCache::new();
     let target = DetailTarget::Artist(id);
+    let mut state = detail_view::DetailViewState::default();
     let nodes = render_nodes(|ui| {
-        let _ = detail_view::show(ui, &mut controller, &mut artwork, &target);
+        let _ = detail_view::show(ui, &mut controller, &mut artwork, &target, &mut state);
     });
     // First frame only issues `FetchTrackList`; settle it before asserting.
     controller.tick();
     let nodes2 = render_nodes(|ui| {
-        let _ = detail_view::show(ui, &mut controller, &mut artwork, &target);
+        let _ = detail_view::show(ui, &mut controller, &mut artwork, &target, &mut state);
     });
 
     for nodes in [&nodes, &nodes2] {
@@ -1117,7 +1206,7 @@ fn every_waveform_key_in_the_contract_table_is_reachable() {
     controller.queue_replace(vec![track("a")]);
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     // Tab to the overview (egui's default per-frame focus-advance model —
@@ -1532,7 +1621,7 @@ fn markers_panel_and_empty_state_are_exposed() {
 fn every_view_level_marker_shortcut_key_is_reachable() {
     let (mut controller, _dirs, mut artwork, mut waveform) =
         marker_controller("view-shortcuts-reachable");
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     // `I`/`O`: create and complete the current region.
@@ -1655,7 +1744,7 @@ fn every_focused_marker_key_is_reachable() {
         .add_point_marker()
         .unwrap_or_else(|e| unreachable!("add_point_marker: {e}"));
     waveform.focused_marker = Some(id);
-    let ctx = Context::default();
+    let ctx = fresh_ctx();
     ctx.enable_accesskit();
 
     let start = controller
@@ -1757,7 +1846,7 @@ fn fresh_bare_controller(label: &str) -> (PlaybackController<FakeBackend, Script
 }
 
 fn platform_now() -> Platform {
-    if Context::default().os().is_mac() {
+    if fresh_ctx().os().is_mac() {
         Platform::Mac
     } else {
         Platform::Other
@@ -2197,7 +2286,11 @@ fn transport_panel_controls_expose_accessible_names_and_states() {
 
     let nodes = render_nodes(|ui| modplayer_ui::transport_view::show(ui, &mut controller));
 
-    let title = find_one(&nodes, Role::Label, &tr("transport-panel-title"));
+    // 016-list-row-and-panel-components (FR-018's stated correction,
+    // contract C7): the header moved from a plain `ui.heading()` (`Role::
+    // Label`) to the shared `panel_card`'s `section`-role header
+    // (`Role::Heading`), like every other panel.
+    let title = find_one(&nodes, Role::Heading, &tr("transport-panel-title"));
     assert!(!title.disabled, "{title:?}");
 
     let holder = find_one(

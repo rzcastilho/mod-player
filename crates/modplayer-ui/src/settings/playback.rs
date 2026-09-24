@@ -10,6 +10,8 @@ use modplayer_audio_io::OutputBackend;
 use modplayer_audio_source::SourceHost;
 use modplayer_core::{PlaybackController, tr};
 
+use crate::theme;
+
 /// Owned across frames (mirrors `AboutScreen`/`DeveloperScreen`'s own
 /// sub-state) so a draft edit survives repaint and the last-known effective
 /// name — used as the field's placeholder, and to avoid recomputing it
@@ -88,7 +90,12 @@ fn show_nudge_step<B: OutputBackend, H: SourceHost>(
     controller: &mut PlaybackController<B, H>,
 ) -> egui::Response {
     let label = ui.label(tr("setting-nudge-step"));
-    ui.label(tr("setting-nudge-step-desc"));
+    // FR-006, U2: field-description prose, capped at the 72-character
+    // measure (research R17).
+    ui.scope(|ui| {
+        ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
+        ui.label(tr("setting-nudge-step-desc"));
+    });
     let mut value = i64::from(controller.nudge_step_ms());
     let response = ui
         .add(

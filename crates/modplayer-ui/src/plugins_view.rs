@@ -18,6 +18,10 @@ use modplayer_audio_source::SourceHost;
 use modplayer_core::plugins::PanelRowControl;
 use modplayer_core::{Health, PlaybackController, PluginRow, Source, tr, tr_args};
 
+use crate::theme;
+use crate::theme::controls::Variant;
+use crate::widgets::controls::{SwitchKind, button, destructive_gap, row_frame, switch};
+
 /// Draw the whole Plugins section: heading, either the empty state or one
 /// row per plugin (contracts/ui-plugins.md §2). Call once per frame while
 /// `Section::Plugins` is selected; the caller (`app.rs`, T106) is
@@ -70,28 +74,36 @@ fn show_row<B: OutputBackend, H: SourceHost>(
     controller: &mut PlaybackController<B, H>,
     row: &PluginRow,
 ) {
-    ui.horizontal(|ui| {
-        ui.label(&row.name);
-        ui.label(&row.version);
-        ui.label(tr(source_label_key(row.source)));
+    // FR-009, contract I6: the row's hover/pressed fill, reserved and set
+    // beneath the row's own content — zero layout change.
+    let row_id = ui.id().with(("plugins-row", row.id));
+    row_frame(ui, row_id, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(&row.name);
+            ui.label(&row.version);
+            ui.label(tr(source_label_key(row.source)));
 
-        show_enable_toggle(ui, controller, row);
+            show_enable_toggle(ui, controller, row);
 
-        if let Some(reason) = &row.invalid_reason {
-            ui.label(tr_args(
-                "plugins-invalid-manifest",
-                &[("reason", reason.to_string())],
-            ));
-            return;
-        }
+            if let Some(reason) = &row.invalid_reason {
+                ui.label(tr_args(
+                    "plugins-invalid-manifest",
+                    &[("reason", reason.to_string())],
+                ));
+                return;
+            }
 
-        if let Some(health) = row.health {
-            show_health(ui, health);
-        }
+            if let Some(health) = row.health {
+                show_health(ui, health);
+            }
 
-        ui.label(permissions_summary(row));
-        ui.label(cpu_label(row.cpu_pct_of_share));
-        ui.label(memory_label(row.memory_bytes));
+            ui.label(permissions_summary(row));
+            // 014-design-tokens-and-type-scale (US3, T040): CPU/memory figures
+            // are numeric readouts compared row-to-row — `mono` so their digits
+            // share one advance width and line up in a fixed-width column.
+            ui.label(theme::mono_text(cpu_label(row.cpu_pct_of_share)));
+            ui.label(theme::mono_text(memory_label(row.memory_bytes)));
+        });
     });
 
     show_panel_controls(ui, controller, row);
@@ -109,7 +121,7 @@ fn show_panel_controls<B: OutputBackend, H: SourceHost>(
 ) {
     for panel in &row.panels {
         ui.horizontal(|ui| {
-            ui.add_space(16.0);
+            ui.add_space(theme::space::LG);
             ui.label(&panel.title);
             show_show_hide_toggle(ui, controller, panel);
             show_enable_disable_toggle(ui, controller, panel);
@@ -150,13 +162,15 @@ fn show_enable_disable_toggle<B: OutputBackend, H: SourceHost>(
     controller: &mut PlaybackController<B, H>,
     panel: &PanelRowControl,
 ) {
-    let key = if panel.disabled {
-        "plugin-panel-enable"
+    if panel.disabled {
+        if ui.button(tr("plugin-panel-enable")).clicked() {
+            controller.plugin_panel_set_disabled(&panel.key, false);
+        }
     } else {
-        "plugin-panel-disable"
-    };
-    if ui.button(tr(key)).clicked() {
-        controller.plugin_panel_set_disabled(&panel.key, !panel.disabled);
+        destructive_gap(ui);
+        if button(ui, Variant::Destructive, tr("plugin-panel-disable")).clicked() {
+            controller.plugin_panel_set_disabled(&panel.key, true);
+        }
     }
 }
 
@@ -173,10 +187,11 @@ fn show_enable_toggle<B: OutputBackend, H: SourceHost>(
 ) {
     let mut enabled = row.enabled;
     let label = tr_args("plugins-enable-toggle", &[("plugin", row.name.clone())]);
-    let response = ui.add_enabled(
-        row.invalid_reason.is_none(),
-        egui::Checkbox::new(&mut enabled, label),
-    );
+    let response = ui
+        .add_enabled_ui(row.invalid_reason.is_none(), |ui| {
+            switch(ui, SwitchKind::Checkbox, &mut enabled, &label)
+        })
+        .inner;
     if response.changed() {
         if enabled {
             controller.plugin_enable(row.id);
@@ -186,21 +201,31 @@ fn show_enable_toggle<B: OutputBackend, H: SourceHost>(
     }
 }
 
+/// The health-dot colour for `health` (014-design-tokens-and-type-scale,
+/// U4/U5): existing threshold logic, unchanged, now resolving to a token
+/// role instead of an ad-hoc `from_rgb` — a pure mapping so
+/// `type_roles::health_dot_colours_come_from_roles` can pin it without
+/// standing up a `Ui`.
+#[must_use]
+pub fn health_color(roles: &theme::Roles, health: Health) -> Color32 {
+    match health {
+        Health::Ok => roles.positive,
+        Health::Warning => roles.warning,
+        Health::Suspended => roles.danger,
+    }
+}
+
 /// **Health** (contracts/ui-plugins.md §2): a `plugins-health-*` label
 /// with a colored dot ahead of it. The dot is purely decorative — the
 /// label text alone always spells out the state (Constitution/FR-022:
 /// colour never carries meaning alone).
 fn show_health(ui: &mut Ui, health: Health) {
-    let (color, key) = match health {
-        Health::Ok => (Color32::from_rgb(0x2e, 0xcc, 0x71), "plugins-health-ok"),
-        Health::Warning => (
-            Color32::from_rgb(0xf1, 0xc4, 0x0f),
-            "plugins-health-warning",
-        ),
-        Health::Suspended => (
-            Color32::from_rgb(0xe7, 0x4c, 0x3c),
-            "plugins-health-suspended",
-        ),
+    let roles = theme::roles(ui.visuals());
+    let color = health_color(roles, health);
+    let key = match health {
+        Health::Ok => "plugins-health-ok",
+        Health::Warning => "plugins-health-warning",
+        Health::Suspended => "plugins-health-suspended",
     };
     ui.horizontal(|ui| {
         ui.label(RichText::new("●").color(color));

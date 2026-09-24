@@ -7,15 +7,30 @@
 //! list (FR-004), fetched via `PlaybackController::library_track_list` and
 //! cached there (contracts/library-and-search-core.md §1).
 
-use egui::{Key, Ui};
+use egui::{Key, RichText, Ui};
 use modplayer_audio_io::OutputBackend;
 use modplayer_audio_source::{AlbumId, ArtistId, PlaylistId, SourceHost, TrackListSource};
 use modplayer_core::{PlaybackController, TrackListState, tr, tr_args};
 
 use crate::artwork::ArtworkCache;
 use crate::library_view::apply_row_action;
-use crate::rows::{RowAction, RowEntity, RowEvent, list_row, virtualized_list};
+use crate::rows::{
+    RowAction, RowEntity, RowEvent, RowSelection, entity_key, list_row, virtualized_list,
+};
+use crate::theme;
 use crate::widgets::skeleton::{ROW_HEIGHT, skeleton_row};
+
+/// The detail screen's own heading, explicit `title` + `text_primary`
+/// (014-design-tokens-and-type-scale, US2, T024, data-model.md §6 "Screen
+/// headings, detail headers") — `ui.heading` already inherits this size
+/// through the `Style`'s `Heading` remap, but the explicit call keeps this
+/// call site paired with the `.weak()` field lines beneath it, matching
+/// `rows::title_text`'s convention.
+fn heading_text(ui: &Ui, text: &str) -> RichText {
+    RichText::new(text)
+        .text_style(theme::text::TITLE)
+        .color(theme::roles(ui.visuals()).text_primary)
+}
 
 /// Which detail view is open (owned by `App`'s single-level detail-
 /// navigation stack, T065 — nothing in this slice links from one detail
@@ -34,14 +49,33 @@ pub enum DetailOutcome {
     Back,
 }
 
+/// This view's own frame-persistent state (US2, data-model.md §6): the
+/// selected row, and the target it was last reconciled against, so
+/// switching detail targets clears the selection (FR-028, contract S8).
+/// Never persisted.
+#[derive(Debug, Default)]
+pub struct DetailViewState {
+    pub selection: RowSelection,
+    pub last_target: Option<DetailTarget>,
+}
+
 /// Draw one detail view: the Back control, the header, then the track list
-/// (or "This playlist has no tracks" / a loading skeleton).
+/// (or "This playlist has no tracks" / a loading skeleton). `state` owns
+/// this view's selection (US2).
 pub fn show<B: OutputBackend, H: SourceHost>(
     ui: &mut Ui,
     controller: &mut PlaybackController<B, H>,
     artwork: &mut ArtworkCache,
     target: &DetailTarget,
+    state: &mut DetailViewState,
 ) -> DetailOutcome {
+    // FR-028, contract S8: a different detail target invalidates the
+    // previous target's row order — the selection no longer applies.
+    if state.last_target.as_ref() != Some(target) {
+        state.selection.clear();
+        state.last_target = Some(target.clone());
+    }
+
     let back_clicked = ui.button(tr("detail-back")).clicked();
     let back_key = ui.ctx().input(|i| {
         i.key_pressed(Key::Backspace) || (i.modifiers.alt && i.key_pressed(Key::ArrowLeft))
@@ -66,6 +100,11 @@ pub fn show<B: OutputBackend, H: SourceHost>(
                     ui.label(tr("playlist-no-tracks"));
                 }
             } else {
+                // Contract S3/S4, FR-012: re-check the selection against
+                // this frame's own track order before drawing.
+                state.selection.reconcile("detail-tracks", |i| {
+                    tracks.get(i).map(|t| t.id.as_str().to_string())
+                });
                 // Virtualised (US3 T071): only the tracks the viewport can
                 // currently show are laid out or fetch artwork, same as
                 // every other list (contracts/ui-surface.md §4/§7).
@@ -78,8 +117,14 @@ pub fn show<B: OutputBackend, H: SourceHost>(
                     None,
                     |ui, i| {
                         let entity = RowEntity::Track(tracks[i].clone());
-                        if let Some(RowEvent::Action(action)) = list_row(ui, artwork, &entity) {
-                            pending = Some((entity, action));
+                        let key = entity_key(&entity);
+                        let is_selected = state.selection.is_selected("detail-tracks", key, i);
+                        match list_row(ui, artwork, &entity, is_selected) {
+                            Some(RowEvent::Action(action)) => pending = Some((entity, action)),
+                            Some(RowEvent::Select) => {
+                                state.selection.select("detail-tracks", key, i);
+                            }
+                            Some(RowEvent::Open) | None => {}
                         }
                     },
                 );
@@ -112,10 +157,10 @@ fn draw_album_header<B: OutputBackend, H: SourceHost>(
         skeleton_row(ui, ROW_HEIGHT);
         return;
     };
-    ui.heading(&album.name);
-    ui.label(album.artists.join(", "));
+    ui.label(heading_text(ui, &album.name));
+    ui.label(RichText::new(album.artists.join(", ")).weak());
     if let Some(release) = &album.release_date {
-        ui.label(release.year.to_string());
+        ui.label(RichText::new(release.year.to_string()).weak());
     }
 }
 
@@ -128,17 +173,23 @@ fn draw_playlist_header<B: OutputBackend, H: SourceHost>(
         skeleton_row(ui, ROW_HEIGHT);
         return;
     };
-    ui.heading(&playlist.name);
+    ui.label(heading_text(ui, &playlist.name));
     if !playlist.editable {
-        ui.label(tr_args(
-            "playlist-owner",
-            &[("name", playlist.owner_name.clone())],
-        ));
+        ui.label(
+            RichText::new(tr_args(
+                "playlist-owner",
+                &[("name", playlist.owner_name.clone())],
+            ))
+            .weak(),
+        );
     }
-    ui.label(tr_args(
-        "playlist-track-count",
-        &[("count", playlist.track_count.to_string())],
-    ));
+    ui.label(
+        RichText::new(tr_args(
+            "playlist-track-count",
+            &[("count", playlist.track_count.to_string())],
+        ))
+        .weak(),
+    );
 }
 
 fn draw_artist_header<B: OutputBackend, H: SourceHost>(
@@ -150,5 +201,5 @@ fn draw_artist_header<B: OutputBackend, H: SourceHost>(
         skeleton_row(ui, ROW_HEIGHT);
         return;
     };
-    ui.heading(&artist.name);
+    ui.label(heading_text(ui, &artist.name));
 }

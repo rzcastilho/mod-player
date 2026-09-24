@@ -20,6 +20,21 @@ use modplayer_core::actions::{
 use modplayer_core::{PlaybackController, tr, tr_args};
 
 use crate::actions::{self, Claim, key_name_from_egui, mods_from_egui};
+use crate::theme;
+
+/// Draw one `section`-role heading (014-design-tokens-and-type-scale, US2,
+/// T033, data-model.md §6 "settings groups" -> `theme::section_label`), and
+/// pin its accesskit accessible name back to the exact, un-uppercased
+/// `text` — mirroring `markers.rs`'s `panel()` (T030) — so
+/// `rendered_texts`-style exact-text assertions (`controls.rs` tests) and
+/// FR-019 ("no behaviour change") both still see the original string, even
+/// though the painted text is now uppercase+tracked.
+fn section_heading(ui: &mut Ui, text: &str) {
+    let response = ui.label(theme::section_label(text));
+    ui.ctx().accesskit_node_builder(response.id, |b| {
+        b.set_label(text);
+    });
+}
 
 /// UI-only state for the Controls screen (data-model.md §4.3): the live
 /// filter text, which action (if any) is mid-capture, the last inline
@@ -265,7 +280,7 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     };
     let rows = snapshot_rows(controller);
 
-    ui.heading(tr("controls-heading"));
+    section_heading(ui, &tr("controls-heading"));
 
     ui.horizontal(|ui| {
         let filter_label = ui.label(tr("controls-filter"));
@@ -279,7 +294,7 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     });
 
     show_reset_all(ui, controller, screen);
-    ui.separator();
+    theme::divider(ui);
 
     let query = screen.filter.to_lowercase();
     let mut any_match = false;
@@ -294,7 +309,7 @@ pub fn show<B: OutputBackend, H: SourceHost>(
             continue;
         }
         any_match = true;
-        ui.heading(tr(category.label_key()));
+        section_heading(ui, &tr(category.label_key()));
         for row in category_rows {
             show_row(ui, controller, screen, row, platform);
         }
@@ -323,10 +338,10 @@ pub fn show<B: OutputBackend, H: SourceHost>(
             continue;
         }
         any_match = true;
-        ui.heading(tr_args(
-            "controls-plugin-group",
-            &[("plugin", name.clone())],
-        ));
+        section_heading(
+            ui,
+            &tr_args("controls-plugin-group", &[("plugin", name.clone())]),
+        );
         for row in plugin_rows {
             show_row(ui, controller, screen, row, platform);
         }

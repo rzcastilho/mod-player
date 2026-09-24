@@ -33,7 +33,7 @@ use modplayer_core::markers::{CueSlot, TrackMarkers};
 use modplayer_core::notifications::KEY_EFFECTS_NO_TIME_STRETCH;
 use modplayer_core::plugins::{Lifecycle, PluginId};
 use modplayer_core::settings::SettingsStore;
-use modplayer_core::{Intent, LoopState, PlaybackController};
+use modplayer_core::{Intent, LoopState, NowPlayingPanel, PlaybackController};
 use modplayer_effects::catalog::NodeKind;
 use modplayer_engine::{BufferPreset, DeviceId, FrameCount, SampleRate};
 use modplayer_ui::actions::{Claim, FocusClaims, Invocation};
@@ -1268,13 +1268,11 @@ fn q_toggles_queue_panel_in_now_playing_only() {
     let mut waveform = WaveformState::default();
     let ctx = Context::default();
     let claims = FocusClaims::default();
-    let queue_panel_id = Id::new("now-playing-queue-panel-open");
-    let queue_open = || {
-        ctx.memory(|m| m.data.get_temp::<bool>(queue_panel_id))
-            .unwrap_or(false)
-    };
 
-    assert!(!queue_open(), "sanity: the queue panel starts closed");
+    assert!(
+        !controller.now_playing_panel_open(NowPlayingPanel::Queue),
+        "sanity: the queue panel starts closed"
+    );
 
     // Outside Now Playing: `Q` is bound but `Scope::NowPlaying` isn't
     // live, so it must not resolve at all.
@@ -1291,7 +1289,7 @@ fn q_toggles_queue_panel_in_now_playing_only() {
         invocations.is_empty(),
         "Q must not fire outside Now Playing"
     );
-    assert!(!queue_open());
+    assert!(!controller.now_playing_panel_open(NowPlayingPanel::Queue));
 
     // In Now Playing: opens, then closes.
     press(
@@ -1303,7 +1301,10 @@ fn q_toggles_queue_panel_in_now_playing_only() {
         &mut shell,
         &mut waveform,
     );
-    assert!(queue_open(), "Q must open the queue panel in Now Playing");
+    assert!(
+        controller.now_playing_panel_open(NowPlayingPanel::Queue),
+        "Q must open the queue panel in Now Playing"
+    );
 
     press(
         &ctx,
@@ -1314,7 +1315,10 @@ fn q_toggles_queue_panel_in_now_playing_only() {
         &mut shell,
         &mut waveform,
     );
-    assert!(!queue_open(), "a second Q must close it again");
+    assert!(
+        !controller.now_playing_panel_open(NowPlayingPanel::Queue),
+        "a second Q must close it again"
+    );
 }
 
 /// `E` toggles the Effect Chain panel only while Now Playing is shown
@@ -1330,14 +1334,9 @@ fn toggle_effect_chain_dispatches_in_now_playing_only() {
     let mut waveform = WaveformState::default();
     let ctx = Context::default();
     let claims = FocusClaims::default();
-    let effects_panel_id = modplayer_ui::effects_view::panel_open_id();
-    let effects_open = || {
-        ctx.memory(|m| m.data.get_temp::<bool>(effects_panel_id))
-            .unwrap_or(false)
-    };
 
     assert!(
-        !effects_open(),
+        !controller.now_playing_panel_open(NowPlayingPanel::EffectChain),
         "sanity: the effect chain panel starts closed"
     );
 
@@ -1356,7 +1355,7 @@ fn toggle_effect_chain_dispatches_in_now_playing_only() {
         invocations.is_empty(),
         "E must not fire outside Now Playing"
     );
-    assert!(!effects_open());
+    assert!(!controller.now_playing_panel_open(NowPlayingPanel::EffectChain));
 
     // In Now Playing: opens, then closes.
     press(
@@ -1369,7 +1368,7 @@ fn toggle_effect_chain_dispatches_in_now_playing_only() {
         &mut waveform,
     );
     assert!(
-        effects_open(),
+        controller.now_playing_panel_open(NowPlayingPanel::EffectChain),
         "E must open the effect chain panel in Now Playing"
     );
 
@@ -1382,7 +1381,10 @@ fn toggle_effect_chain_dispatches_in_now_playing_only() {
         &mut shell,
         &mut waveform,
     );
-    assert!(!effects_open(), "a second E must close it again");
+    assert!(
+        !controller.now_playing_panel_open(NowPlayingPanel::EffectChain),
+        "a second E must close it again"
+    );
 }
 
 // -- T053: FR-018 scopes -----------------------------------------------------
@@ -1995,14 +1997,9 @@ fn t_toggles_transport_panel_in_now_playing_scope() {
     let mut waveform = WaveformState::default();
     let ctx = Context::default();
     let claims = FocusClaims::default();
-    let transport_panel_id = modplayer_ui::transport_view::panel_open_id();
-    let transport_open = || {
-        ctx.memory(|m| m.data.get_temp::<bool>(transport_panel_id))
-            .unwrap_or(false)
-    };
 
     assert!(
-        !transport_open(),
+        !controller.now_playing_panel_open(NowPlayingPanel::Transport),
         "sanity: the Transport panel starts closed"
     );
 
@@ -2017,7 +2014,7 @@ fn t_toggles_transport_panel_in_now_playing_scope() {
         &mut waveform,
     );
     assert!(
-        transport_open(),
+        controller.now_playing_panel_open(NowPlayingPanel::Transport),
         "T must open the Transport panel in Now Playing"
     );
 
@@ -2030,7 +2027,10 @@ fn t_toggles_transport_panel_in_now_playing_scope() {
         &mut shell,
         &mut waveform,
     );
-    assert!(!transport_open(), "a second T must close it again");
+    assert!(
+        !controller.now_playing_panel_open(NowPlayingPanel::Transport),
+        "a second T must close it again"
+    );
 }
 
 /// `T` inside a focused text-like field types the character and never
@@ -2048,7 +2048,6 @@ fn t_ignored_while_text_field_focused() {
     ctx.memory_mut(|m| m.request_focus(text_field_id));
     let mut claims = FocusClaims::default();
     claims.register(text_field_id, Claim::TextLike);
-    let transport_panel_id = modplayer_ui::transport_view::panel_open_id();
 
     let invocations = press(
         &ctx,
@@ -2065,8 +2064,7 @@ fn t_ignored_while_text_field_focused() {
         "a focused text-like field must silence T, like every other action"
     );
     assert!(
-        !ctx.memory(|m| m.data.get_temp::<bool>(transport_panel_id))
-            .unwrap_or(false),
+        !controller.now_playing_panel_open(NowPlayingPanel::Transport),
         "the Transport panel must stay closed"
     );
 }
@@ -2099,10 +2097,7 @@ fn t_ignored_outside_now_playing() {
         "T must not fire outside Now Playing"
     );
     assert!(
-        !ctx.memory(|m| m
-            .data
-            .get_temp::<bool>(modplayer_ui::transport_view::panel_open_id()))
-            .unwrap_or(false),
+        !controller.now_playing_panel_open(NowPlayingPanel::Transport),
         "the Transport panel must stay closed"
     );
 }

@@ -42,7 +42,7 @@ use crate::sign_in::{self, SignInScreen, TierResult};
 use crate::ticker::Ticker;
 use crate::waveform::WaveformState;
 use crate::welcome::{self, WelcomeScreen};
-use crate::{notifications, now_playing, plugins_view, search_view, settings, theme};
+use crate::{notifications, now_playing, plugins_view, search_view, settings, theme, widgets};
 
 /// Upper bound between UI frames while the app is running (≈ 30 Hz).
 const REPAINT_INTERVAL: Duration = Duration::from_millis(33);
@@ -98,6 +98,14 @@ pub struct App<B: OutputBackend, H: SourceHost> {
     /// in this slice opens a detail view from another detail view, so one
     /// level is enough.
     library_detail: Option<detail_view::DetailTarget>,
+    /// The Search view's own frame-persistent state (US2: row selection,
+    /// cleared on a new query) — constructed once and reused like
+    /// `library_view`/`settings`.
+    search_view: search_view::SearchViewState,
+    /// The detail view's own frame-persistent state (US2: row selection,
+    /// cleared on a target change) — constructed once and reused like
+    /// `library_view`/`settings`.
+    detail_view: detail_view::DetailViewState,
     /// The Now Playing waveform widgets' own session state (005-now-
     /// playing-waveform, data-model.md §5.2: drag preview, detail window)
     /// — constructed once and reused like `library_view`/`settings`.
@@ -114,6 +122,7 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
         mut controller: PlaybackController<B, H>,
         account: AccountService,
     ) -> Self {
+        theme::apply_tokens_for(&cc.egui_ctx, controller.high_contrast());
         theme::apply(&cc.egui_ctx, controller.theme());
         let disclosure_acknowledged_version = controller
             .settings_store()
@@ -171,6 +180,8 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
             artwork: ArtworkCache::new(),
             library_view: library_view::LibraryViewState::default(),
             library_detail: None,
+            search_view: search_view::SearchViewState::default(),
+            detail_view: detail_view::DetailViewState::default(),
             waveform: WaveformState::default(),
         }
     }
@@ -204,6 +215,13 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
 
 impl<B: OutputBackend, H: SourceHost> eframe::App for App<B, H> {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        // Re-install the token `Style` for both themes (014-design-
+        // tokens-and-type-scale, FR-002, research R7): idempotent and
+        // allocation-free after the first call, so a token change or a
+        // theme switch is visible everywhere on the next frame with no
+        // per-view code. First statement, before any widget draws.
+        theme::apply_tokens_for(ui.ctx(), self.controller.high_contrast());
+
         // Retry any pending commands, drain device events (US3 of 001),
         // and age out Info notifications — once per frame.
         self.controller.tick();
@@ -304,6 +322,11 @@ impl<B: OutputBackend, H: SourceHost> eframe::App for App<B, H> {
             LaunchStep::DeviceCheck => self.show_launch_gate_device_check(ui),
             LaunchStep::Main => self.show_main(ui),
         });
+
+        // The app-wide focus ring (015-control-variants, research R3,
+        // contract F4): one pass, after every panel, so no view file
+        // paints a ring. Last statement of `App::ui`.
+        widgets::controls::paint_focus_ring(ui.ctx());
     }
 
     /// Closing the window quits (FR-008): stop, release the source's
@@ -519,6 +542,7 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
                     &mut self.controller,
                     &mut self.artwork,
                     &mut self.shell.focus_search_requested,
+                    &mut self.search_view,
                 );
             }
             Section::NowPlaying => now_playing::show(
@@ -560,7 +584,13 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
     /// scope (library_view.rs's doc comment).
     fn show_library(&mut self, ui: &mut Ui) {
         if let Some(target) = self.library_detail.clone() {
-            let outcome = detail_view::show(ui, &mut self.controller, &mut self.artwork, &target);
+            let outcome = detail_view::show(
+                ui,
+                &mut self.controller,
+                &mut self.artwork,
+                &target,
+                &mut self.detail_view,
+            );
             if outcome == DetailOutcome::Back {
                 self.library_detail = None;
             }

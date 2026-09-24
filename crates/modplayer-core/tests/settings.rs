@@ -20,8 +20,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use modplayer_audio_io::FakeBackend;
 use modplayer_audio_source_synthetic::SyntheticHost;
 use modplayer_core::settings::{
-    AudioSettings, DeviceName, DisclosureAcknowledgement, InvalidField, PanelPersisted,
-    PanelPlacement, RawPanel, RawSettings, SettingsStore, SettingsWarning,
+    AudioSettings, DeviceName, DisclosureAcknowledgement, InvalidField, NowPlayingPanels,
+    PanelPersisted, PanelPlacement, RawPanel, RawSettings, SettingsStore, SettingsWarning,
     generate_connect_device_id,
 };
 use modplayer_core::{Chord, FocusPolicy, HostAction, PlaybackController};
@@ -706,6 +706,66 @@ proptest! {
 
         let outcome = store.load();
         prop_assert_eq!(outcome.settings.plugin_panels, settings.plugin_panels);
+        prop_assert!(outcome.warnings.is_empty());
+    }
+
+    // 016-list-row-and-panel-components (Constitution VIII, contracts/
+    // panel-card.md P9): an arbitrary `(effect_chain_open, transport_open,
+    // queue_open)` triple round-trips through a real save/load, with no
+    // warning and `SCHEMA_VERSION` unchanged — the MUST for new
+    // serialized state, beyond the example-based P4/P6 cases in
+    // `settings/model.rs`'s own unit tests.
+    #[test]
+    fn now_playing_panels_round_trip_proptest(
+        effect_chain_open in any::<bool>(),
+        transport_open in any::<bool>(),
+        queue_open in any::<bool>(),
+    ) {
+        let dir = TempDir::new();
+        let store = store_in(&dir);
+        let settings = AudioSettings {
+            now_playing_panels: NowPlayingPanels {
+                effect_chain_open,
+                transport_open,
+                queue_open,
+            },
+            ..AudioSettings::default()
+        };
+        prop_assert!(store.save(&settings).is_ok());
+
+        let outcome = store.load();
+        prop_assert_eq!(outcome.settings.now_playing_panels, settings.now_playing_panels);
+        prop_assert!(outcome.warnings.is_empty());
+        prop_assert_eq!(outcome.settings.schema_version, modplayer_core::settings::SCHEMA_VERSION);
+    }
+
+    // 017-high-contrast-appearance (T003, contracts/appearance-setting.md
+    // A10, Constitution VIII): for an arbitrary `(Theme, bool)` pair,
+    // `from_settings` -> serialize -> deserialize -> `into_settings`
+    // returns the same pair with an empty `invalid` list.
+    #[test]
+    fn appearance_axis_round_trip_proptest(
+        theme_idx in 0usize..3,
+        high_contrast in any::<bool>(),
+    ) {
+        const THEMES: [modplayer_engine::Theme; 3] = [
+            modplayer_engine::Theme::System,
+            modplayer_engine::Theme::Light,
+            modplayer_engine::Theme::Dark,
+        ];
+        let theme = THEMES[theme_idx];
+        let dir = TempDir::new();
+        let store = store_in(&dir);
+        let settings = AudioSettings {
+            theme,
+            high_contrast,
+            ..AudioSettings::default()
+        };
+        prop_assert!(store.save(&settings).is_ok());
+
+        let outcome = store.load();
+        prop_assert_eq!(outcome.settings.theme, theme);
+        prop_assert_eq!(outcome.settings.high_contrast, high_contrast);
         prop_assert!(outcome.warnings.is_empty());
     }
 }
