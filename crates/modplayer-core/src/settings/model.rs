@@ -106,6 +106,10 @@ pub struct AudioSettings {
     pub safe_volume: SafeVolume,
     pub master_volume: VolumePercent,
     pub theme: Theme,
+    /// `[appearance] high_contrast` (017-high-contrast-appearance, FR-003):
+    /// the second, independent appearance axis. `false` = today's
+    /// behaviour unchanged.
+    pub high_contrast: bool,
     pub disclosure: Option<DisclosureAcknowledgement>,
     /// `[playback] device_name` (FR-001); `None` = use the default name.
     pub device_name: Option<DeviceName>,
@@ -156,6 +160,7 @@ impl Default for AudioSettings {
             safe_volume: SafeVolume::default(),
             master_volume: VolumePercent::new(80),
             theme: Theme::default(),
+            high_contrast: false,
             disclosure: None,
             device_name: None,
             connect_device_id: None,
@@ -198,6 +203,9 @@ fn clamp_nudge_step_ms(raw: i64) -> u16 {
 pub enum InvalidField {
     BufferPreset,
     Theme,
+    /// `[appearance] high_contrast` held a non-boolean value
+    /// (017-high-contrast-appearance, FR-003, research R10).
+    HighContrast,
     /// `[playback] device_name` was longer than 64 characters after trim
     /// (contracts/transport-and-queue.md §5).
     DeviceName,
@@ -217,6 +225,7 @@ impl InvalidField {
         match self {
             InvalidField::BufferPreset => "audio.buffer_preset",
             InvalidField::Theme => "appearance.theme",
+            InvalidField::HighContrast => "appearance.high_contrast",
             InvalidField::DeviceName => "playback.device_name",
             InvalidField::FocusPolicy => "transport.focus_policy",
             InvalidField::PluginPanel(_) => "plugin_panels",
@@ -489,18 +498,30 @@ fn default_cap() -> i64 {
 pub struct RawAppearance {
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// FR-003 (research R10). `toml::Value`, not `bool`, on purpose:
+    /// serde's derived `Deserialize for bool` *errors* on a non-boolean,
+    /// and `store.rs`'s load path turns any deserialize error into a
+    /// total discard of the settings file. A permissive raw type plus
+    /// late validation (`into_settings`) is `theme`'s own pattern.
+    #[serde(default = "default_high_contrast")]
+    pub high_contrast: toml::Value,
 }
 
 impl Default for RawAppearance {
     fn default() -> Self {
         Self {
             theme: default_theme(),
+            high_contrast: default_high_contrast(),
         }
     }
 }
 
 fn default_theme() -> String {
     "system".to_string()
+}
+
+fn default_high_contrast() -> toml::Value {
+    toml::Value::Boolean(false)
 }
 
 /// The `[disclosure]` section (002-first-launch-and-sign-in
@@ -568,6 +589,7 @@ impl RawSettings {
                     Theme::Dark => "dark",
                 }
                 .to_string(),
+                high_contrast: toml::Value::Boolean(settings.high_contrast),
             },
             disclosure: match settings.disclosure {
                 Some(ack) => RawDisclosure {
@@ -698,6 +720,19 @@ impl RawSettings {
             }
         };
 
+        // 017-high-contrast-appearance (FR-003, research R10): a
+        // non-boolean value recovers to `false` and is reported, but
+        // never discards the rest of the file (the raw type is already a
+        // permissive `toml::Value`, so `toml::from_str` itself never
+        // failed on this field).
+        let high_contrast = match self.appearance.high_contrast.as_bool() {
+            Some(value) => value,
+            None => {
+                invalid.push(InvalidField::HighContrast);
+                false
+            }
+        };
+
         let focus_policy = match FocusPolicy::parse(&self.transport.focus_policy) {
             Some(policy) => policy,
             None => {
@@ -785,6 +820,7 @@ impl RawSettings {
             },
             master_volume: VolumePercent::from_i64(self.audio.master_volume),
             theme,
+            high_contrast,
             disclosure,
             device_name,
             connect_device_id,
@@ -1034,5 +1070,203 @@ mod tests {
                 acknowledged_at: OffsetDateTime::UNIX_EPOCH,
             })
         );
+    }
+
+    // -----------------------------------------------------------------
+    // 017-high-contrast-appearance: T002 — contracts/appearance-setting.md
+    // §1 (A1-A9) and §2 (A11-A13). A10's proptest round-trip lives beside
+    // `plugin_panels_round_trip_proptest` in `tests/settings.rs`
+    // (Constitution VIII).
+    // -----------------------------------------------------------------
+
+    /// A1.
+    #[test]
+    fn default_settings_have_high_contrast_off() {
+        assert!(!AudioSettings::default().high_contrast);
+    }
+
+    /// A2: `[appearance]` with `theme` but no `high_contrast` yields
+    /// `false` and no `InvalidField` — the serde default, not a recovery.
+    #[test]
+    fn absent_high_contrast_defaults_off_silently() {
+        let raw = RawSettings::default();
+        let (settings, invalid, _dropped) = raw.into_settings();
+        assert!(!settings.high_contrast);
+        assert!(invalid.is_empty());
+    }
+
+    /// A3.
+    #[test]
+    fn high_contrast_round_trips() {
+        for on in [true, false] {
+            let settings = AudioSettings {
+                high_contrast: on,
+                ..AudioSettings::default()
+            };
+            let raw = RawSettings::from_settings(&settings);
+            let (round_tripped, invalid, dropped) = raw.into_settings();
+            assert!(invalid.is_empty());
+            assert!(dropped.is_empty());
+            assert_eq!(round_tripped.high_contrast, on);
+        }
+    }
+
+    /// A4: a present-but-non-boolean value recovers to `false` and reports
+    /// `InvalidField::HighContrast`, for a representative TOML type each.
+    #[test]
+    fn malformed_high_contrast_recovers_and_reports() {
+        for bad in [
+            toml::Value::String("yes".to_string()),
+            toml::Value::Integer(1),
+            toml::Value::Array(vec![]),
+            toml::Value::Table(toml::map::Map::new()),
+        ] {
+            let mut raw = RawSettings::default();
+            raw.appearance.high_contrast = bad.clone();
+            let (settings, invalid, dropped) = raw.into_settings();
+            assert!(dropped.is_empty());
+            assert!(!settings.high_contrast, "bad value {bad:?}");
+            assert_eq!(
+                invalid,
+                vec![InvalidField::HighContrast],
+                "bad value {bad:?}"
+            );
+        }
+    }
+
+    /// A5: in the A4 case, every other setting in the file survives — the
+    /// clause a plain `bool` field would fail (research R10).
+    #[test]
+    fn a_malformed_high_contrast_does_not_discard_the_file() {
+        let mut raw = RawSettings::default();
+        raw.appearance.theme = "dark".to_string();
+        raw.appearance.high_contrast = toml::Value::String("yes".to_string());
+        raw.audio.master_volume = 42;
+        raw.playback.device_name = Some("My Device".to_string());
+
+        // The crux of research R10: `toml::from_str` must actually succeed
+        // parsing a malformed `high_contrast`, not error the whole file —
+        // that is what a plain `bool` field would not survive.
+        let serialized = toml::to_string(&raw).unwrap_or_else(|e| unreachable!("serialize: {e}"));
+        let reparsed: RawSettings =
+            toml::from_str(&serialized).unwrap_or_else(|e| unreachable!("parse: {e}"));
+
+        let (settings, invalid, dropped) = reparsed.into_settings();
+        assert!(dropped.is_empty());
+        assert_eq!(invalid, vec![InvalidField::HighContrast]);
+        assert!(!settings.high_contrast);
+        assert_eq!(settings.theme, Theme::Dark, "theme must survive intact");
+        assert_eq!(
+            settings.master_volume.value(),
+            42,
+            "master_volume must survive intact"
+        );
+        assert_eq!(
+            settings.device_name.map(|n| n.as_str().to_string()),
+            Some("My Device".to_string()),
+            "device_name must survive intact"
+        );
+    }
+
+    /// A6.
+    #[test]
+    fn high_contrast_invalid_field_has_its_own_name() {
+        assert_eq!(
+            InvalidField::HighContrast.field_name(),
+            "appearance.high_contrast"
+        );
+    }
+
+    /// A7: a malformed `theme` and a malformed `high_contrast` in one file
+    /// report both invalid fields, in declaration order, and recover both.
+    #[test]
+    fn both_appearance_fields_can_be_invalid_at_once() {
+        let mut raw = RawSettings::default();
+        raw.appearance.theme = "midnight".to_string();
+        raw.appearance.high_contrast = toml::Value::Integer(7);
+        let (settings, invalid, dropped) = raw.into_settings();
+        assert!(dropped.is_empty());
+        assert_eq!(settings.theme, Theme::default());
+        assert!(!settings.high_contrast);
+        assert_eq!(
+            invalid,
+            vec![InvalidField::Theme, InvalidField::HighContrast]
+        );
+    }
+
+    /// A8: `from_settings` writes a plain TOML boolean.
+    #[test]
+    fn saved_high_contrast_is_a_plain_toml_boolean() {
+        let settings = AudioSettings {
+            high_contrast: false,
+            ..AudioSettings::default()
+        };
+        let raw = RawSettings::from_settings(&settings);
+        assert_eq!(raw.appearance.high_contrast, toml::Value::Boolean(false));
+        let serialized = toml::to_string(&raw).unwrap_or_else(|e| unreachable!("serialize: {e}"));
+        assert!(
+            serialized.contains("high_contrast = false"),
+            "expected a plain boolean literal, got:\n{serialized}"
+        );
+        let reparsed: RawSettings =
+            toml::from_str(&serialized).unwrap_or_else(|e| unreachable!("parse: {e}"));
+        assert_eq!(
+            reparsed.appearance.high_contrast,
+            toml::Value::Boolean(false)
+        );
+    }
+
+    /// A9: schema version is unaffected by this feature.
+    #[test]
+    fn schema_version_stays_one() {
+        assert_eq!(SCHEMA_VERSION, 1);
+    }
+
+    /// A11.
+    #[test]
+    fn theme_enum_is_unchanged() {
+        let variants = [Theme::System, Theme::Light, Theme::Dark];
+        assert_eq!(variants.len(), 3);
+        for theme in variants {
+            match theme {
+                Theme::System | Theme::Light | Theme::Dark => {}
+            }
+        }
+    }
+
+    /// A12: all six `(theme, high_contrast)` combinations round-trip.
+    #[test]
+    fn every_theme_and_axis_combination_round_trips() {
+        for theme in [Theme::System, Theme::Light, Theme::Dark] {
+            for high_contrast in [false, true] {
+                let settings = AudioSettings {
+                    theme,
+                    high_contrast,
+                    ..AudioSettings::default()
+                };
+                let raw = RawSettings::from_settings(&settings);
+                let (round_tripped, invalid, dropped) = raw.into_settings();
+                assert!(invalid.is_empty());
+                assert!(dropped.is_empty());
+                assert_eq!(round_tripped.theme, theme);
+                assert_eq!(round_tripped.high_contrast, high_contrast);
+            }
+        }
+    }
+
+    /// A13: neither axis normalises the other.
+    #[test]
+    fn the_two_axes_are_independent() {
+        let mut settings = AudioSettings {
+            theme: Theme::Dark,
+            ..AudioSettings::default()
+        };
+        assert!(!settings.high_contrast);
+
+        settings.high_contrast = true;
+        assert_eq!(settings.theme, Theme::Dark, "theme must stay untouched");
+
+        settings.theme = Theme::Light;
+        assert!(settings.high_contrast, "high_contrast must stay untouched");
     }
 }

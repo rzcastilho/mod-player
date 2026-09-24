@@ -533,6 +533,10 @@ const SETTINGS_SCREEN_KEYS: &[&str] = &[
     "setting-theme-system",
     "setting-theme-light",
     "setting-theme-dark",
+    // 017-high-contrast-appearance (US2, T023, contracts/appearance-
+    // setting.md A15): the checkbox below the Theme combo.
+    "setting-high-contrast",
+    "setting-high-contrast-desc",
     // Language category.
     "setting-locale",
     "setting-locale-desc",

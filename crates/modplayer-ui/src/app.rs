@@ -122,7 +122,7 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
         mut controller: PlaybackController<B, H>,
         account: AccountService,
     ) -> Self {
-        theme::apply_tokens(&cc.egui_ctx);
+        theme::apply_tokens_for(&cc.egui_ctx, controller.high_contrast());
         theme::apply(&cc.egui_ctx, controller.theme());
         let disclosure_acknowledged_version = controller
             .settings_store()
@@ -220,7 +220,7 @@ impl<B: OutputBackend, H: SourceHost> eframe::App for App<B, H> {
         // allocation-free after the first call, so a token change or a
         // theme switch is visible everywhere on the next frame with no
         // per-view code. First statement, before any widget draws.
-        theme::apply_tokens(ui.ctx());
+        theme::apply_tokens_for(ui.ctx(), self.controller.high_contrast());
 
         // Retry any pending commands, drain device events (US3 of 001),
         // and age out Info notifications — once per frame.

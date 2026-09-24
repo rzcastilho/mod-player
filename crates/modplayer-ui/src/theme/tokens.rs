@@ -24,6 +24,15 @@ pub struct Roles {
     pub warning: egui::Color32,
     pub danger: egui::Color32,
     pub disabled_alpha: f32,
+    /// FR-007 (017-high-contrast-appearance, research R3): the multiplier
+    /// `divider_color_for` applies to `text_primary`. `0.08` normal,
+    /// `1.00` high contrast — the divider is still never a role of its
+    /// own, never a call-site literal (014 contract T10).
+    pub divider_alpha: f32,
+    /// FR-008/FR-012 (017-high-contrast-appearance, research R3): the
+    /// axis, read only by the width selectors inside this module. No
+    /// call site outside `theme/**` reads it (FR-017).
+    pub high_contrast: bool,
 }
 
 /// Light theme (research R12/R13/data-model.md §5.1).
@@ -39,6 +48,8 @@ pub const LIGHT: Roles = Roles {
     warning: egui::Color32::from_rgb(0x8a, 0x5a, 0x00),
     danger: egui::Color32::from_rgb(0xb3, 0x26, 0x1e),
     disabled_alpha: 0.55,
+    divider_alpha: 0.08,
+    high_contrast: false,
 };
 
 /// Dark theme (research R12/R13/data-model.md §5.1).
@@ -54,24 +65,106 @@ pub const DARK: Roles = Roles {
     warning: egui::Color32::from_rgb(0xe0, 0xa9, 0x2a),
     danger: egui::Color32::from_rgb(0xff, 0x6b, 0x5e),
     disabled_alpha: 0.44,
+    divider_alpha: 0.08,
+    high_contrast: false,
+};
+
+/// Light theme, high contrast (017-high-contrast-appearance, FR-005,
+/// FR-007, FR-009, data-model.md §2.2, research R4). `—` fields (per the
+/// data model) are identical to [`LIGHT`]: `text_disabled`,
+/// `surface_base`, `surface_raised`, `text_on_accent` and
+/// `disabled_alpha` are untouched (FR-002, FR-006, research R5).
+/// `text_secondary` is promoted to equal `text_primary` (FR-005).
+pub const LIGHT_HIGH_CONTRAST: Roles = Roles {
+    text_primary: LIGHT.text_primary,
+    text_secondary: LIGHT.text_primary,
+    text_disabled: LIGHT.text_disabled,
+    surface_base: LIGHT.surface_base,
+    surface_raised: LIGHT.surface_raised,
+    accent: egui::Color32::from_rgb(0x07, 0x4a, 0x96),
+    text_on_accent: LIGHT.text_on_accent,
+    positive: egui::Color32::from_rgb(0x16, 0x56, 0x30),
+    warning: egui::Color32::from_rgb(0x69, 0x44, 0x00),
+    danger: egui::Color32::from_rgb(0x93, 0x1f, 0x19),
+    disabled_alpha: LIGHT.disabled_alpha,
+    divider_alpha: 1.00,
+    high_contrast: true,
+};
+
+/// Dark theme, high contrast (017-high-contrast-appearance, FR-005,
+/// FR-007, FR-009, data-model.md §2.2, research R4). `warning` is
+/// deliberately **identical** to [`DARK`] — it already clears 7:1
+/// (research R4); do not "fix" it to differ.
+pub const DARK_HIGH_CONTRAST: Roles = Roles {
+    text_primary: DARK.text_primary,
+    text_secondary: DARK.text_primary,
+    text_disabled: DARK.text_disabled,
+    surface_base: DARK.surface_base,
+    surface_raised: DARK.surface_raised,
+    accent: egui::Color32::from_rgb(0x74, 0xb6, 0xff),
+    text_on_accent: DARK.text_on_accent,
+    positive: egui::Color32::from_rgb(0x57, 0xc9, 0x5c),
+    warning: DARK.warning,
+    danger: egui::Color32::from_rgb(0xff, 0x9a, 0x91),
+    disabled_alpha: DARK.disabled_alpha,
+    divider_alpha: 1.00,
+    high_contrast: true,
 };
 
 /// The active theme's colour table, selected by `dark_mode` (research R8
-/// channel 2). Allocates nothing.
+/// channel 2), always the **normal-mode** table. Kept because `style.rs`,
+/// the contrast suite and several unit tests name a normal-mode table
+/// directly; unchanged meaning (research R1, design note 3).
 pub fn for_dark_mode(dark_mode: bool) -> &'static Roles {
-    if dark_mode { &DARK } else { &LIGHT }
+    for_theme(dark_mode, false)
 }
 
-/// The active theme's colour table, selected by `Visuals::dark_mode`.
+/// FR-017 (017-high-contrast-appearance): the one place the high-contrast
+/// table is chosen. `for_theme(dark, hc)` returns one of exactly four
+/// static tables and nothing else.
+///
+/// ```
+/// # use modplayer_ui::theme::tokens::{for_theme, LIGHT, DARK_HIGH_CONTRAST};
+/// assert_eq!(*for_theme(false, false), LIGHT);
+/// assert_eq!(*for_theme(true, true), DARK_HIGH_CONTRAST);
+/// ```
+pub fn for_theme(dark_mode: bool, high_contrast: bool) -> &'static Roles {
+    match (dark_mode, high_contrast) {
+        (false, false) => &LIGHT,
+        (false, true) => &LIGHT_HIGH_CONTRAST,
+        (true, false) => &DARK,
+        (true, true) => &DARK_HIGH_CONTRAST,
+    }
+}
+
+/// FR-017 read-back (research R2): high contrast is recoverable from the
+/// applied `Visuals` alone — this *is* FR-005's promotion, read back,
+/// not a heuristic. Its precondition (`LIGHT`/`DARK`'s `text_secondary !=
+/// text_primary`) is asserted by `normal_tables_keep_secondary_distinct`
+/// so a future change that equalised a normal table's text roles fails
+/// loudly instead of silently enabling high contrast. A bare
+/// `Visuals::light()`/`::dark()` (whose `weak_text_color` is `None`)
+/// always classifies as normal mode.
+///
+/// ```
+/// # use modplayer_ui::theme::tokens::is_high_contrast;
+/// assert!(!is_high_contrast(&egui::Visuals::dark()));
+/// ```
+pub fn is_high_contrast(visuals: &Visuals) -> bool {
+    visuals.weak_text_color == Some(visuals.widgets.noninteractive.fg_stroke.color)
+}
+
+/// The active theme's colour table, selected by `(Visuals::dark_mode,
+/// is_high_contrast(visuals))`.
 pub fn roles(visuals: &Visuals) -> &'static Roles {
-    for_dark_mode(visuals.dark_mode)
+    for_theme(visuals.dark_mode, is_high_contrast(visuals))
 }
 
-/// The 1 px in-panel rule colour: `text_primary` at 8 % alpha
-/// (data-model.md §5.2, FR-008, contract T10). Never a role of its own,
-/// never a call-site literal.
+/// The 1 px in-panel rule colour: `text_primary` at `roles.divider_alpha`
+/// (data-model.md §5.2, FR-007/FR-008, contract T10). Never a role of its
+/// own, never a call-site literal. `0.08` normal, `1.00` high contrast.
 pub fn divider_color_for(roles: &Roles) -> egui::Color32 {
-    roles.text_primary.gamma_multiply(0.08)
+    roles.text_primary.gamma_multiply(roles.divider_alpha)
 }
 
 /// [`divider_color_for`] selected by `visuals.dark_mode`.

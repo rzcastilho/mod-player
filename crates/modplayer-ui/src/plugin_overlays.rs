@@ -92,8 +92,17 @@ fn paint_primitive(
                 return;
             }
             let x = space.x_of(frame);
+            let segment = [pos2(x, rect.top()), pos2(x, rect.bottom())];
+            // O7 (017-high-contrast-appearance): cased first, underneath,
+            // exactly as the host's own overview-lane marker line (O4).
+            if let Some(outline) = theme::markers::overlay_outline(*color, visuals) {
+                painter.line_segment(
+                    segment,
+                    Stroke::new(theme::markers::casing_width(1.0), outline.color),
+                );
+            }
             painter.line_segment(
-                [pos2(x, rect.top()), pos2(x, rect.bottom())],
+                segment,
                 Stroke::new(1.0, theme::overlay_color(*color, visuals)),
             );
         }
@@ -117,6 +126,11 @@ fn paint_primitive(
                 0.0,
                 theme::overlay_color(*color, visuals).gamma_multiply(0.25),
             );
+            // O8: the translucent fill above is unchanged; high contrast
+            // only adds this outline (mirrors O5's armed-active span).
+            if let Some(outline) = theme::markers::overlay_outline(*color, visuals) {
+                painter.rect_stroke(region_rect, 0.0, outline, egui::StrokeKind::Inside);
+            }
         }
         OverlayPrimitive::Label {
             at_ms, text, color, ..
@@ -137,14 +151,38 @@ fn paint_primitive(
                 pos2(rect.left(), lane_rect.top()),
                 pos2(rect.right(), lane_rect.bottom()),
             );
+            let pos = pos2(x, lane_rect.center().y);
+            let clipped_painter = painter.with_clip_rect(clip);
+            // O9: a halo — the same text at the four ±`MARKER_OUTLINE_
+            // WIDTH` offsets in the outline colour, underneath, then the
+            // coloured text on top. No new width literal: reuses the
+            // same 1px `MARKER_OUTLINE_WIDTH` every other outline form
+            // does.
+            if let Some(outline) = theme::markers::overlay_outline(*color, visuals) {
+                let w = theme::markers::MARKER_OUTLINE_WIDTH;
+                for offset in [
+                    egui::vec2(-w, 0.0),
+                    egui::vec2(w, 0.0),
+                    egui::vec2(0.0, -w),
+                    egui::vec2(0.0, w),
+                ] {
+                    clipped_painter.text(
+                        pos + offset,
+                        Align2::LEFT_CENTER,
+                        text,
+                        theme::secondary_font_id(),
+                        outline.color,
+                    );
+                }
+            }
             // 014-design-tokens-and-type-scale (US2/US5, T035/T066,
             // FR-017): both the font size and the low-level font
             // construction itself come from the token module now —
             // `theme::secondary_font_id` — so no ad-hoc font construction
             // remains at this call site; the colour is always a
             // plugin-chosen `OverlayColor`, never a literal.
-            painter.with_clip_rect(clip).text(
-                pos2(x, lane_rect.center().y),
+            clipped_painter.text(
+                pos,
                 Align2::LEFT_CENTER,
                 text,
                 theme::secondary_font_id(),
@@ -163,7 +201,13 @@ fn paint_primitive(
             let resolved = theme::overlay_color(*color, visuals);
             match icon {
                 GlyphRef::Host(host) => {
-                    theme::paint_host_glyph(painter, *host, center, GLYPH_SIZE, resolved, visuals)
+                    // O10: the outline this token resolves to (if any)
+                    // passes straight through — `paint_host_glyph` casings
+                    // each of its own six vector forms.
+                    let outline = theme::markers::overlay_outline(*color, visuals);
+                    theme::paint_host_glyph(
+                        painter, *host, center, GLYPH_SIZE, resolved, visuals, outline,
+                    )
                 }
                 GlyphRef::Package(key) => {
                     match plugin_assets::glyph_texture_id(
@@ -187,7 +231,9 @@ fn paint_primitive(
                         // to the same generic glyph a header icon does —
                         // a neutral dot, not the requested colour token
                         // (signals "this is a fallback", `plugin_assets::
-                        // generic_glyph`'s own behaviour).
+                        // generic_glyph`'s own behaviour). O11: never
+                        // outlined — `weak_text_color` is a role, not
+                        // palette data.
                         None => theme::paint_host_glyph(
                             painter,
                             HostGlyph::Dot,
@@ -195,6 +241,7 @@ fn paint_primitive(
                             GLYPH_SIZE,
                             visuals.weak_text_color(),
                             visuals,
+                            None,
                         ),
                     }
                 }

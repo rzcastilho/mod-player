@@ -94,13 +94,33 @@ pub fn pressed_fill(roles: &Roles) -> Color32 {
 pub const HOVER_ALPHA: f32 = 0.04;
 pub const PRESSED_ALPHA: f32 = 0.08;
 
-/// `Stroke::new(2.0, accent)` (§ 5.4 "focus ring = 2 px `accent`").
+/// `Stroke::new(focus_ring_width(roles), accent)` (§ 5.4 "focus ring = 2 px
+/// `accent`"; 017-high-contrast-appearance FR-008 thickens it to 3 px).
 pub fn focus_ring(roles: &Roles) -> Stroke {
-    Stroke::new(FOCUS_RING_WIDTH, roles.accent)
+    Stroke::new(focus_ring_width(roles), roles.accent)
 }
 
-/// The focus ring's width (FR-010).
+/// The focus ring's normal-mode width (FR-010).
 pub const FOCUS_RING_WIDTH: f32 = 2.0;
+/// FR-008 (017-high-contrast-appearance): high contrast thickens the
+/// ring.
+pub const FOCUS_RING_WIDTH_HIGH_CONTRAST: f32 = 3.0;
+
+/// FR-008: `2.0` normal, `3.0` high contrast — read only here, never at a
+/// call site (FR-017).
+///
+/// ```
+/// # use modplayer_ui::theme::controls::focus_ring_width;
+/// # use modplayer_ui::theme::tokens::LIGHT;
+/// assert_eq!(focus_ring_width(&LIGHT), 2.0);
+/// ```
+pub const fn focus_ring_width(roles: &Roles) -> f32 {
+    if roles.high_contrast {
+        FOCUS_RING_WIDTH_HIGH_CONTRAST
+    } else {
+        FOCUS_RING_WIDTH
+    }
+}
 /// The gap between a control's edge and the ring: `rect.expand(FOCUS_RING_GAP)`
 /// with `StrokeKind::Outside` (FR-010) — one pixel of underlying surface
 /// sits between control and ring.
@@ -389,7 +409,7 @@ mod tests {
     #[test]
     fn destructive_gap_is_twice_item_spacing() {
         for theme in [EguiTheme::Light, EguiTheme::Dark] {
-            let style = build_style(theme);
+            let style = build_style(theme, false);
             assert!(
                 DESTRUCTIVE_GAP >= 2.0 * style.spacing.item_spacing.x,
                 "DESTRUCTIVE_GAP ({DESTRUCTIVE_GAP}) must be >= 2x item_spacing.x ({})",

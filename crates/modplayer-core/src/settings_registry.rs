@@ -162,6 +162,12 @@ pub const DESCRIPTORS: &[SettingDescriptor] = &[
         description_key: "setting-theme-desc",
     },
     SettingDescriptor {
+        category: SettingsCategory::Appearance,
+        id: "appearance.high_contrast",
+        title_key: "setting-high-contrast",
+        description_key: "setting-high-contrast-desc",
+    },
+    SettingDescriptor {
         category: SettingsCategory::Language,
         id: "language.locale",
         title_key: "setting-locale",

@@ -79,6 +79,11 @@ pub fn lane<B: OutputBackend, H: SourceHost>(
     };
     let space = TimeSpace::new(rect, window, sample_rate);
     let mark_color = marker_mark_color(ui.visuals());
+    // FR-011/FR-012 (017-high-contrast-appearance): `Some` only while high
+    // contrast is on — the single selection site (`theme::roles`) is the
+    // only place this lane branches on it (S3).
+    let roles = theme::roles(ui.visuals());
+    let outline = theme::markers::marker_outline(roles);
 
     for marker in markers.markers() {
         let color = theme::marker_color(marker.color);
@@ -92,6 +97,7 @@ pub fn lane<B: OutputBackend, H: SourceHost>(
             color,
             focused,
             mark_color,
+            outline,
         );
 
         let glyph_id = Id::new(("marker-glyph", lane_kind, marker.id));
@@ -229,6 +235,11 @@ pub fn marker_mark_color(visuals: &egui::Visuals) -> Color32 {
 /// Paint one marker's glyph at `x` (006, contracts/ui-markers.md §3):
 /// region `[`/`]` brackets, a point's downward triangle, or a cue's
 /// numbered square — 2px-stroked (vs. 1.5px/plain) while `focused`.
+/// `outline` is `Some` only in high contrast (O1–O3, contracts/
+/// marker-outline.md §2, 017-high-contrast-appearance): each glyph gains
+/// a `text_primary` casing/stroke, its own palette `color` never changed
+/// (FR-011).
+#[allow(clippy::too_many_arguments)]
 fn paint_glyph(
     painter: &Painter,
     kind: MarkerKind,
@@ -237,13 +248,29 @@ fn paint_glyph(
     color: Color32,
     focused: bool,
     mark_color: Color32,
+    outline: Option<Stroke>,
 ) {
     match kind {
-        MarkerKind::RegionStart { .. } => paint_bracket(painter, x, rect, color, true, focused),
-        MarkerKind::RegionEnd { .. } => paint_bracket(painter, x, rect, color, false, focused),
-        MarkerKind::Point => paint_point_glyph(painter, x, rect, color, focused, mark_color),
+        MarkerKind::RegionStart { .. } => {
+            paint_bracket(painter, x, rect, color, true, focused, outline);
+        }
+        MarkerKind::RegionEnd { .. } => {
+            paint_bracket(painter, x, rect, color, false, focused, outline);
+        }
+        MarkerKind::Point => {
+            paint_point_glyph(painter, x, rect, color, focused, mark_color, outline)
+        }
         MarkerKind::Cue { slot } => {
-            paint_cue_glyph(painter, x, rect, color, slot.get(), focused, mark_color)
+            paint_cue_glyph(
+                painter,
+                x,
+                rect,
+                color,
+                slot.get(),
+                focused,
+                mark_color,
+                outline,
+            );
         }
     }
 }
@@ -251,24 +278,47 @@ fn paint_glyph(
 /// One `[`/`]` bracket glyph: a vertical stem at `x` spanning `rect`'s
 /// full height, with a short tick at top and bottom pointing into the
 /// region (`open` = `[`, ticks point right; `open = false` = `]`, ticks
-/// point left).
-fn paint_bracket(painter: &Painter, x: f32, rect: Rect, color: Color32, open: bool, focused: bool) {
-    let stroke = Stroke::new(if focused { 2.0 } else { 1.5 }, color);
+/// point left). O1: in high contrast, the same polyline is cased first at
+/// `casing_width(w)` in the outline colour, underneath, so the
+/// focused/unfocused width delta (M9) survives identically in the casing.
+#[allow(clippy::too_many_arguments)]
+fn paint_bracket(
+    painter: &Painter,
+    x: f32,
+    rect: Rect,
+    color: Color32,
+    open: bool,
+    focused: bool,
+    outline: Option<Stroke>,
+) {
+    let width = if focused { 2.0 } else { 1.5 };
     let dx = if open {
         BRACKET_TICK_PX
     } else {
         -BRACKET_TICK_PX
     };
-    painter.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], stroke);
-    painter.line_segment([pos2(x, rect.top()), pos2(x + dx, rect.top())], stroke);
-    painter.line_segment(
+    let segments = [
+        [pos2(x, rect.top()), pos2(x, rect.bottom())],
+        [pos2(x, rect.top()), pos2(x + dx, rect.top())],
         [pos2(x, rect.bottom()), pos2(x + dx, rect.bottom())],
-        stroke,
-    );
+    ];
+    if let Some(outline) = outline {
+        let casing = Stroke::new(theme::markers::casing_width(width), outline.color);
+        for segment in segments {
+            painter.line_segment(segment, casing);
+        }
+    }
+    let stroke = Stroke::new(width, color);
+    for segment in segments {
+        painter.line_segment(segment, stroke);
+    }
 }
 
 /// A `Point` marker's glyph (contracts/ui-markers.md §3): a 10px downward
-/// triangle, apex pointing into the waveform below.
+/// triangle, apex pointing into the waveform below. O2: in high contrast
+/// the polygon's own stroke becomes the outline colour (contracts/
+/// marker-outline.md §2), taking over from the normal-mode focused/
+/// unfocused stroke (M9 does not pin this glyph).
 fn paint_point_glyph(
     painter: &Painter,
     x: f32,
@@ -276,6 +326,7 @@ fn paint_point_glyph(
     color: Color32,
     focused: bool,
     mark_color: Color32,
+    outline: Option<Stroke>,
 ) {
     const HALF_WIDTH: f32 = 5.0;
     const HEIGHT: f32 = 10.0;
@@ -285,16 +336,19 @@ fn paint_point_glyph(
         pos2(x + HALF_WIDTH, top),
         pos2(x, top + HEIGHT),
     ];
-    let outline = if focused {
+    let stroke = outline.unwrap_or(if focused {
         Stroke::new(1.5, mark_color)
     } else {
         Stroke::NONE
-    };
-    painter.add(egui::Shape::convex_polygon(points, color, outline));
+    });
+    painter.add(egui::Shape::convex_polygon(points, color, stroke));
 }
 
 /// A `Cue { slot }` marker's glyph (contracts/ui-markers.md §3): a 10px
-/// square with the slot digit.
+/// square with the slot digit. O3: in high contrast, an extra outside
+/// `rect_stroke` in the outline colour — the inside focus stroke and the
+/// digit (`text_on_accent`, FR-020) are both unchanged.
+#[allow(clippy::too_many_arguments)]
 fn paint_cue_glyph(
     painter: &Painter,
     x: f32,
@@ -303,10 +357,14 @@ fn paint_cue_glyph(
     slot: u8,
     focused: bool,
     mark_color: Color32,
+    outline: Option<Stroke>,
 ) {
     const HALF: f32 = 5.0;
     let square = Rect::from_center_size(pos2(x, rect.center().y), vec2(HALF * 2.0, HALF * 2.0));
     painter.rect_filled(square, 1.0, color);
+    if let Some(outline) = outline {
+        painter.rect_stroke(square, 1.0, outline, egui::StrokeKind::Outside);
+    }
     if focused {
         painter.rect_stroke(
             square,
@@ -379,13 +437,18 @@ pub fn handle_focused_marker_keys<B: OutputBackend, H: SourceHost>(
 /// palette colour, then the current region's span — outline when
 /// disarmed, hatched when armed-inactive, solid (translucent) when
 /// armed-active (data-model.md §3's table). A no-op with no markers/no
-/// current region.
+/// current region. `roles` is the applied style's role table
+/// (017-high-contrast-appearance, FR-011/FR-012): `theme::markers::
+/// marker_outline(roles)` is `Some` only in high contrast, and every
+/// palette fill/translucent-fill colour above stays byte-identical
+/// either way (M8) — only an extra casing/`rect_stroke` is added.
 pub fn paint_overlay(
     painter: &Painter,
     space: &TimeSpace,
     markers: Option<&TrackMarkers>,
     loop_state: u8,
     focused: Option<MarkerId>,
+    roles: &theme::Roles,
 ) {
     let Some(markers) = markers else {
         return;
@@ -394,17 +457,26 @@ pub fn paint_overlay(
     if rect.width() <= 0.0 || rect.height() <= 0.0 {
         return;
     }
+    let outline = theme::markers::marker_outline(roles);
 
     for marker in markers.markers() {
         let color = theme::marker_color(marker.color);
         let x = space.x_of(marker.position);
         let width = if focused == Some(marker.id) { 2.0 } else { 1.0 };
+        // O4: cased first, underneath, at `casing_width(width)` — the
+        // focused/unfocused delta survives identically (M9).
+        if let Some(outline) = outline {
+            painter.line_segment(
+                [pos2(x, rect.top()), pos2(x, rect.bottom())],
+                Stroke::new(theme::markers::casing_width(width), outline.color),
+            );
+        }
         painter.line_segment(
             [pos2(x, rect.top()), pos2(x, rect.bottom())],
             Stroke::new(width, color),
         );
         if marker.clamped {
-            paint_clamped_warning(painter, x, rect.top(), color);
+            paint_clamped_warning(painter, x, rect.top(), color, outline);
         }
     }
 
@@ -426,6 +498,11 @@ pub fn paint_overlay(
     match loop_state {
         2 => {
             painter.rect_filled(span_rect, 0.0, color.gamma_multiply(0.25));
+            // O5: the armed-active span's translucent fill is unchanged
+            // (M8); high contrast only adds this outline.
+            if let Some(outline) = outline {
+                painter.rect_stroke(span_rect, 0.0, outline, egui::StrokeKind::Inside);
+            }
         }
         1 => paint_hatched(painter, span_rect, color),
         _ => {
@@ -441,8 +518,16 @@ pub fn paint_overlay(
 
 /// The small warning triangle drawn at the top of a `clamped` marker's
 /// overlay line (006, FR-018, contracts/ui-markers.md §1): a filled
-/// triangle pointing down into the line, apex at `(x, top)`.
-fn paint_clamped_warning(painter: &Painter, x: f32, top: f32, color: Color32) {
+/// triangle pointing down into the line, apex at `(x, top)`. O6: in high
+/// contrast, `outline` becomes the polygon's own stroke — the fill
+/// colour is unchanged (M8).
+fn paint_clamped_warning(
+    painter: &Painter,
+    x: f32,
+    top: f32,
+    color: Color32,
+    outline: Option<Stroke>,
+) {
     const HALF_WIDTH: f32 = 4.0;
     const HEIGHT: f32 = 6.0;
     let points = vec![
@@ -450,7 +535,11 @@ fn paint_clamped_warning(painter: &Painter, x: f32, top: f32, color: Color32) {
         pos2(x - HALF_WIDTH, top + HEIGHT),
         pos2(x + HALF_WIDTH, top + HEIGHT),
     ];
-    painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
+    painter.add(egui::Shape::convex_polygon(
+        points,
+        color,
+        outline.unwrap_or(Stroke::NONE),
+    ));
 }
 
 /// A simple diagonal-line hatch (armed-inactive, data-model.md §3) —

@@ -255,7 +255,7 @@ fn no_ring_without_a_visible_focus() {
 #[test]
 fn ring_and_selection_do_not_overlap() {
     for theme in [egui::Theme::Light, egui::Theme::Dark] {
-        let style = modplayer_ui::theme::style::build_style(theme);
+        let style = modplayer_ui::theme::style::build_style(theme, false);
         let roles = tokens::for_dark_mode(matches!(theme, egui::Theme::Dark));
         assert_eq!(
             style.visuals.selection.bg_fill, roles.accent,

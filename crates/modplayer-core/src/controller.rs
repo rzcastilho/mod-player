@@ -454,6 +454,12 @@ pub struct PlaybackController<B: OutputBackend, H: SourceHost> {
     /// once at app startup (`modplayer-ui`'s `App::new`, T078/T081); the
     /// Appearance settings screen that changes it lands in US5.
     theme: Theme,
+    /// Mirrors `settings.high_contrast` (017-high-contrast-appearance,
+    /// FR-004). Shadow state only: `set_high_contrast` updates this field
+    /// and nothing else — persistence stays in the reload-mutate-save
+    /// block `modplayer-ui`'s Appearance settings screen already uses for
+    /// `theme`.
+    high_contrast: bool,
     active_device: Option<ActiveDevice>,
     /// Mirrors `settings.output_device`; never overwritten by a fallback
     /// (data-model.md §5.2).
@@ -806,6 +812,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
             ceiling: settings.limiter_ceiling_db,
             preset: settings.buffer_preset,
             theme: settings.theme,
+            high_contrast: settings.high_contrast,
             active_device: None,
             preferred_device: settings.output_device.clone(),
             device_confirmed: settings.device_confirmed,
@@ -1604,6 +1611,20 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
     /// settings at construction.
     pub fn theme(&self) -> Theme {
         self.theme
+    }
+
+    /// Current high-contrast shadow state (017-high-contrast-appearance,
+    /// FR-004), seeded from settings at construction.
+    pub fn high_contrast(&self) -> bool {
+        self.high_contrast
+    }
+
+    /// Update the high-contrast shadow state only — no write, no other
+    /// field touched (data-model.md §1.5). Persistence is the caller's
+    /// job (`modplayer-ui`'s Appearance settings screen, the same
+    /// reload-mutate-save block `theme` already uses).
+    pub fn set_high_contrast(&mut self, on: bool) {
+        self.high_contrast = on;
     }
 
     /// The device the user has confirmed/selected, if any (never
@@ -4865,6 +4886,99 @@ mod tests {
         ));
         let _ = std::fs::create_dir_all(&dir);
         SettingsStore::with_path(dir.join("settings.toml"))
+    }
+
+    // -----------------------------------------------------------------
+    // 017-high-contrast-appearance: T004 — the controller shadow-state
+    // half of data-model.md §1.5 (`A13`, `A17`/`A19`'s core half).
+    // -----------------------------------------------------------------
+
+    /// `high_contrast()` reads `false` by default, mirroring `theme()`.
+    #[test]
+    fn high_contrast_defaults_off_with_no_settings_file() {
+        let controller = PlaybackController::new(
+            FakeBackend::new(vec![]),
+            SyntheticHost::new(44_100),
+            fresh_store(),
+        );
+        assert!(!controller.high_contrast());
+    }
+
+    /// `high_contrast()` reads the persisted value at launch.
+    #[test]
+    fn high_contrast_seeded_from_settings_at_launch() {
+        let store = fresh_store();
+        let path = store.path().to_path_buf();
+        store
+            .save(&AudioSettings {
+                high_contrast: true,
+                ..AudioSettings::default()
+            })
+            .unwrap_or_else(|e| unreachable!("save: {e:?}"));
+
+        let controller = PlaybackController::new(
+            FakeBackend::new(vec![]),
+            SyntheticHost::new(44_100),
+            SettingsStore::with_path(path),
+        );
+        assert!(controller.high_contrast());
+    }
+
+    /// `set_high_contrast(on)` updates the shadow state only — no write,
+    /// no other field touched (data-model.md §1.5).
+    #[test]
+    fn set_high_contrast_updates_shadow_state_only() {
+        let store = fresh_store();
+        let path = store.path().to_path_buf();
+        let mut controller = PlaybackController::new(
+            FakeBackend::new(vec![]),
+            SyntheticHost::new(44_100),
+            SettingsStore::with_path(path.clone()),
+        );
+        let theme_before = controller.theme();
+        let on_disk_before =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| unreachable!("read: {e}"));
+
+        controller.set_high_contrast(true);
+        assert!(controller.high_contrast());
+        assert_eq!(
+            controller.theme(),
+            theme_before,
+            "set_high_contrast must not touch theme"
+        );
+        let on_disk_after =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| unreachable!("read: {e}"));
+        assert_eq!(
+            on_disk_before, on_disk_after,
+            "set_high_contrast must not write settings.toml"
+        );
+        assert!(
+            !SettingsStore::with_path(path).load().settings.high_contrast,
+            "set_high_contrast must not persist"
+        );
+    }
+
+    /// The pair is independent of `theme()`/`focus_policy()`: toggling
+    /// either axis leaves the other untouched.
+    #[test]
+    fn high_contrast_is_independent_of_theme_and_focus_policy() {
+        let mut controller = PlaybackController::new(
+            FakeBackend::new(vec![]),
+            SyntheticHost::new(44_100),
+            fresh_store(),
+        );
+        let theme_before = controller.theme();
+        let focus_policy_before = controller.focus_policy();
+
+        controller.set_high_contrast(true);
+        assert_eq!(controller.theme(), theme_before);
+        assert_eq!(controller.focus_policy(), focus_policy_before);
+
+        controller.set_focus_policy(FocusPolicy::Manual);
+        assert!(
+            controller.high_contrast(),
+            "set_focus_policy must not touch high_contrast"
+        );
     }
 
     #[test]

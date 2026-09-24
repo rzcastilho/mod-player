@@ -16,12 +16,16 @@ use modplayer_ui::artwork::ArtworkCache;
 use modplayer_ui::rows::{RowEntity, list_row};
 use modplayer_ui::theme::MARKER_PALETTE;
 use modplayer_ui::theme::contrast::{composite, ratio};
-use modplayer_ui::theme::tokens::{self, DARK, LIGHT};
+use modplayer_ui::theme::tokens::{
+    self, DARK, DARK_HIGH_CONTRAST, LIGHT, LIGHT_HIGH_CONTRAST, divider_color_for,
+};
 
 const TEXT_FLOOR: f32 = 4.5;
 const NON_TEXT_FLOOR: f32 = 3.0;
 const RAISED_FLOOR: f32 = 1.2;
 const MARKER_FLOOR: f32 = 3.0;
+/// FR-018: the enhanced floor high contrast promises (contract H17).
+const ENHANCED_TEXT_FLOOR: f32 = 7.0;
 
 /// C1 (FR-011)/C2 (FR-012): `text_primary`/`text_secondary` >= 4.5:1,
 /// `text_disabled` >= 3:1, against both surfaces, both themes.
@@ -206,6 +210,88 @@ fn selected_row_text_clears_the_floor_against_accent() {
                 "dark={dark}: selected-row text {colour:?} vs accent = {measured:.2}, floor {TEXT_FLOOR}"
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------
+// 017-high-contrast-appearance (contracts/high-contrast-tokens.md
+// H17/H18, research R4/R6): a *new* block over
+// `[&LIGHT_HIGH_CONTRAST, &DARK_HIGH_CONTRAST]` only — the five loops
+// above iterate `[&LIGHT, &DARK]` and stay verbatim (research R14), so
+// they remain the regression net for "no change outside high contrast".
+// Forbidden assertion: "every high-contrast role differs from its
+// normal-mode value" — dark `warning` is deliberately identical (R4).
+// ---------------------------------------------------------------------
+
+/// H17 (roles): `accent`/`positive`/`warning`/`danger` each measure
+/// >= 7.0 against both surfaces, both high-contrast tables.
+#[test]
+fn high_contrast_roles_clear_the_enhanced_floor() {
+    for roles in [&LIGHT_HIGH_CONTRAST, &DARK_HIGH_CONTRAST] {
+        for surface in [roles.surface_base, roles.surface_raised] {
+            for (name, colour) in [
+                ("accent", roles.accent),
+                ("positive", roles.positive),
+                ("warning", roles.warning),
+                ("danger", roles.danger),
+            ] {
+                let measured = ratio(colour, surface);
+                assert!(
+                    measured >= ENHANCED_TEXT_FLOOR,
+                    "{name} vs {surface:?} = {measured:.2}, floor {ENHANCED_TEXT_FLOOR}"
+                );
+            }
+        }
+    }
+}
+
+/// H17 (text): `text_primary`/`text_secondary` each measure >= 7.0
+/// against both surfaces, both high-contrast tables.
+#[test]
+fn high_contrast_text_clears_the_enhanced_floor() {
+    for roles in [&LIGHT_HIGH_CONTRAST, &DARK_HIGH_CONTRAST] {
+        for surface in [roles.surface_base, roles.surface_raised] {
+            for (name, colour) in [
+                ("text_primary", roles.text_primary),
+                ("text_secondary", roles.text_secondary),
+            ] {
+                let measured = ratio(colour, surface);
+                assert!(
+                    measured >= ENHANCED_TEXT_FLOOR,
+                    "{name} vs {surface:?} = {measured:.2}, floor {ENHANCED_TEXT_FLOOR}"
+                );
+            }
+        }
+    }
+}
+
+/// H17 (divider): the raised divider measures >= 3.0 against both
+/// surfaces, both high-contrast tables.
+#[test]
+fn high_contrast_divider_clears_the_non_text_floor() {
+    for roles in [&LIGHT_HIGH_CONTRAST, &DARK_HIGH_CONTRAST] {
+        let divider = divider_color_for(roles);
+        for surface in [roles.surface_base, roles.surface_raised] {
+            let measured = ratio(divider, surface);
+            assert!(
+                measured >= NON_TEXT_FLOOR,
+                "divider vs {surface:?} = {measured:.2}, floor {NON_TEXT_FLOOR}"
+            );
+        }
+    }
+}
+
+/// H18: `text_on_accent` still pairs with the high-contrast `accent` at
+/// a ratio of 4.5:1 or higher (research R5: FR-010's conditional
+/// counterpart does not fire).
+#[test]
+fn text_on_accent_still_pairs_with_the_high_contrast_accent() {
+    for roles in [&LIGHT_HIGH_CONTRAST, &DARK_HIGH_CONTRAST] {
+        let measured = ratio(roles.text_on_accent, roles.accent);
+        assert!(
+            measured >= TEXT_FLOOR,
+            "text_on_accent vs high-contrast accent = {measured:.2}, floor {TEXT_FLOOR}"
+        );
     }
 }
 

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! `build_style(theme) -> Style`: the single site that constructs an
+//! `build_style(theme, high_contrast) -> Style`: the single site that constructs an
 //! `egui::Style` (design note 3, "one construction site") — the built-in
 //! `text_styles` remap (FR-003a), the full `Visuals` colour map
 //! (FR-010b, data-model.md §5.3) including the US1 fix (`weak_text_color`,
@@ -19,13 +19,15 @@ use egui::{Color32, FontFamily, FontId, Margin, Stroke, Style, TextStyle, Theme,
 use super::controls;
 use super::tokens::{self, space, text};
 
-/// Build a complete `Style` for `theme`. The only function in the crate
-/// that writes a `Style`, `Visuals` or `Spacing` field (design note 3).
-pub fn build_style(theme: Theme) -> Style {
+/// Build a complete `Style` for `theme` (017-high-contrast-appearance,
+/// FR-017: `high_contrast` is the one flag that selects which table pair
+/// this function reads from). The only function in the crate that writes
+/// a `Style`, `Visuals` or `Spacing` field (design note 3).
+pub fn build_style(theme: Theme, high_contrast: bool) -> Style {
     let mut style = Style {
         text_styles: text_styles(),
         drag_value_text_style: TextStyle::Monospace,
-        visuals: visuals(theme),
+        visuals: visuals(theme, high_contrast),
         ..Style::default()
     };
     apply_spacing(&mut style.spacing);
@@ -88,14 +90,14 @@ fn apply_spacing(spacing: &mut egui::Spacing) {
 /// Every colour field of `Visuals` (FR-010b, data-model.md §5.3), starting
 /// from the matching egui default for every non-colour field (shadows,
 /// `handle_shape`, `text_cursor`, `interaction`, …).
-fn visuals(theme: Theme) -> Visuals {
+fn visuals(theme: Theme, high_contrast: bool) -> Visuals {
     let dark_mode = matches!(theme, Theme::Dark);
     let mut visuals = if dark_mode {
         Visuals::dark()
     } else {
         Visuals::light()
     };
-    let roles = tokens::for_dark_mode(dark_mode);
+    let roles = tokens::for_theme(dark_mode, high_contrast);
     let divider = tokens::divider_color_for(roles);
 
     visuals.dark_mode = dark_mode;
@@ -222,7 +224,7 @@ mod tests {
 
     #[test]
     fn every_visuals_colour_comes_from_a_role() {
-        let style = build_style(Theme::Light);
+        let style = build_style(Theme::Light, false);
         let roles = &tokens::LIGHT;
 
         assert_eq!(style.visuals.panel_fill, roles.surface_base);
@@ -263,7 +265,7 @@ mod tests {
 
     #[test]
     fn weak_text_is_the_secondary_role_not_an_alpha() {
-        let style = build_style(Theme::Light);
+        let style = build_style(Theme::Light, false);
         assert_eq!(
             style.visuals.weak_text_color,
             Some(tokens::LIGHT.text_secondary)
@@ -273,13 +275,16 @@ mod tests {
 
     #[test]
     fn disabled_alpha_matches_the_disabled_token() {
-        assert_eq!(build_style(Theme::Light).visuals.disabled_alpha, 0.55);
-        assert_eq!(build_style(Theme::Dark).visuals.disabled_alpha, 0.44);
+        assert_eq!(
+            build_style(Theme::Light, false).visuals.disabled_alpha,
+            0.55
+        );
+        assert_eq!(build_style(Theme::Dark, false).visuals.disabled_alpha, 0.44);
     }
 
     #[test]
     fn spacing_uses_only_scale_steps() {
-        let style = build_style(Theme::Light);
+        let style = build_style(Theme::Light, false);
         assert_eq!(style.spacing.item_spacing, egui::vec2(space::SM, space::XS));
         assert_eq!(
             style.spacing.button_padding,
@@ -294,7 +299,7 @@ mod tests {
 
     #[test]
     fn radii_come_from_the_scale() {
-        let style = build_style(Theme::Light);
+        let style = build_style(Theme::Light, false);
         assert_eq!(
             style.visuals.widgets.inactive.corner_radius,
             tokens::radius::SM
@@ -305,7 +310,7 @@ mod tests {
 
     #[test]
     fn no_geometry_or_interaction_field_changes() {
-        let built = build_style(Theme::Light);
+        let built = build_style(Theme::Light, false);
         let default_visuals = Visuals::light();
         let default_spacing = egui::Spacing::default();
 
@@ -355,7 +360,7 @@ mod tests {
     #[test]
     fn widget_slots_are_re_differentiated() {
         for theme in [Theme::Light, Theme::Dark] {
-            let style = build_style(theme);
+            let style = build_style(theme, false);
             let roles = tokens::for_dark_mode(matches!(theme, Theme::Dark));
             let widgets = &style.visuals.widgets;
 

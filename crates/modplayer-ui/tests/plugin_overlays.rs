@@ -15,7 +15,7 @@
 
 use std::ops::Range;
 
-use egui::{Context, Painter, Pos2, RawInput, Rect, Sense, Shape, Vec2, vec2};
+use egui::{Color32, Context, Painter, Pos2, RawInput, Rect, Sense, Shape, Stroke, Vec2, vec2};
 use modplayer_audio_source::TrackId;
 use modplayer_capability_gateway::ui::{GlyphRef, HostGlyph, OverlayColor, OverlayPrimitive, UiId};
 use modplayer_core::markers::TrackMarkers;
@@ -44,7 +44,19 @@ fn painted_shapes(
     sample_rate: u32,
     paint: impl FnOnce(&Painter, &TimeSpace),
 ) -> Vec<Shape> {
-    let ctx = Context::default();
+    painted_shapes_on(&Context::default(), window, sample_rate, paint)
+}
+
+/// As [`painted_shapes`], but against a caller-supplied `Context` — used
+/// by [`painted_shapes_high_contrast`] (017-high-contrast-appearance) so
+/// `paint`'s own `ctx.style_of(ctx.theme())` read resolves to the
+/// high-contrast tables.
+fn painted_shapes_on(
+    ctx: &Context,
+    window: Range<u64>,
+    sample_rate: u32,
+    paint: impl FnOnce(&Painter, &TimeSpace),
+) -> Vec<Shape> {
     let mut paint = Some(paint);
     let output = ctx.run_ui(default_input(), |ui| {
         ui.add_space(plugin_overlays::LANE_HEIGHT + 8.0);
@@ -61,6 +73,31 @@ fn painted_shapes(
         .collect();
     output.drop_without_applying_deltas();
     shapes
+}
+
+/// As [`painted_shapes`], with the high-contrast token style installed
+/// on the `Context` first (017-high-contrast-appearance) — mirrors what
+/// `App::new`/`App::ui` do once `controller.high_contrast()` is `true`.
+fn painted_shapes_high_contrast(
+    window: Range<u64>,
+    sample_rate: u32,
+    paint: impl FnOnce(&Painter, &TimeSpace),
+) -> Vec<Shape> {
+    let ctx = Context::default();
+    modplayer_ui::theme::apply_tokens_for(&ctx, true);
+    painted_shapes_on(&ctx, window, sample_rate, paint)
+}
+
+/// The active high-contrast style's marker outline (`Some` — high
+/// contrast always produces one), for comparing a plugin overlay's
+/// outline against the host's own value (017-high-contrast-appearance,
+/// `M12`/`P4`).
+fn high_contrast_outline() -> Stroke {
+    let ctx = Context::default();
+    modplayer_ui::theme::apply_tokens_for(&ctx, true);
+    let visuals = ctx.style_of(ctx.theme()).visuals.clone();
+    modplayer_ui::theme::markers::marker_outline(modplayer_ui::theme::roles(&visuals))
+        .unwrap_or_else(|| unreachable!("high contrast must produce a marker outline"))
 }
 
 fn layer(primitives: Vec<OverlayPrimitive>) -> OverlayLayer {
@@ -155,7 +192,14 @@ fn above_markers_below_playhead_order() {
     let layers = vec![layer(vec![line("l1", 5_000)])];
 
     let shapes = painted_shapes(0..20_000, SAMPLE_RATE, |painter, space| {
-        modplayer_ui::markers::paint_overlay(painter, space, Some(&markers), 0, None);
+        modplayer_ui::markers::paint_overlay(
+            painter,
+            space,
+            Some(&markers),
+            0,
+            None,
+            modplayer_ui::theme::roles(&egui::Visuals::dark()),
+        );
         plugin_overlays::paint(painter, space, 20_000, ViewKind::Overview, &layers);
         modplayer_ui::waveform::paint::playhead(
             painter,
@@ -232,4 +276,322 @@ fn host_glyph_paints_without_an_asset() {
         plugin_overlays::paint(painter, space, 10_000, ViewKind::Overview, &layers);
     });
     assert!(!shapes.is_empty(), "a host glyph must paint something");
+}
+
+// ---------------------------------------------------------------------
+// 017-high-contrast-appearance (T009, contracts/marker-outline.md M11):
+// `overlay_outline`'s value only — no paint call site is asserted here
+// (that is M12, Phase 6).
+// ---------------------------------------------------------------------
+
+/// M11: `Some(1px text_primary)` for `Positive`/`Warning` only when
+/// `visuals` is a high-contrast style; `None` for `Accent`/`Secondary`/
+/// `Neutral` in every style.
+#[test]
+fn overlay_outline_covers_exactly_the_palette_tokens() {
+    use modplayer_ui::theme::markers::overlay_outline;
+    use modplayer_ui::theme::style::build_style;
+
+    let normal_visuals = [egui::Visuals::light(), egui::Visuals::dark()];
+    for visuals in &normal_visuals {
+        for token in [
+            OverlayColor::Accent,
+            OverlayColor::Secondary,
+            OverlayColor::Neutral,
+            OverlayColor::Positive,
+            OverlayColor::Warning,
+        ] {
+            assert_eq!(
+                overlay_outline(token, visuals),
+                None,
+                "{token:?} must be None outside a built high-contrast style"
+            );
+        }
+    }
+
+    for theme in [egui::Theme::Light, egui::Theme::Dark] {
+        let visuals = build_style(theme, true).visuals;
+        for token in [OverlayColor::Positive, OverlayColor::Warning] {
+            assert!(
+                overlay_outline(token, &visuals).is_some(),
+                "{token:?} must outline in high contrast"
+            );
+        }
+        for token in [
+            OverlayColor::Accent,
+            OverlayColor::Secondary,
+            OverlayColor::Neutral,
+        ] {
+            assert_eq!(
+                overlay_outline(token, &visuals),
+                None,
+                "{token:?} must never outline (FR-011 last sentence)"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// 017-high-contrast-appearance (T035, Phase 6, US4, contracts/marker-
+// outline.md §3 M12, P4, P5): the paint-**site** coverage — `overlay_
+// outline`'s *value* is M11 above; this is whether `paint`'s four
+// primitive arms actually call it.
+// ---------------------------------------------------------------------
+
+fn line_token(s: &str, at_ms: u64, color: OverlayColor) -> OverlayPrimitive {
+    OverlayPrimitive::Line {
+        id: id(s),
+        at_ms,
+        color,
+    }
+}
+
+fn region_token(s: &str, from_ms: u64, to_ms: u64, color: OverlayColor) -> OverlayPrimitive {
+    OverlayPrimitive::Region {
+        id: id(s),
+        from_ms,
+        to_ms,
+        color,
+    }
+}
+
+fn label_token(s: &str, at_ms: u64, text: &str, color: OverlayColor) -> OverlayPrimitive {
+    OverlayPrimitive::Label {
+        id: id(s),
+        at_ms,
+        text: text.to_string(),
+        color,
+    }
+}
+
+fn glyph_host_token(s: &str, at_ms: u64, icon: HostGlyph, color: OverlayColor) -> OverlayPrimitive {
+    OverlayPrimitive::Glyph {
+        id: id(s),
+        at_ms,
+        icon: GlyphRef::Host(icon),
+        color,
+    }
+}
+
+/// `true` if any painted shape carries `outline` — a `LineSegment`/`Rect`
+/// stroke, a `Circle`'s casing fill, or a `Text` section's colour (the
+/// four outline forms O7-O10 use, mirroring `markers.rs`'s own
+/// `has_outline_shapes`).
+fn has_overlay_outline(shapes: &[Shape], outline: Color32) -> bool {
+    shapes.iter().any(|shape| match shape {
+        Shape::LineSegment { stroke, .. } => stroke.color == outline && stroke.width > 1.0,
+        Shape::Rect(r) => r.stroke.width > 0.0 && r.stroke.color == outline,
+        Shape::Circle(c) => c.fill == outline,
+        Shape::Text(t) => t
+            .galley
+            .job
+            .sections
+            .iter()
+            .any(|s| s.format.color == outline),
+        _ => false,
+    })
+}
+
+/// How many shapes of each primitive's own kind painted — used to prove
+/// "no *extra* shape appears" (M12's `Accent`/`Secondary`/`Neutral`/O11
+/// half) without relying on colour comparison, which a role token's own
+/// resolved colour (`weak_text_color()` promotes onto `text_primary` in
+/// high contrast, `H13`) can coincidentally equal the outline colour and
+/// falsely look like a "gain".
+fn shape_kind_count(shapes: &[Shape]) -> (usize, usize, usize, usize) {
+    let mut lines = 0;
+    let mut rects = 0;
+    let mut circles = 0;
+    let mut texts = 0;
+    for shape in shapes {
+        match shape {
+            Shape::LineSegment { .. } => lines += 1,
+            Shape::Rect(_) => rects += 1,
+            Shape::Circle(_) => circles += 1,
+            Shape::Text(_) => texts += 1,
+            _ => {}
+        }
+    }
+    (lines, rects, circles, texts)
+}
+
+/// M12: with high contrast on, a `Line` (O7), `Region` (O8), `Label`
+/// (O9) and host `Glyph` (O10) primitive coloured `Positive`/`Warning`
+/// each gain the outline; with high contrast off, none does.
+#[test]
+fn plugin_palette_primitives_gain_an_outline() {
+    let outline = high_contrast_outline();
+    for token in [OverlayColor::Positive, OverlayColor::Warning] {
+        let line_layers = vec![layer(vec![line_token("l", 5_000, token)])];
+        let region_layers = vec![layer(vec![region_token("r", 1_000, 3_000, token)])];
+        let label_layers = vec![layer(vec![label_token("t", 1_000, "x", token)])];
+        let glyph_layers = vec![layer(vec![glyph_host_token(
+            "g",
+            1_000,
+            HostGlyph::Dot,
+            token,
+        )])];
+
+        let hc_line = painted_shapes_high_contrast(0..10_000, 1_000, |painter, space| {
+            plugin_overlays::paint(painter, space, 10_000, ViewKind::Overview, &line_layers);
+        });
+        assert!(
+            has_overlay_outline(&hc_line, outline.color),
+            "{token:?} Line must gain the outline in high contrast"
+        );
+        let normal_line = painted_shapes(0..10_000, 1_000, |painter, space| {
+            plugin_overlays::paint(painter, space, 10_000, ViewKind::Overview, &line_layers);
+        });
+        assert!(
+            !has_overlay_outline(&normal_line, outline.color),
+            "{token:?} Line must not carry an outline outside high contrast"
+        );
+
+        let hc_region = painted_shapes_high_contrast(0..10_000, 1_000, |painter, space| {
+            plugin_overlays::paint(painter, space, 10_000, ViewKind::Overview, &region_layers);
+        });
+        assert!(
+            has_overlay_outline(&hc_region, outline.color),
+            "{token:?} Region must gain the outline in high contrast"
+        );
+        let normal_region = painted_shapes(0..10_000, 1_000, |painter, space| {
+            plugin_overlays::paint(painter, space, 10_000, ViewKind::Overview, &region_layers);
+        });
+        assert!(
+            !has_overlay_outline(&normal_region, outline.color),
+            "{token:?} Region must not carry an outline outside high contrast"
+        );
+
+        let hc_label = painted_shapes_high_contrast(0..10_000, 1_000, |painter, space| {
+            plugin_overlays::paint(painter, space, 10_000, ViewKind::Detail, &label_layers);
+        });
+        assert!(
+            has_overlay_outline(&hc_label, outline.color),
+            "{token:?} Label must gain a halo outline in high contrast"
+        );
+        let normal_label = painted_shapes(0..10_000, 1_000, |painter, space| {
+            plugin_overlays::paint(painter, space, 10_000, ViewKind::Detail, &label_layers);
+        });
+        assert!(
+            !has_overlay_outline(&normal_label, outline.color),
+            "{token:?} Label must not carry an outline outside high contrast"
+        );
+
+        let hc_glyph = painted_shapes_high_contrast(0..10_000, 1_000, |painter, space| {
+            plugin_overlays::paint(painter, space, 10_000, ViewKind::Overview, &glyph_layers);
+        });
+        assert!(
+            has_overlay_outline(&hc_glyph, outline.color),
+            "{token:?} host Glyph must gain the outline in high contrast"
+        );
+        let normal_glyph = painted_shapes(0..10_000, 1_000, |painter, space| {
+            plugin_overlays::paint(painter, space, 10_000, ViewKind::Overview, &glyph_layers);
+        });
+        assert!(
+            !has_overlay_outline(&normal_glyph, outline.color),
+            "{token:?} host Glyph must not carry an outline outside high contrast"
+        );
+    }
+}
+
+/// M12 (O11): `Accent`/`Secondary`/`Neutral` primitives never gain the
+/// palette outline, in any style; neither does the `Package`-glyph
+/// fallback (unresolved key), even coloured `Positive`. Checked by shape
+/// **count** (identical normal vs. high contrast), not colour — a role
+/// token's own resolved colour promotes onto `text_primary` in high
+/// contrast (`H13`) and could otherwise coincidentally equal the outline
+/// colour and look like a false "gain".
+#[test]
+fn plugin_role_primitives_do_not() {
+    for token in [
+        OverlayColor::Accent,
+        OverlayColor::Secondary,
+        OverlayColor::Neutral,
+    ] {
+        let layers = vec![layer(vec![
+            line_token("l", 5_000, token),
+            region_token("r", 1_000, 3_000, token),
+            label_token("t", 1_000, "x", token),
+            glyph_host_token("g", 2_000, HostGlyph::Dot, token),
+        ])];
+        let normal = painted_shapes(0..10_000, 1_000, |painter, space| {
+            plugin_overlays::paint(painter, space, 10_000, ViewKind::Detail, &layers);
+        });
+        let hc = painted_shapes_high_contrast(0..10_000, 1_000, |painter, space| {
+            plugin_overlays::paint(painter, space, 10_000, ViewKind::Detail, &layers);
+        });
+        assert_eq!(
+            shape_kind_count(&hc),
+            shape_kind_count(&normal),
+            "{token:?} must never gain an extra shape (no outline)"
+        );
+    }
+
+    let fallback_layers = vec![layer(vec![OverlayPrimitive::Glyph {
+        id: id("g"),
+        at_ms: 1_000,
+        icon: GlyphRef::Package("does-not-resolve".to_string()),
+        color: OverlayColor::Positive,
+    }])];
+    let normal = painted_shapes(0..10_000, 1_000, |painter, space| {
+        plugin_overlays::paint(painter, space, 10_000, ViewKind::Overview, &fallback_layers);
+    });
+    let hc = painted_shapes_high_contrast(0..10_000, 1_000, |painter, space| {
+        plugin_overlays::paint(painter, space, 10_000, ViewKind::Overview, &fallback_layers);
+    });
+    assert_eq!(
+        shape_kind_count(&hc),
+        shape_kind_count(&normal),
+        "the Package-glyph fallback must never gain an extra shape (no outline)"
+    );
+}
+
+/// P4: a docked plugin panel is painted from the exact same applied
+/// style as host chrome. Proven here by pairing a plugin `Positive`
+/// overlay's outline against the host's own `theme::markers::
+/// marker_outline` value and casing rule (`casing_width`): both must be
+/// byte-identical, because both resolve through the one
+/// `ctx.style_of(ctx.theme())` object `apply_tokens_for` installs once
+/// (FR-017) — a docked plugin panel cannot diverge from host chrome.
+#[test]
+fn docked_plugin_panel_matches_host_chrome() {
+    let outline = high_contrast_outline();
+    let casing = modplayer_ui::theme::markers::casing_width(1.0);
+    let layers = vec![layer(vec![line_token("l", 5_000, OverlayColor::Positive)])];
+    let shapes = painted_shapes_high_contrast(0..10_000, 1_000, |painter, space| {
+        plugin_overlays::paint(painter, space, 10_000, ViewKind::Overview, &layers);
+    });
+    let matches_host = shapes.iter().any(|shape| {
+        matches!(
+            shape,
+            Shape::LineSegment { stroke, .. }
+                if stroke.color == outline.color && (stroke.width - casing).abs() < 0.01
+        )
+    });
+    assert!(
+        matches_host,
+        "a docked plugin panel's overlay outline must match the host's exactly, {shapes:?}"
+    );
+}
+
+/// P5 (US4 AS-2): toggling high contrast produces no plugin-side call —
+/// `paint` re-projects the identical, already-fetched `layers` slice
+/// under either style; the host never re-asks the plugin just because
+/// the applied style changed (the extra shape below is the outline this
+/// same frame's *style* now supplies, not a new primitive).
+#[test]
+fn toggling_high_contrast_calls_no_plugin() {
+    let layers = vec![layer(vec![line_token("l", 5_000, OverlayColor::Positive)])];
+    let normal = painted_shapes(0..10_000, 1_000, |painter, space| {
+        plugin_overlays::paint(painter, space, 10_000, ViewKind::Overview, &layers);
+    });
+    let hc = painted_shapes_high_contrast(0..10_000, 1_000, |painter, space| {
+        plugin_overlays::paint(painter, space, 10_000, ViewKind::Overview, &layers);
+    });
+    assert!(!normal.is_empty(), "the normal-mode frame must still paint");
+    assert!(
+        hc.len() > normal.len(),
+        "the identical `layers` value paints an extra outline shape under \
+         high contrast with no re-fetch from the plugin"
+    );
 }

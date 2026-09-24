@@ -49,6 +49,9 @@ setting-theme-system = System
 setting-theme-light = Light
 setting-theme-dark = Dark
 
+setting-high-contrast = High contrast
+setting-high-contrast-desc = Boost text, borders and the focus ring to meet a 7:1 (text) / 3:1 (structure) contrast floor.
+
 setting-locale = Language
 setting-locale-desc = The language ModPlayer's interface is displayed in.
 language-english = English

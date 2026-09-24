@@ -17,6 +17,8 @@ use modplayer_audio_source::SourceHost;
 use modplayer_core::{AudioSettings, PlaybackController, Severity, tr};
 use modplayer_engine::Theme;
 
+use crate::widgets::controls::{SwitchKind, switch};
+
 /// The three theme options, in display order.
 const THEMES: [Theme; 3] = [Theme::System, Theme::Light, Theme::Dark];
 
@@ -58,6 +60,36 @@ pub fn show<B: OutputBackend, H: SourceHost>(
         }
         *cached = settings;
         crate::theme::apply(ui.ctx(), theme);
+    }
+
+    // 017-high-contrast-appearance (US2, T028): the checkbox lives below
+    // the Theme combo, orthogonal to it (FR-001/FR-015) — same reload-
+    // mutate-save persistence, `set_high_contrast` for the controller's own
+    // shadow state (mirrored into `App::ui`'s next `apply_tokens_for` call,
+    // contract A18); no direct `theme::apply_tokens_for` call is needed
+    // here.
+    let mut high_contrast = cached.high_contrast;
+    let hc_response = switch(
+        ui,
+        SwitchKind::Checkbox,
+        &mut high_contrast,
+        &tr("setting-high-contrast"),
+    );
+    if focus == Some("appearance.high_contrast") {
+        hc_response.request_focus();
+    }
+    ui.label(tr("setting-high-contrast-desc"));
+
+    if hc_response.changed() {
+        controller.set_high_contrast(high_contrast);
+        let mut settings = controller.settings_store().load().settings;
+        settings.high_contrast = high_contrast;
+        if controller.settings_store().save(&settings).is_err() {
+            controller
+                .notifications_mut()
+                .raise(Severity::Warning, "settings-save-failed");
+        }
+        *cached = settings;
     }
 }
 

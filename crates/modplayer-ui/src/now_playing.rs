@@ -462,6 +462,10 @@ fn show_waveform<B: OutputBackend, H: SourceHost>(
     // plugin's overlay layers, read once for both waveforms this frame —
     // painting them costs zero plugin calls (O10, SC-003).
     let overlay_layers = controller.plugin_overlays();
+    // 017-high-contrast-appearance (S3): read once here, moved into both
+    // paint closures below — the single selection site, no paint site
+    // branches on the appearance flag itself.
+    let roles = theme::roles(ui.visuals());
     markers::lane(
         ui,
         "overview",
@@ -500,6 +504,7 @@ fn show_waveform<B: OutputBackend, H: SourceHost>(
                 markers_snapshot.as_ref(),
                 loop_state,
                 focused_marker,
+                roles,
             );
             // O5: after markers/loop, before the playhead (paint::paint
             // already ran, `waveform::overview`'s own body calls
@@ -569,6 +574,7 @@ fn show_waveform<B: OutputBackend, H: SourceHost>(
                 markers_snapshot.as_ref(),
                 loop_state,
                 focused_marker,
+                roles,
             );
             plugin_overlays::paint(
                 painter,

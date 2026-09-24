@@ -24,7 +24,7 @@ use modplayer_engine::Theme;
 
 pub mod contrast;
 pub mod controls;
-mod markers;
+pub mod markers;
 pub mod style;
 pub mod tokens;
 
@@ -47,21 +47,37 @@ fn to_preference(theme: Theme) -> ThemePreference {
     }
 }
 
-static STYLES: OnceLock<(Arc<Style>, Arc<Style>)> = OnceLock::new();
+/// `[light, dark, light-high-contrast, dark-high-contrast]` (017-high-
+/// contrast-appearance, research R1): built once, cloned thereafter.
+static STYLES: OnceLock<[Arc<Style>; 4]> = OnceLock::new();
 
-/// Install both themes' complete token `Style` (research R7, contract A1):
-/// idempotent and allocation-free after the first call. Call from
-/// `App::new` before the first paint and as the first statement of every
-/// frame (contract A2).
+/// Install both themes' complete token `Style`, normal mode (research R7,
+/// contract A1): idempotent and allocation-free after the first call.
+/// Kept as a thin wrapper over [`apply_tokens_for`] (017-high-contrast-
+/// appearance design note D3) so the 25 existing test call sites — the
+/// regression net for "no change outside high contrast" — stay unmodified.
 pub fn apply_tokens(ctx: &Context) {
-    let (light, dark) = STYLES.get_or_init(|| {
-        (
-            Arc::new(style::build_style(EguiTheme::Light)),
-            Arc::new(style::build_style(EguiTheme::Dark)),
-        )
+    apply_tokens_for(ctx, false);
+}
+
+/// FR-017 (017-high-contrast-appearance): the single selection site.
+/// `high_contrast` picks the table pair; nothing downstream branches on
+/// it. Idempotent and allocation-free after the first call — call from
+/// `App::new` before the first paint and as the first statement of every
+/// frame (contract A2), so a toggle is visible on the very next frame
+/// with no flash of the old tables.
+pub fn apply_tokens_for(ctx: &Context, high_contrast: bool) {
+    let styles = STYLES.get_or_init(|| {
+        [
+            Arc::new(style::build_style(EguiTheme::Light, false)),
+            Arc::new(style::build_style(EguiTheme::Dark, false)),
+            Arc::new(style::build_style(EguiTheme::Light, true)),
+            Arc::new(style::build_style(EguiTheme::Dark, true)),
+        ]
     });
-    ctx.set_style_of(EguiTheme::Light, Arc::clone(light));
-    ctx.set_style_of(EguiTheme::Dark, Arc::clone(dark));
+    let base = if high_contrast { 2 } else { 0 };
+    ctx.set_style_of(EguiTheme::Light, Arc::clone(&styles[base]));
+    ctx.set_style_of(EguiTheme::Dark, Arc::clone(&styles[base + 1]));
 }
 
 /// The 1 px in-panel rule (FR-008): drawn across the available width in

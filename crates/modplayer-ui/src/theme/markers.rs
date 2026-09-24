@@ -58,14 +58,59 @@ pub fn overlay_color(token: OverlayColor, visuals: &Visuals) -> Color32 {
     }
 }
 
-/// 011-plugin-ui-contributions (O12): the six host-drawn glyphs a
-/// plugin's `glyph` overlay primitive can name without shipping its own
-/// asset — plain vector shapes (no bitmap), so they render identically
-/// regardless of theme and never depend on the `image` crate. `center` is
-/// the glyph's on-screen centre; `size` its square bounding box. `visuals`
+/// FR-012 (017-high-contrast-appearance): the palette-outline stroke
+/// width. Chosen over a thicker stroke so a glyph's own focused/unfocused
+/// difference (2.0 vs 1.5 px, research R8) is not swamped.
+pub const MARKER_OUTLINE_WIDTH: f32 = 1.0;
+
+/// FR-011/FR-012 (017-high-contrast-appearance): `Some` only in high
+/// contrast. The colour is the active theme's `text_primary` — its
+/// extreme luminance end, so it holds >= 7:1 against both waveform
+/// surfaces whichever of the eight palette entries it encircles
+/// (research R6).
+pub fn marker_outline(roles: &super::tokens::Roles) -> Option<Stroke> {
+    roles
+        .high_contrast
+        .then(|| Stroke::new(MARKER_OUTLINE_WIDTH, roles.text_primary))
+}
+
+/// FR-011 (017-high-contrast-appearance): `Some` only where the resolved
+/// overlay colour is palette *data*. `Accent`/`Secondary`/`Neutral`
+/// resolve through the recoloured roles and are excluded unconditionally
+/// (research R9) — they are already at their high-contrast value, so an
+/// outline would only obscure it.
+pub fn overlay_outline(token: OverlayColor, visuals: &Visuals) -> Option<Stroke> {
+    match token {
+        OverlayColor::Positive | OverlayColor::Warning => {
+            marker_outline(super::tokens::roles(visuals))
+        }
+        OverlayColor::Accent | OverlayColor::Secondary | OverlayColor::Neutral => None,
+    }
+}
+
+/// The casing width for a stroked shape (research R8): the palette
+/// stroke drawn `2 * MARKER_OUTLINE_WIDTH` wider, underneath, so the
+/// focused/unfocused delta survives the casing uniformly.
+pub fn casing_width(base: f32) -> f32 {
+    base + 2.0 * MARKER_OUTLINE_WIDTH
+}
+
+/// 011-plugin-ui-contributions (O12), outlined per O10
+/// (017-high-contrast-appearance): the six host-drawn glyphs a plugin's
+/// `glyph` overlay primitive can name without shipping its own asset —
+/// plain vector shapes (no bitmap), so they render identically regardless
+/// of theme and never depend on the `image` crate. `center` is the
+/// glyph's on-screen centre; `size` its square bounding box. `visuals`
 /// selects the active theme's `text_on_accent` for the `Warning` glyph's
 /// exclamation mark (014-design-tokens-and-type-scale, U5, research R15):
 /// a fixed white mark is wrong on a light-theme warning triangle.
+/// `outline` is `Some` only when the caller resolved a palette-data
+/// colour in high contrast (`overlay_outline`, O10); every filled form
+/// gains a casing underneath at `MARKER_OUTLINE_WIDTH` extra radius/
+/// thickness, every stroked form takes the outline as its own stroke
+/// (mirrors O1-O2's `casing_width`/"stroke becomes the outline colour"
+/// techniques) — the exclamation mark (a role, not palette data) is
+/// never touched, same as the cue glyph's digit (O3, FR-020).
 pub fn paint_host_glyph(
     painter: &Painter,
     glyph: HostGlyph,
@@ -73,54 +118,75 @@ pub fn paint_host_glyph(
     size: f32,
     color: Color32,
     visuals: &Visuals,
+    outline: Option<Stroke>,
 ) {
     let half = size / 2.0;
     match glyph {
         HostGlyph::Dot => {
-            painter.circle_filled(center, half * 0.7, color);
+            let radius = half * 0.7;
+            if let Some(outline) = outline {
+                painter.circle_filled(center, radius + MARKER_OUTLINE_WIDTH, outline.color);
+            }
+            painter.circle_filled(center, radius, color);
         }
         HostGlyph::Flag => {
             let pole_x = center.x - half * 0.5;
-            painter.line_segment(
-                [pos2(pole_x, center.y + half), pos2(pole_x, center.y - half)],
-                Stroke::new(1.5, color),
-            );
+            let pole = [pos2(pole_x, center.y + half), pos2(pole_x, center.y - half)];
+            if let Some(outline) = outline {
+                painter.line_segment(pole, Stroke::new(casing_width(1.5), outline.color));
+            }
+            painter.line_segment(pole, Stroke::new(1.5, color));
             let points = vec![
                 pos2(pole_x, center.y - half),
                 pos2(pole_x, center.y),
                 pos2(pole_x + size * 0.6, center.y - half * 0.5),
             ];
-            painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
+            painter.add(egui::Shape::convex_polygon(
+                points,
+                color,
+                outline.unwrap_or(Stroke::NONE),
+            ));
         }
         HostGlyph::Note => {
             let head = pos2(center.x - half * 0.3, center.y + half * 0.4);
-            painter.circle_filled(head, half * 0.5, color);
-            painter.line_segment(
-                [
-                    pos2(head.x + half * 0.45, head.y),
-                    pos2(head.x + half * 0.45, center.y - half),
-                ],
-                Stroke::new(1.5, color),
-            );
+            let radius = half * 0.5;
+            if let Some(outline) = outline {
+                painter.circle_filled(head, radius + MARKER_OUTLINE_WIDTH, outline.color);
+            }
+            painter.circle_filled(head, radius, color);
+            let stem = [
+                pos2(head.x + half * 0.45, head.y),
+                pos2(head.x + half * 0.45, center.y - half),
+            ];
+            if let Some(outline) = outline {
+                painter.line_segment(stem, Stroke::new(casing_width(1.5), outline.color));
+            }
+            painter.line_segment(stem, Stroke::new(1.5, color));
         }
         HostGlyph::Chord => {
             let r = half * 0.4;
-            painter.circle_filled(pos2(center.x - half * 0.4, center.y), r, color);
-            painter.circle_filled(pos2(center.x + half * 0.4, center.y), r, color);
+            for c in [
+                pos2(center.x - half * 0.4, center.y),
+                pos2(center.x + half * 0.4, center.y),
+            ] {
+                if let Some(outline) = outline {
+                    painter.circle_filled(c, r + MARKER_OUTLINE_WIDTH, outline.color);
+                }
+                painter.circle_filled(c, r, color);
+            }
         }
         HostGlyph::Star => {
             let arm = half * 0.9;
             let thickness = (size * 0.22).max(1.0);
-            painter.rect_filled(
+            for bar in [
                 Rect::from_center_size(center, vec2(arm * 2.0, thickness)),
-                0.0,
-                color,
-            );
-            painter.rect_filled(
                 Rect::from_center_size(center, vec2(thickness, arm * 2.0)),
-                0.0,
-                color,
-            );
+            ] {
+                if let Some(outline) = outline {
+                    painter.rect_filled(bar.expand(MARKER_OUTLINE_WIDTH), 0.0, outline.color);
+                }
+                painter.rect_filled(bar, 0.0, color);
+            }
         }
         HostGlyph::Warning => {
             let mark_color = super::tokens::roles(visuals).text_on_accent;
@@ -129,7 +195,13 @@ pub fn paint_host_glyph(
                 pos2(center.x - half, center.y + half),
                 pos2(center.x + half, center.y + half),
             ];
-            painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
+            painter.add(egui::Shape::convex_polygon(
+                points,
+                color,
+                outline.unwrap_or(Stroke::NONE),
+            ));
+            // The exclamation mark is `text_on_accent`, a role — never
+            // outlined (O10 note, mirrors O3's cue-digit exclusion).
             painter.line_segment(
                 [
                     pos2(center.x, center.y - half * 0.1),

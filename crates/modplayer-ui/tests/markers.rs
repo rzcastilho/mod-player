@@ -8,18 +8,18 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use egui::accesskit::Role;
-use egui::{Context, Event, Key, Modifiers, PointerButton, Pos2, RawInput, Rect, Shape};
+use egui::{Context, Event, Key, Modifiers, PointerButton, Pos2, RawInput, Rect, Shape, Stroke};
 use modplayer_audio_io::{FakeBackend, FakeDevice};
 use modplayer_audio_source::{Availability, TrackId, TrackRef};
 use modplayer_audio_source_synthetic::{ScriptedHost, ScriptedHostHandle};
 use modplayer_core::actions::ScopeState;
-use modplayer_core::markers::{CueSlot, RepeatCount, TrackMarkers};
+use modplayer_core::markers::{CueSlot, MarkerId, RepeatCount, TrackMarkers};
 use modplayer_core::plugins::PluginId;
 use modplayer_core::settings::SettingsStore;
 use modplayer_core::{Intent, LoopState, PlaybackController, tr, tr_args};
 use modplayer_engine::{BufferPreset, DeviceId, FrameCount, SampleRate};
 use modplayer_ui::artwork::ArtworkCache;
-use modplayer_ui::waveform::{TimeSpace, WaveformState};
+use modplayer_ui::waveform::{DetailWindow, TimeSpace, WaveformState};
 use modplayer_ui::{Shell, actions};
 
 /// How many frames a jump's landing position may sit past the cue it
@@ -40,6 +40,36 @@ fn fresh_ctx() -> Context {
     let ctx = Context::default();
     modplayer_ui::theme::apply_tokens(&ctx);
     ctx
+}
+
+/// As [`fresh_ctx`], with the high-contrast token style installed
+/// (017-high-contrast-appearance, Phase 5/US3) — mirrors what
+/// `App::new`/`App::ui` do once `controller.high_contrast()` is `true`.
+fn fresh_ctx_high_contrast() -> Context {
+    let ctx = Context::default();
+    modplayer_ui::theme::apply_tokens_for(&ctx, true);
+    ctx
+}
+
+/// `true` if `shapes` contains a shape carrying the high-contrast marker
+/// outline (017-high-contrast-appearance, contracts/marker-outline.md §2):
+/// a `LineSegment` casing (wider than the plain 1–2px palette stroke), a
+/// `Path`'s own stroke (the point-glyph/clamped-warning polygons), or a
+/// `Rect`'s stroke (the cue glyph's outside `rect_stroke`, the armed
+/// loop-region span's). All three are how O1–O6 draw the outline.
+fn has_outline_shapes(shapes: &[Shape], outline_color: egui::Color32) -> bool {
+    shapes.iter().any(|shape| match shape {
+        Shape::LineSegment { stroke, .. } => stroke.color == outline_color && stroke.width > 1.0,
+        Shape::Path(path) => {
+            path.stroke.width > 0.0
+                && matches!(
+                    path.stroke.color,
+                    egui::epaint::ColorMode::Solid(c) if c == outline_color
+                )
+        }
+        Shape::Rect(rect) => rect.stroke.width > 0.0 && rect.stroke.color == outline_color,
+        _ => false,
+    })
 }
 
 struct TempDir(PathBuf);
@@ -629,7 +659,14 @@ fn overlay_paints_lines_and_span_states() {
 
     for loop_state in [0u8, 1, 2] {
         let shapes = painted_shapes(0..(44_100 * 200), 44_100, |painter, space| {
-            modplayer_ui::markers::paint_overlay(painter, space, Some(&markers), loop_state, None);
+            modplayer_ui::markers::paint_overlay(
+                painter,
+                space,
+                Some(&markers),
+                loop_state,
+                None,
+                &modplayer_ui::theme::tokens::LIGHT,
+            );
         });
 
         let line_count = shapes
@@ -777,7 +814,14 @@ fn clamped_marker_shows_warning_glyph() {
 
     let triangle_count = |markers: &TrackMarkers| {
         painted_shapes(0..(44_100 * 200), 44_100, |painter, space| {
-            modplayer_ui::markers::paint_overlay(painter, space, Some(markers), 0, None);
+            modplayer_ui::markers::paint_overlay(
+                painter,
+                space,
+                Some(markers),
+                0,
+                None,
+                &modplayer_ui::theme::tokens::LIGHT,
+            );
         })
         .iter()
         .filter(|shape| matches!(shape, Shape::Path(_)))
@@ -1140,7 +1184,14 @@ fn c_cycles_palette_and_row_matches_glyph() {
     let markers_now = controller.markers().cloned();
     let expected_color = modplayer_ui::theme::marker_color(after);
     let shapes = painted_shapes(0..(44_100 * 200), 44_100, |painter, space| {
-        modplayer_ui::markers::paint_overlay(painter, space, markers_now.as_ref(), 0, None);
+        modplayer_ui::markers::paint_overlay(
+            painter,
+            space,
+            markers_now.as_ref(),
+            0,
+            None,
+            &modplayer_ui::theme::tokens::LIGHT,
+        );
     });
     let has_matching_line = shapes.iter().any(|shape| {
         matches!(shape, Shape::LineSegment { stroke, .. } if stroke.color == expected_color)
@@ -1645,5 +1696,394 @@ fn markers_panel_renders_as_a_card_with_no_added_interactive_controls() {
             lower.contains("collaps") || lower.contains("expand")
         }),
         "no collapse/expand control may be added to the Markers card: {button_names:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// 017-high-contrast-appearance (T009, contracts/marker-outline.md §1):
+// the outline *value* — `marker_outline`'s presence, width and contrast
+// floor. No paint call site is asserted here (that is M4-M9, Phase 5).
+// ---------------------------------------------------------------------
+
+/// M1: `marker_outline(r)` is `None` for both normal tables, `Some(1px
+/// text_primary)` for both high-contrast tables.
+#[test]
+fn marker_outline_exists_only_in_high_contrast() {
+    use modplayer_ui::theme::markers::marker_outline;
+    use modplayer_ui::theme::tokens::{DARK, DARK_HIGH_CONTRAST, LIGHT, LIGHT_HIGH_CONTRAST};
+
+    assert_eq!(marker_outline(&LIGHT), None);
+    assert_eq!(marker_outline(&DARK), None);
+    assert_eq!(
+        marker_outline(&LIGHT_HIGH_CONTRAST),
+        Some(egui::Stroke::new(1.0, LIGHT_HIGH_CONTRAST.text_primary))
+    );
+    assert_eq!(
+        marker_outline(&DARK_HIGH_CONTRAST),
+        Some(egui::Stroke::new(1.0, DARK_HIGH_CONTRAST.text_primary))
+    );
+}
+
+/// M2: chosen over a thicker stroke so the glyph's own focused/unfocused
+/// difference is not swamped.
+#[test]
+fn marker_outline_width_is_one_pixel() {
+    assert_eq!(modplayer_ui::theme::markers::MARKER_OUTLINE_WIDTH, 1.0);
+}
+
+/// M3: for both high-contrast tables and all eight `MARKER_PALETTE`
+/// entries, the outline (`text_primary`, palette-independent by
+/// construction) clears >= 7:1 against both surfaces.
+#[test]
+fn marker_outline_clears_the_enhanced_floor_against_every_palette_entry() {
+    use modplayer_ui::theme::MARKER_PALETTE;
+    use modplayer_ui::theme::contrast::ratio;
+    use modplayer_ui::theme::markers::marker_outline;
+    use modplayer_ui::theme::tokens::{DARK_HIGH_CONTRAST, LIGHT_HIGH_CONTRAST};
+
+    for table in [&LIGHT_HIGH_CONTRAST, &DARK_HIGH_CONTRAST] {
+        let stroke =
+            marker_outline(table).unwrap_or_else(|| unreachable!("high contrast must outline"));
+        for _entry in MARKER_PALETTE.iter() {
+            // The outline colour does not depend on the palette entry it
+            // encircles (research R6) — looped anyway so the claim is
+            // machine-checked over the whole palette, not argued.
+            for base in [table.surface_base, table.surface_raised] {
+                let measured = ratio(stroke.color, base);
+                assert!(
+                    measured >= 7.0,
+                    "marker outline vs {base:?} = {measured:.2}, floor 7.0"
+                );
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// 017-high-contrast-appearance (Phase 5, US3, contracts/marker-outline.md
+// §2): where the outline is drawn — M4-M9. The outline *value* (M1-M3)
+// is pinned above; this section is paint-site coverage only.
+// ---------------------------------------------------------------------
+
+/// M4: with markers placed and high contrast on, each detail-lane glyph
+/// (region bracket, point, cue — `markers::lane`, O1-O3) gains an outline
+/// shape in `text_primary`; with high contrast off, none does.
+#[test]
+fn detail_lane_glyphs_gain_an_outline() {
+    let (mut controller, _handle, _dir) = active_controller("m4-detail-glyphs");
+    controller.queue_replace(vec![track("a", 200_000)]);
+    controller.play();
+    controller.tick();
+    controller
+        .set_loop_a()
+        .unwrap_or_else(|e| unreachable!("set_loop_a: {e}"));
+    controller
+        .add_point_marker()
+        .unwrap_or_else(|e| unreachable!("add_point_marker: {e}"));
+    let slot1 = CueSlot::new(1).unwrap_or_else(|| unreachable!());
+    controller
+        .set_cue(slot1)
+        .unwrap_or_else(|e| unreachable!("set_cue: {e}"));
+
+    let markers = controller.markers().cloned();
+    let sample_rate = controller.source_sample_rate().max(1);
+    let len_frames = 200_000u64 * u64::from(sample_rate) / 1000;
+
+    let hc_visuals = {
+        let ctx = Context::default();
+        modplayer_ui::theme::apply_tokens_for(&ctx, true);
+        ctx.style_of(ctx.theme()).visuals.clone()
+    };
+    let text_primary = modplayer_ui::theme::roles(&hc_visuals).text_primary;
+
+    let mut lane_shapes = |ctx: &Context| -> Vec<Shape> {
+        let mut waveform = WaveformState::default();
+        let mut detail = DetailWindow::initial(0, len_frames, sample_rate);
+        let output = ctx.run_ui(default_input(), |ui| {
+            modplayer_ui::markers::lane(
+                ui,
+                "detail",
+                0..len_frames,
+                sample_rate,
+                len_frames,
+                markers.as_ref(),
+                &mut controller,
+                &mut waveform,
+                &mut detail,
+            );
+        });
+        let shapes = output.shapes.iter().map(|c| c.shape.clone()).collect();
+        output.drop_without_applying_deltas();
+        shapes
+    };
+
+    let normal_ctx = fresh_ctx();
+    normal_ctx.enable_accesskit();
+    let normal_shapes = lane_shapes(&normal_ctx);
+    assert!(
+        !has_outline_shapes(&normal_shapes, text_primary),
+        "no outline shape in normal mode"
+    );
+
+    let hc_ctx = fresh_ctx_high_contrast();
+    hc_ctx.enable_accesskit();
+    let hc_shapes = lane_shapes(&hc_ctx);
+    assert!(
+        has_outline_shapes(&hc_shapes, text_primary),
+        "high contrast must add an outline shape at the detail-lane glyph sites"
+    );
+}
+
+/// M5: the same claim as M4, for the overview-lane marker line and a
+/// clamped marker's warning glyph (`markers::paint_overlay`, O4/O6).
+#[test]
+fn overview_lane_markers_gain_an_outline() {
+    use modplayer_ui::theme::tokens::{LIGHT, LIGHT_HIGH_CONTRAST};
+
+    let id = TrackId::new("spotify:track:m5-overview").unwrap_or_else(|_| unreachable!());
+    let mut markers = TrackMarkers::new(id, 44_100, 44_100 * 200);
+    markers
+        .add_point(1_000)
+        .unwrap_or_else(|e| unreachable!("add_point: {e:?}"));
+    markers
+        .set_loop_a(2_000)
+        .unwrap_or_else(|e| unreachable!("set_loop_a: {e}"));
+    // Shrinks the track: the A endpoint lands past the new length and is
+    // flagged `clamped`, so O6's warning glyph paints too.
+    markers.set_len_frames(1_500);
+
+    let normal_shapes = painted_shapes(0..(44_100 * 200), 44_100, |painter, space| {
+        modplayer_ui::markers::paint_overlay(painter, space, Some(&markers), 0, None, &LIGHT);
+    });
+    assert!(
+        !has_outline_shapes(&normal_shapes, LIGHT_HIGH_CONTRAST.text_primary),
+        "no outline shape in normal mode"
+    );
+
+    let hc_shapes = painted_shapes(0..(44_100 * 200), 44_100, |painter, space| {
+        modplayer_ui::markers::paint_overlay(
+            painter,
+            space,
+            Some(&markers),
+            0,
+            None,
+            &LIGHT_HIGH_CONTRAST,
+        );
+    });
+    assert!(
+        has_outline_shapes(&hc_shapes, LIGHT_HIGH_CONTRAST.text_primary),
+        "high contrast must add an outline shape at the overview-lane line/clamped-marker warning"
+    );
+}
+
+/// M6: an armed loop region's span shading (`loop_state == 2`) gains a
+/// `rect_stroke` in `text_primary`; its translucent fill colour is
+/// unchanged (M8).
+#[test]
+fn loop_region_span_gains_an_outline() {
+    use modplayer_ui::theme::tokens::{LIGHT, LIGHT_HIGH_CONTRAST};
+
+    let id = TrackId::new("spotify:track:m6-span").unwrap_or_else(|_| unreachable!());
+    let mut markers = TrackMarkers::new(id, 44_100, 44_100 * 200);
+    markers
+        .set_loop_a(1_000)
+        .unwrap_or_else(|e| unreachable!("set_loop_a: {e}"));
+    markers
+        .set_loop_b(5_000)
+        .unwrap_or_else(|e| unreachable!("set_loop_b: {e}"));
+
+    let span_rect_shapes = |roles: &modplayer_ui::theme::Roles| -> Vec<Shape> {
+        painted_shapes(0..(44_100 * 200), 44_100, |painter, space| {
+            modplayer_ui::markers::paint_overlay(painter, space, Some(&markers), 2, None, roles);
+        })
+        .into_iter()
+        .filter(|shape| matches!(shape, Shape::Rect(_)))
+        .collect()
+    };
+
+    let normal_shapes = span_rect_shapes(&LIGHT);
+    assert_eq!(
+        normal_shapes.len(),
+        1,
+        "armed-active paints exactly one span rect in normal mode"
+    );
+    let Shape::Rect(normal_rect) = &normal_shapes[0] else {
+        unreachable!()
+    };
+    assert!(normal_rect.fill.a() > 0, "the span must be filled");
+    assert_eq!(normal_rect.stroke.width, 0.0, "no stroke in normal mode");
+
+    let hc_shapes = span_rect_shapes(&LIGHT_HIGH_CONTRAST);
+    assert_eq!(
+        hc_shapes.len(),
+        2,
+        "high contrast adds one extra rect_stroke shape beyond the filled span"
+    );
+    let hc_fill = hc_shapes
+        .iter()
+        .find_map(|shape| match shape {
+            Shape::Rect(r) if r.fill.a() > 0 => Some(r.fill),
+            _ => None,
+        })
+        .expect("the filled span rect must still exist");
+    assert_eq!(
+        hc_fill, normal_rect.fill,
+        "M8: the span's fill colour must not change in high contrast"
+    );
+    let outline_stroke = hc_shapes
+        .iter()
+        .find_map(|shape| match shape {
+            Shape::Rect(r) if r.stroke.width > 0.0 => Some(r.stroke),
+            _ => None,
+        })
+        .expect("an outline rect_stroke must exist in high contrast");
+    assert_eq!(outline_stroke.color, LIGHT_HIGH_CONTRAST.text_primary);
+}
+
+/// M8: the palette fill colour at an outline site is byte-identical
+/// between normal and high contrast — high contrast only adds a
+/// casing/stroke, never recolours (FR-011).
+#[test]
+fn palette_fills_are_never_recoloured() {
+    use modplayer_ui::theme::tokens::{LIGHT, LIGHT_HIGH_CONTRAST};
+
+    let id = TrackId::new("spotify:track:m8-fills").unwrap_or_else(|_| unreachable!());
+    let mut markers = TrackMarkers::new(id, 44_100, 44_100 * 200);
+    let marker_id = markers
+        .add_point(1_000)
+        .unwrap_or_else(|e| unreachable!("add_point: {e:?}"));
+    let palette_color = modplayer_ui::theme::marker_color(
+        markers
+            .marker(marker_id)
+            .unwrap_or_else(|| unreachable!())
+            .color,
+    );
+
+    let plain_line_color = |roles: &modplayer_ui::theme::Roles| -> egui::Color32 {
+        painted_shapes(0..(44_100 * 200), 44_100, |painter, space| {
+            modplayer_ui::markers::paint_overlay(painter, space, Some(&markers), 0, None, roles);
+        })
+        .into_iter()
+        .find_map(|shape| match shape {
+            Shape::LineSegment { stroke, .. } if stroke.width <= 2.0 => Some(stroke.color),
+            _ => None,
+        })
+        .expect("the marker's own line must be present")
+    };
+
+    assert_eq!(plain_line_color(&LIGHT), palette_color);
+    assert_eq!(
+        plain_line_color(&LIGHT_HIGH_CONTRAST),
+        palette_color,
+        "M8: the palette fill must not change in high contrast"
+    );
+}
+
+/// M9 (Edge Case 4): a focused glyph still strokes wider than an
+/// unfocused one by the same delta as in normal mode — the casing adds
+/// the same width to both (O4 here; O1's `paint_bracket` is the same
+/// mechanism).
+#[test]
+fn focus_width_difference_survives_the_outline() {
+    use modplayer_ui::theme::tokens::LIGHT_HIGH_CONTRAST;
+
+    let id = TrackId::new("spotify:track:m9-focus-width").unwrap_or_else(|_| unreachable!());
+    let mut markers = TrackMarkers::new(id, 44_100, 44_100 * 200);
+    let marker_id = markers
+        .add_point(1_000)
+        .unwrap_or_else(|e| unreachable!("add_point: {e:?}"));
+
+    let casing_width_for = |focused: Option<MarkerId>| -> f32 {
+        painted_shapes(0..(44_100 * 200), 44_100, |painter, space| {
+            modplayer_ui::markers::paint_overlay(
+                painter,
+                space,
+                Some(&markers),
+                0,
+                focused,
+                &LIGHT_HIGH_CONTRAST,
+            );
+        })
+        .into_iter()
+        .find_map(|shape| match shape {
+            Shape::LineSegment { stroke, .. }
+                if stroke.color == LIGHT_HIGH_CONTRAST.text_primary =>
+            {
+                Some(stroke.width)
+            }
+            _ => None,
+        })
+        .expect("a casing line must exist in high contrast")
+    };
+
+    let unfocused_casing = casing_width_for(None);
+    let focused_casing = casing_width_for(Some(marker_id));
+
+    assert_eq!(
+        focused_casing - unfocused_casing,
+        1.0,
+        "the casing must preserve the 2.0 vs 1.0 focus width delta"
+    );
+}
+
+/// M7 (research R7): the Markers panel's colour swatch carries a 1px
+/// `text_primary` frame stroke in high contrast, inherited from the
+/// divider (FR-007) — no swatch-specific paint code exists anywhere in
+/// this feature.
+#[test]
+fn panel_swatch_inherits_the_divider_outline() {
+    let (mut controller, _handle, _dir) = active_controller("m7-swatch");
+    controller.queue_replace(vec![track("a", 200_000)]);
+    controller.play();
+    controller.tick();
+    let id = controller
+        .add_point_marker()
+        .unwrap_or_else(|e| unreachable!("add_point_marker: {e}"));
+    let color = controller
+        .markers()
+        .and_then(|m| m.marker(id))
+        .map(|m| m.color)
+        .unwrap_or_else(|| unreachable!());
+    let palette_color = modplayer_ui::theme::marker_color(color);
+
+    let swatch_stroke = |ctx: &Context,
+                         controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+                         waveform: &mut WaveformState|
+     -> Stroke {
+        let output = ctx.run_ui(default_input(), |ui| {
+            modplayer_ui::markers::panel(ui, controller, waveform);
+        });
+        let stroke = output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                Shape::Rect(r) if r.fill == palette_color => Some(r.stroke),
+                _ => None,
+            })
+            .expect(
+                "the colour swatch button must paint a Rect filled with the marker's palette colour",
+            );
+        output.drop_without_applying_deltas();
+        stroke
+    };
+
+    let mut waveform = WaveformState::default();
+    let normal_ctx = fresh_ctx();
+    normal_ctx.enable_accesskit();
+    let normal_stroke = swatch_stroke(&normal_ctx, &mut controller, &mut waveform);
+
+    let hc_ctx = fresh_ctx_high_contrast();
+    hc_ctx.enable_accesskit();
+    let hc_visuals = hc_ctx.style_of(hc_ctx.theme()).visuals.clone();
+    let hc_stroke = swatch_stroke(&hc_ctx, &mut controller, &mut waveform);
+
+    let hc_text_primary = modplayer_ui::theme::roles(&hc_visuals).text_primary;
+    assert_eq!(
+        hc_stroke.color, hc_text_primary,
+        "the swatch must inherit high contrast's opaque divider stroke"
+    );
+    assert_ne!(
+        normal_stroke.color, hc_stroke.color,
+        "normal mode's divider stroke must differ from the high-contrast one"
     );
 }

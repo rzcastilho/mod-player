@@ -738,6 +738,36 @@ proptest! {
         prop_assert!(outcome.warnings.is_empty());
         prop_assert_eq!(outcome.settings.schema_version, modplayer_core::settings::SCHEMA_VERSION);
     }
+
+    // 017-high-contrast-appearance (T003, contracts/appearance-setting.md
+    // A10, Constitution VIII): for an arbitrary `(Theme, bool)` pair,
+    // `from_settings` -> serialize -> deserialize -> `into_settings`
+    // returns the same pair with an empty `invalid` list.
+    #[test]
+    fn appearance_axis_round_trip_proptest(
+        theme_idx in 0usize..3,
+        high_contrast in any::<bool>(),
+    ) {
+        const THEMES: [modplayer_engine::Theme; 3] = [
+            modplayer_engine::Theme::System,
+            modplayer_engine::Theme::Light,
+            modplayer_engine::Theme::Dark,
+        ];
+        let theme = THEMES[theme_idx];
+        let dir = TempDir::new();
+        let store = store_in(&dir);
+        let settings = AudioSettings {
+            theme,
+            high_contrast,
+            ..AudioSettings::default()
+        };
+        prop_assert!(store.save(&settings).is_ok());
+
+        let outcome = store.load();
+        prop_assert_eq!(outcome.settings.theme, theme);
+        prop_assert_eq!(outcome.settings.high_contrast, high_contrast);
+        prop_assert!(outcome.warnings.is_empty());
+    }
 }
 
 /// 011-plugin-ui-contributions (US1 T040, contracts/ui-panels.md L3): an
