@@ -350,7 +350,13 @@ fn library_protected_rects(
             shell.nav_rail(ui);
         });
         CentralPanel::default().show(ui, |ui| {
-            let _ = library_view::show(ui, controller, &mut artwork, &mut state);
+            let _ = library_view::show(
+                ui,
+                controller,
+                &mut artwork,
+                &mut state,
+                &mut modplayer_ui::section_memory::SectionMemory::default(),
+            );
         });
     });
     let mut names = nav_rail_names();
@@ -380,7 +386,13 @@ fn settings_protected_rects(
             shell.nav_rail(ui);
         });
         CentralPanel::default().show(ui, |ui| {
-            let _ = settings::show(ui, controller, account, screen);
+            let _ = settings::show(
+                ui,
+                controller,
+                account,
+                screen,
+                &mut modplayer_ui::section_memory::SectionMemory::default(),
+            );
         });
     });
     let mut names = nav_rail_names();

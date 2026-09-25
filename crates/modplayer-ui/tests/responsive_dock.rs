@@ -426,7 +426,7 @@ fn run_now_playing_frame(
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
     run_frame(ctx, input, |ui| {
-        now_playing::show(ui, controller, &mut artwork, &mut waveform);
+        now_playing::show(ui, controller, &mut artwork, &mut waveform, 0);
     })
 }
 
@@ -547,7 +547,7 @@ fn run_now_playing_frame_with_elisions(
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
     let mut output = ctx.run_ui(now_playing_input(width, height), |ui| {
-        now_playing::show(ui, controller, &mut artwork, &mut waveform);
+        now_playing::show(ui, controller, &mut artwork, &mut waveform, 0);
     });
     let update = output
         .platform_output

@@ -18,10 +18,12 @@
 //! it and asks the search box (`search_view.rs`, US1, T038/T039) to take
 //! focus, via `focus_search_requested`.
 
-use egui::{Order, Ui};
-use modplayer_core::tr;
+use egui::{Id, Order, Panel, Sense, Stroke, Ui, vec2};
+use modplayer_account::LaunchStep;
+use modplayer_core::{tr, tr_args};
 
 use crate::theme;
+use crate::theme::controls;
 
 /// 011-plugin-ui-contributions, contracts/ui-panels.md L2: a floated
 /// plugin panel is a plain `Order::Middle` window — the same layer the
@@ -110,19 +112,265 @@ impl Shell {
     /// rather than left to derive from the now-uppercased painted text —
     /// FR-019 forbids a behaviour change, and a screen reader's own
     /// announcement of a nav button is behaviour.
+    ///
+    /// 020-shell-navigation-and-gates (US3, FR-005, FR-006, contracts/
+    /// shell-chrome.md C5-C8): each item renders through
+    /// `widgets::controls::nav_item` — a leading-edge `accent` indicator,
+    /// never a filled `selectable_label` background — which already pins
+    /// the exact accessible name and `set_selected` itself, replacing this
+    /// function's own former accesskit override.
     pub fn nav_rail(&mut self, ui: &mut Ui) {
         for (section, key) in SECTIONS {
             let label = tr(key);
-            let response =
-                ui.selectable_label(self.section == section, theme::section_label(&label));
-            ui.ctx().accesskit_node_builder(response.id, |b| {
-                b.set_label(label.clone());
-            });
+            let response = crate::widgets::controls::nav_item(ui, self.section == section, &label);
             if response.clicked() {
                 self.section = section;
             }
         }
     }
+}
+
+/// One of the three launch-gate steps the step indicator shows (020-shell-
+/// navigation-and-gates, data-model.md §1, contracts/shell-chrome.md).
+/// `position()` (1..=3) and `label_key()` are fixed, display-order data;
+/// `from_launch_step` is the only place a `LaunchStep` maps to one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateStep {
+    Welcome,
+    SignIn,
+    AudioOutputCheck,
+}
+
+/// The step indicator's fixed total (Clarification 4): never derived from
+/// tier or any other runtime condition.
+pub const GATE_STEP_TOTAL: u8 = 3;
+
+impl GateStep {
+    /// Display order (contracts/shell-chrome.md).
+    pub const ALL: [GateStep; 3] = [
+        GateStep::Welcome,
+        GateStep::SignIn,
+        GateStep::AudioOutputCheck,
+    ];
+
+    /// `1..=3`, fixed by variant — never derived from a retry counter or
+    /// sub-view (FR-003).
+    ///
+    /// ```
+    /// # use modplayer_ui::shell::GateStep;
+    /// assert_eq!(GateStep::Welcome.position(), 1);
+    /// assert_eq!(GateStep::AudioOutputCheck.position(), 3);
+    /// ```
+    pub const fn position(self) -> u8 {
+        match self {
+            GateStep::Welcome => 1,
+            GateStep::SignIn => 2,
+            GateStep::AudioOutputCheck => 3,
+        }
+    }
+
+    /// This step's Fluent label key (locales/en-US/app.ftl).
+    pub const fn label_key(self) -> &'static str {
+        match self {
+            GateStep::Welcome => "gate-step-welcome",
+            GateStep::SignIn => "gate-step-sign-in",
+            GateStep::AudioOutputCheck => "gate-step-audio-output-check",
+        }
+    }
+
+    /// The 1:1 mapping from `modplayer_account::LaunchStep` (`Main` has no
+    /// gate step, data-model.md §1).
+    ///
+    /// ```
+    /// # use modplayer_ui::shell::GateStep;
+    /// # use modplayer_account::LaunchStep;
+    /// assert_eq!(
+    ///     GateStep::from_launch_step(LaunchStep::SignIn),
+    ///     Some(GateStep::SignIn)
+    /// );
+    /// assert_eq!(GateStep::from_launch_step(LaunchStep::Main), None);
+    /// ```
+    pub const fn from_launch_step(step: LaunchStep) -> Option<GateStep> {
+        match step {
+            LaunchStep::Welcome => Some(GateStep::Welcome),
+            LaunchStep::SignIn => Some(GateStep::SignIn),
+            LaunchStep::DeviceCheck => Some(GateStep::AudioOutputCheck),
+            LaunchStep::Main => None,
+        }
+    }
+
+    /// This step's paint state relative to `current` (research.md R2):
+    /// purely a position comparison, so a retry/sub-view — which never
+    /// changes `current` — never changes any item's state either.
+    ///
+    /// ```
+    /// # use modplayer_ui::shell::{GateStep, StepState};
+    /// assert_eq!(GateStep::Welcome.state_relative_to(GateStep::SignIn), StepState::Complete);
+    /// assert_eq!(GateStep::SignIn.state_relative_to(GateStep::SignIn), StepState::Current);
+    /// assert_eq!(GateStep::AudioOutputCheck.state_relative_to(GateStep::SignIn), StepState::Upcoming);
+    /// ```
+    pub fn state_relative_to(self, current: GateStep) -> StepState {
+        match self.position().cmp(&current.position()) {
+            std::cmp::Ordering::Less => StepState::Complete,
+            std::cmp::Ordering::Equal => StepState::Current,
+            std::cmp::Ordering::Greater => StepState::Upcoming,
+        }
+    }
+}
+
+/// A gate step's paint state relative to the current step (research.md R2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepState {
+    Complete,
+    Current,
+    Upcoming,
+}
+
+/// The per-frame shell decision (020-shell-navigation-and-gates, data-
+/// model.md §2, contracts/shell-chrome.md): whether the nav rail exists
+/// this frame, and which gate step (if any) is current. Computed once per
+/// frame by [`Chrome::for_frame`] and never stored — a stored flag could go
+/// stale the frame a sign-out or a Settings-triggered Device Check preview
+/// starts (Clarification 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Chrome {
+    pub rail: bool,
+    pub gate: Option<GateStep>,
+}
+
+impl Chrome {
+    /// research.md R1's table, exhaustively: a gate step (`Welcome`/
+    /// `SignIn`/`DeviceCheck`) always hides the rail; `Main` shows it unless
+    /// `device_check_open` (the Settings "Test output device" preview,
+    /// FR-001a) hides it too. `rail ⇒ gate.is_none()` by construction.
+    ///
+    /// ```
+    /// # use modplayer_ui::shell::{Chrome, GateStep};
+    /// # use modplayer_account::LaunchStep;
+    /// let gate = Chrome::for_frame(LaunchStep::SignIn, false);
+    /// assert_eq!(gate, Chrome { rail: false, gate: Some(GateStep::SignIn) });
+    ///
+    /// let main = Chrome::for_frame(LaunchStep::Main, false);
+    /// assert_eq!(main, Chrome { rail: true, gate: None });
+    ///
+    /// let preview = Chrome::for_frame(LaunchStep::Main, true);
+    /// assert_eq!(preview, Chrome { rail: false, gate: None });
+    /// ```
+    pub const fn for_frame(step: LaunchStep, device_check_open: bool) -> Chrome {
+        match GateStep::from_launch_step(step) {
+            Some(gate) => Chrome {
+                rail: false,
+                gate: Some(gate),
+            },
+            None => Chrome {
+                rail: !device_check_open,
+                gate: None,
+            },
+        }
+    }
+
+    /// Whether `actions::dispatch` may run this frame (FR-001b): identical
+    /// to `rail`, named separately so the dispatcher gate and the rail's
+    /// own visibility can never drift from each other by construction.
+    pub const fn navigation_enabled(self) -> bool {
+        self.rail
+    }
+}
+
+/// Draw this frame's chrome (contracts/shell-chrome.md, normative frame
+/// order): the top step indicator iff `chrome.gate.is_some()`, the left nav
+/// rail iff `chrome.rail`. Neither `Panel` is added at all when its
+/// condition is false, so egui never reserves its space (FR-004) and the
+/// central content spans the full window.
+pub fn show_chrome(ui: &mut Ui, chrome: Chrome, shell: &mut Shell) {
+    if let Some(gate) = chrome.gate {
+        Panel::top(Id::new("gate-step-indicator")).show(ui, |ui| {
+            show_step_indicator(ui, gate);
+        });
+    }
+    if chrome.rail {
+        Panel::left(Id::new("shell-nav-rail")).show(ui, |ui| {
+            shell.nav_rail(ui);
+        });
+    }
+}
+
+/// The step indicator's content (research.md R2): each of the three items
+/// painted Complete/Current/Upcoming (tokens only, no literal — contract
+/// C10), joined by divider-coloured connectors, plus one non-interactive
+/// `ProgressIndicator` AccessKit node for the whole row (contract C4). The
+/// three item labels are plain, non-focusable `Label`s, so Tab order into
+/// the gate content underneath is unchanged.
+fn show_step_indicator(ui: &mut Ui, current: GateStep) {
+    let roles = theme::roles(ui.visuals());
+    let n = current.position();
+    let progress_label = tr_args(
+        "gate-step-progress",
+        &[
+            ("current", n.to_string()),
+            ("total", GATE_STEP_TOTAL.to_string()),
+            ("label", tr(current.label_key())),
+        ],
+    );
+
+    let dot = theme::space::SM;
+    let row = ui.horizontal(|ui| {
+        for (i, step) in GateStep::ALL.into_iter().enumerate() {
+            if i > 0 {
+                let (rect, _) = ui.allocate_exact_size(vec2(theme::space::LG, dot), Sense::hover());
+                ui.painter().hline(
+                    rect.x_range(),
+                    rect.center().y,
+                    Stroke::new(
+                        controls::DEFAULT_OUTLINE_WIDTH,
+                        theme::tokens::divider_color_for(roles),
+                    ),
+                );
+            }
+            let state = step.state_relative_to(current);
+            let (rect, _) = ui.allocate_exact_size(vec2(dot, dot), Sense::hover());
+            match state {
+                StepState::Complete => {
+                    ui.painter()
+                        .circle_filled(rect.center(), dot / 2.0, roles.accent);
+                }
+                StepState::Current => {
+                    ui.painter().circle_stroke(
+                        rect.center(),
+                        dot / 2.0,
+                        controls::focus_ring(roles),
+                    );
+                }
+                StepState::Upcoming => {
+                    ui.painter().circle_stroke(
+                        rect.center(),
+                        dot / 2.0,
+                        Stroke::new(
+                            controls::DEFAULT_OUTLINE_WIDTH,
+                            theme::tokens::divider_color_for(roles),
+                        ),
+                    );
+                }
+            }
+            let text_color = if matches!(state, StepState::Current) {
+                roles.text_primary
+            } else {
+                roles.text_secondary
+            };
+            ui.label(egui::RichText::new(tr(step.label_key())).color(text_color));
+        }
+    });
+
+    // One non-interactive AccessKit node for the whole indicator (contract
+    // C4): built directly, not via `Response::widget_info`, so no
+    // `Action::Focus`/`Action::Click` is ever added — the indicator
+    // contributes no focusable node.
+    ui.ctx().accesskit_node_builder(row.response.id, |b| {
+        b.set_role(egui::accesskit::Role::ProgressIndicator);
+        b.set_label(progress_label);
+        b.set_numeric_value(f64::from(n));
+        b.set_max_numeric_value(f64::from(GATE_STEP_TOTAL));
+    });
 }
 
 #[cfg(test)]
@@ -136,6 +384,97 @@ mod tests {
     #[test]
     fn default_section_is_library() {
         assert_eq!(Shell::default().section, Section::Library);
+    }
+
+    // -- T002 (US1, contract C1): GateStep/StepState/Chrome::for_frame ----
+
+    #[test]
+    fn gate_step_position_and_label_key() {
+        assert_eq!(GateStep::Welcome.position(), 1);
+        assert_eq!(GateStep::SignIn.position(), 2);
+        assert_eq!(GateStep::AudioOutputCheck.position(), 3);
+        assert_eq!(GateStep::Welcome.label_key(), "gate-step-welcome");
+        assert_eq!(GateStep::SignIn.label_key(), "gate-step-sign-in");
+        assert_eq!(
+            GateStep::AudioOutputCheck.label_key(),
+            "gate-step-audio-output-check"
+        );
+        assert_eq!(GateStep::ALL.len(), 3);
+        assert_eq!(GATE_STEP_TOTAL, 3);
+    }
+
+    #[test]
+    fn gate_step_from_launch_step_is_one_to_one() {
+        assert_eq!(
+            GateStep::from_launch_step(LaunchStep::Welcome),
+            Some(GateStep::Welcome)
+        );
+        assert_eq!(
+            GateStep::from_launch_step(LaunchStep::SignIn),
+            Some(GateStep::SignIn)
+        );
+        assert_eq!(
+            GateStep::from_launch_step(LaunchStep::DeviceCheck),
+            Some(GateStep::AudioOutputCheck)
+        );
+        assert_eq!(GateStep::from_launch_step(LaunchStep::Main), None);
+    }
+
+    #[test]
+    fn state_relative_to_is_a_pure_position_comparison() {
+        for current in GateStep::ALL {
+            for step in GateStep::ALL {
+                let expected = match step.position().cmp(&current.position()) {
+                    std::cmp::Ordering::Less => StepState::Complete,
+                    std::cmp::Ordering::Equal => StepState::Current,
+                    std::cmp::Ordering::Greater => StepState::Upcoming,
+                };
+                assert_eq!(step.state_relative_to(current), expected);
+            }
+        }
+    }
+
+    /// Contract C1: `Chrome::for_frame` matches research.md R1's table for
+    /// all 4 `LaunchStep` values × 2 `device_check_open` values,
+    /// exhaustively; `rail ⇒ gate.is_none()` holds for every case too.
+    #[test]
+    fn chrome_for_frame_matches_the_table_exhaustively() {
+        let cases = [
+            (LaunchStep::Welcome, false, false, Some(GateStep::Welcome)),
+            (LaunchStep::Welcome, true, false, Some(GateStep::Welcome)),
+            (LaunchStep::SignIn, false, false, Some(GateStep::SignIn)),
+            (LaunchStep::SignIn, true, false, Some(GateStep::SignIn)),
+            (
+                LaunchStep::DeviceCheck,
+                false,
+                false,
+                Some(GateStep::AudioOutputCheck),
+            ),
+            (
+                LaunchStep::DeviceCheck,
+                true,
+                false,
+                Some(GateStep::AudioOutputCheck),
+            ),
+            (LaunchStep::Main, true, false, None),
+            (LaunchStep::Main, false, true, None),
+        ];
+        for (step, device_check_open, expected_rail, expected_gate) in cases {
+            let chrome = Chrome::for_frame(step, device_check_open);
+            assert_eq!(
+                chrome.rail, expected_rail,
+                "step={step:?} device_check_open={device_check_open}"
+            );
+            assert_eq!(
+                chrome.gate, expected_gate,
+                "step={step:?} device_check_open={device_check_open}"
+            );
+            assert_eq!(chrome.navigation_enabled(), chrome.rail);
+            assert!(
+                !chrome.rail || chrome.gate.is_none(),
+                "rail must imply no gate: {chrome:?}"
+            );
+        }
     }
 
     /// Every shell/nav/notification widget exposes an explicit accessible

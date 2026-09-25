@@ -66,6 +66,15 @@ const SHELL_AND_NOTIFICATION_KEYS: &[&str] = &[
 /// with `$count` and a Fluent plural selector (`[one]`/`*[other]`).
 const NOTIFICATION_STACK_COUNT_ARG_KEYS: &[&str] = &["notification-more"];
 
+/// 020-shell-navigation-and-gates (US1, contracts/fluent-strings.md F1):
+/// the launch gate step indicator's three step labels — resolved via plain
+/// `tr`.
+const GATE_STEP_KEYS: &[&str] = &[
+    "gate-step-welcome",
+    "gate-step-sign-in",
+    "gate-step-audio-output-check",
+];
+
 /// Now Playing status-line / stream-notification / transfer-banner /
 /// queue keys with no Fluent placeholder (003-streaming-playback-and-queue,
 /// T058/T064/T069/T071/T079/T080/T090; contracts/ui-surface.md §1/§2/§5) —
@@ -537,6 +546,10 @@ const SETTINGS_SCREEN_KEYS: &[&str] = &[
     // Search box and placeholder-category content.
     "settings-search",
     "placeholder-settings-category",
+    // 020-shell-navigation-and-gates (US2, contracts/settings-category-
+    // row.md R7): the category row's "More" overflow control.
+    "settings-more",
+    "settings-more-a11y",
     // Audio category.
     "setting-output-device",
     "setting-output-device-desc",
@@ -728,6 +741,39 @@ const SCAFFOLD_KEYS_MUST_BE_GONE: &[&str] = &[
     "play-from-account-empty",
     "play-from-account-failed",
 ];
+
+/// T007 (US1, contract F1): the 4 new launch-gate step-indicator keys
+/// resolve — the three step labels via plain `tr`, and
+/// `gate-step-progress` via `tr_args`, rendering "Step 2 of 3: Sign in"
+/// for `(2, 3, tr("gate-step-sign-in"))`. Checked with `contains` rather
+/// than an exact match: Fluent wraps each interpolated segment in
+/// bidi-isolate marks (accessibility.rs's own convention for the same
+/// reason), so the raw ASCII sentence is never the literal resolved
+/// string.
+#[test]
+fn gate_step_keys_resolve() {
+    for key in GATE_STEP_KEYS {
+        let resolved = tr(key);
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/app.ftl (tr() fell back to the raw key)"
+        );
+    }
+
+    let rendered = tr_args(
+        "gate-step-progress",
+        &[
+            ("current", "2".to_string()),
+            ("total", "3".to_string()),
+            ("label", tr("gate-step-sign-in")),
+        ],
+    );
+    assert!(rendered.contains("Step"));
+    assert!(rendered.contains('2'));
+    assert!(rendered.contains('3'));
+    assert!(rendered.contains("Sign in"));
+    assert_ne!(rendered, "gate-step-progress");
+}
 
 #[test]
 fn every_shell_nav_and_notification_key_resolves() {

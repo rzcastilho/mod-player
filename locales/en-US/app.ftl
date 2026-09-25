@@ -62,3 +62,10 @@ getting-started-section-loop = Section Loop — drop A and B around a passage an
 getting-started-key-tempo = Key & Tempo — transpose a song or slow it down without changing the rest. Shortcuts: + / - tempo step; key controls in the panel.
 getting-started-tutorial = Open plugin tutorial
 getting-started-dismiss = Dismiss
+
+## 020-shell-navigation-and-gates: launch gate step indicator
+gate-step-welcome = Welcome
+gate-step-sign-in = Sign in
+gate-step-audio-output-check = Audio output check
+# $current, $total: integers; $label: one of the three step labels above
+gate-step-progress = Step { $current } of { $total }: { $label }

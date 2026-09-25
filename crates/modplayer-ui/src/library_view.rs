@@ -26,14 +26,19 @@ use modplayer_core::{PlaybackController, Severity, TrackListState, tr};
 use crate::artwork::ArtworkCache;
 use crate::rows::{
     ActingListOutcome, RowAction, RowEntity, RowEvent, RowSelection, TrackListLookup, acting_list,
-    entity_key, list_row, virtualized_list,
+    entity_key, list_row, virtualized_list_in,
 };
+use crate::section_memory::{LibraryViewKey, SectionMemory, ViewKey};
 use crate::theme;
 use crate::widgets::controls::tab as tab_widget;
 use crate::widgets::skeleton::{ROW_HEIGHT, WIDE_ROW_HEIGHT, skeleton_row};
 
 /// The five fixed-order tabs (contracts/ui-surface.md §3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// `Hash` (020-shell-navigation-and-gates, data-model.md §4): a `LibraryTab`
+/// is half of `section_memory::LibraryViewKey`'s `Tab` variant, the key type
+/// of `SectionMemory`'s offset map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum LibraryTab {
     #[default]
     SavedTracks,
@@ -69,6 +74,20 @@ impl LibraryTab {
             LibraryTab::FollowedArtists => "library-empty-artists",
             LibraryTab::Playlists => "library-empty-playlists",
             LibraryTab::RecentlyPlayed => "library-empty-recent",
+        }
+    }
+
+    /// This tab's own `RowSelection`/virtualized-list id salt (020-shell-
+    /// navigation-and-gates: lets `draw_virtualized_tracks` derive it from
+    /// `tab` instead of taking it as a separate parameter, keeping that
+    /// function within Constitution VII's 7-argument clippy gate).
+    fn id_salt(self) -> &'static str {
+        match self {
+            LibraryTab::SavedTracks => "library-saved-tracks",
+            LibraryTab::SavedAlbums => "library-saved-albums",
+            LibraryTab::FollowedArtists => "library-followed-artists",
+            LibraryTab::Playlists => "library-playlists",
+            LibraryTab::RecentlyPlayed => "library-recently-played",
         }
     }
 }
@@ -109,12 +128,15 @@ pub enum LibraryOutcome {
 }
 
 /// Draw the Library view: the tab row, then the active tab's state
-/// (loading/first-sync-failed/empty/refreshing/content).
+/// (loading/first-sync-failed/empty/refreshing/content). `memory` retains
+/// the active tab's own scroll offset across section round trips
+/// (020-shell-navigation-and-gates, US3, contracts/section-memory.md).
 pub fn show<B: OutputBackend, H: SourceHost>(
     ui: &mut Ui,
     controller: &mut PlaybackController<B, H>,
     artwork: &mut ArtworkCache,
     state: &mut LibraryViewState,
+    memory: &mut SectionMemory,
 ) -> LibraryOutcome {
     let status = controller.library_status();
 
@@ -199,18 +221,35 @@ pub fn show<B: OutputBackend, H: SourceHost>(
 
     let mut action: Option<(RowEntity, RowAction)> = None;
     let outcome = match state.tab {
-        LibraryTab::SavedTracks => show_saved_tracks(ui, controller, artwork, &mut state.selection),
-        LibraryTab::SavedAlbums => {
-            show_saved_albums(ui, controller, artwork, &mut action, &mut state.selection)
+        LibraryTab::SavedTracks => {
+            show_saved_tracks(ui, controller, artwork, &mut state.selection, memory)
         }
-        LibraryTab::FollowedArtists => {
-            show_followed_artists(ui, controller, artwork, &mut action, &mut state.selection)
-        }
-        LibraryTab::Playlists => {
-            show_playlists(ui, controller, artwork, &mut action, &mut state.selection)
-        }
+        LibraryTab::SavedAlbums => show_saved_albums(
+            ui,
+            controller,
+            artwork,
+            &mut action,
+            &mut state.selection,
+            memory,
+        ),
+        LibraryTab::FollowedArtists => show_followed_artists(
+            ui,
+            controller,
+            artwork,
+            &mut action,
+            &mut state.selection,
+            memory,
+        ),
+        LibraryTab::Playlists => show_playlists(
+            ui,
+            controller,
+            artwork,
+            &mut action,
+            &mut state.selection,
+            memory,
+        ),
         LibraryTab::RecentlyPlayed => {
-            show_recently_played(ui, controller, artwork, &mut state.selection)
+            show_recently_played(ui, controller, artwork, &mut state.selection, memory)
         }
     };
     if let Some((entity, action)) = action
@@ -261,6 +300,7 @@ fn show_saved_tracks<B: OutputBackend, H: SourceHost>(
     controller: &mut PlaybackController<B, H>,
     artwork: &mut ArtworkCache,
     selection: &mut RowSelection,
+    memory: &mut SectionMemory,
 ) -> LibraryOutcome {
     let ids: Vec<TrackId> = controller
         .library()
@@ -281,9 +321,10 @@ fn show_saved_tracks<B: OutputBackend, H: SourceHost>(
         ui,
         controller,
         artwork,
-        "library-saved-tracks",
         &ids,
         selection,
+        memory,
+        LibraryTab::SavedTracks,
     );
     LibraryOutcome::None
 }
@@ -293,6 +334,7 @@ fn show_recently_played<B: OutputBackend, H: SourceHost>(
     controller: &mut PlaybackController<B, H>,
     artwork: &mut ArtworkCache,
     selection: &mut RowSelection,
+    memory: &mut SectionMemory,
 ) -> LibraryOutcome {
     let tracks = controller.recently_played();
     if tracks.is_empty() {
@@ -302,25 +344,24 @@ fn show_recently_played<B: OutputBackend, H: SourceHost>(
         tracks.get(i).map(|t| t.id.as_str().to_string())
     });
     let mut pending: Option<(RowEntity, RowAction)> = None;
-    virtualized_list(
-        ui,
-        "library-recently-played",
-        ROW_HEIGHT,
-        tracks.len(),
-        None,
-        |ui, i| {
-            let entity = RowEntity::Track(tracks[i].clone());
-            let key = entity_key(&entity);
-            let is_selected = selection.is_selected("library-recently-played", key, i);
-            match list_row(ui, artwork, &entity, is_selected) {
-                Some(RowEvent::Action(action)) => pending = Some((entity, action)),
-                Some(RowEvent::Select) => {
-                    selection.select("library-recently-played", key, i);
-                }
-                Some(RowEvent::Open) | None => {}
+    let key = ViewKey::Library(LibraryViewKey::Tab(LibraryTab::RecentlyPlayed));
+    // Library lists keep their existing `[false, true]` auto-shrink
+    // (contracts/section-memory.md "Attachment points"; `memory.
+    // scroll_area`'s own default is `[false, false]`).
+    let scroll = memory.scroll_area(&key).auto_shrink([false, true]);
+    let (_, offset) = virtualized_list_in(ui, scroll, ROW_HEIGHT, tracks.len(), |ui, i| {
+        let entity = RowEntity::Track(tracks[i].clone());
+        let row_key = entity_key(&entity);
+        let is_selected = selection.is_selected("library-recently-played", row_key, i);
+        match list_row(ui, artwork, &entity, is_selected) {
+            Some(RowEvent::Action(action)) => pending = Some((entity, action)),
+            Some(RowEvent::Select) => {
+                selection.select("library-recently-played", row_key, i);
             }
-        },
-    );
+            Some(RowEvent::Open) | None => {}
+        }
+    });
+    memory.record(key, offset);
     if let Some((entity, action)) = pending {
         apply_row_action(controller, &entity, &tracks, action);
     }
@@ -338,22 +379,26 @@ fn draw_virtualized_tracks<B: OutputBackend, H: SourceHost>(
     ui: &mut Ui,
     controller: &mut PlaybackController<B, H>,
     artwork: &mut ArtworkCache,
-    id_salt: &str,
     ids: &[TrackId],
     selection: &mut RowSelection,
+    memory: &mut SectionMemory,
+    tab: LibraryTab,
 ) {
+    let id_salt = tab.id_salt();
     let mut visible_missing = Vec::new();
     let mut pending: Option<(RowEntity, RowAction)> = None;
-    virtualized_list(ui, id_salt, ROW_HEIGHT, ids.len(), None, |ui, i| {
+    let key = ViewKey::Library(LibraryViewKey::Tab(tab));
+    let scroll = memory.scroll_area(&key).auto_shrink([false, true]);
+    let (_, offset) = virtualized_list_in(ui, scroll, ROW_HEIGHT, ids.len(), |ui, i| {
         let id = &ids[i];
         match controller.library().track(id) {
             Some(track) => {
                 let entity = RowEntity::Track(track.clone());
-                let key = entity_key(&entity);
-                let is_selected = selection.is_selected(id_salt, key, i);
+                let row_key = entity_key(&entity);
+                let is_selected = selection.is_selected(id_salt, row_key, i);
                 match list_row(ui, artwork, &entity, is_selected) {
                     Some(RowEvent::Action(action)) => pending = Some((entity, action)),
-                    Some(RowEvent::Select) => selection.select(id_salt, key, i),
+                    Some(RowEvent::Select) => selection.select(id_salt, row_key, i),
                     Some(RowEvent::Open) | None => {}
                 }
             }
@@ -363,6 +408,7 @@ fn draw_virtualized_tracks<B: OutputBackend, H: SourceHost>(
             }
         }
     });
+    memory.record(key, offset);
     controller.library_hydrate_visible(&visible_missing);
     if let Some((entity, action)) = pending {
         let (loaded, _missing) = resolve_tracks(controller, ids);
@@ -376,6 +422,7 @@ fn show_saved_albums<B: OutputBackend, H: SourceHost>(
     artwork: &mut ArtworkCache,
     action: &mut Option<(RowEntity, RowAction)>,
     selection: &mut RowSelection,
+    memory: &mut SectionMemory,
 ) -> LibraryOutcome {
     let ids: Vec<AlbumId> = controller
         .library()
@@ -395,32 +442,28 @@ fn show_saved_albums<B: OutputBackend, H: SourceHost>(
     // already in the background sweep from `merge_page` and resolves on
     // its own.
     let mut open_id: Option<AlbumId> = None;
-    virtualized_list(
-        ui,
-        "library-saved-albums",
-        WIDE_ROW_HEIGHT,
-        ids.len(),
-        None,
-        |ui, i| {
-            let id = &ids[i];
-            match controller.library().album(id).cloned() {
-                Some(album) => {
-                    let entity = RowEntity::Album(album);
-                    let key = entity_key(&entity);
-                    let is_selected = selection.is_selected("library-saved-albums", key, i);
-                    match list_row(ui, artwork, &entity, is_selected) {
-                        Some(RowEvent::Open) => open_id = Some(id.clone()),
-                        Some(RowEvent::Action(a)) => *action = Some((entity, a)),
-                        Some(RowEvent::Select) => {
-                            selection.select("library-saved-albums", key, i);
-                        }
-                        None => {}
+    let key = ViewKey::Library(LibraryViewKey::Tab(LibraryTab::SavedAlbums));
+    let scroll = memory.scroll_area(&key).auto_shrink([false, true]);
+    let (_, offset) = virtualized_list_in(ui, scroll, WIDE_ROW_HEIGHT, ids.len(), |ui, i| {
+        let id = &ids[i];
+        match controller.library().album(id).cloned() {
+            Some(album) => {
+                let entity = RowEntity::Album(album);
+                let row_key = entity_key(&entity);
+                let is_selected = selection.is_selected("library-saved-albums", row_key, i);
+                match list_row(ui, artwork, &entity, is_selected) {
+                    Some(RowEvent::Open) => open_id = Some(id.clone()),
+                    Some(RowEvent::Action(a)) => *action = Some((entity, a)),
+                    Some(RowEvent::Select) => {
+                        selection.select("library-saved-albums", row_key, i);
                     }
+                    None => {}
                 }
-                None => skeleton_row(ui, WIDE_ROW_HEIGHT),
             }
-        },
-    );
+            None => skeleton_row(ui, WIDE_ROW_HEIGHT),
+        }
+    });
+    memory.record(key, offset);
     match open_id {
         Some(id) => LibraryOutcome::OpenAlbum(id),
         None => LibraryOutcome::None,
@@ -433,6 +476,7 @@ fn show_followed_artists<B: OutputBackend, H: SourceHost>(
     artwork: &mut ArtworkCache,
     action: &mut Option<(RowEntity, RowAction)>,
     selection: &mut RowSelection,
+    memory: &mut SectionMemory,
 ) -> LibraryOutcome {
     let ids: Vec<ArtistId> = controller.library().followed_artists().to_vec();
     if ids.is_empty() {
@@ -442,32 +486,28 @@ fn show_followed_artists<B: OutputBackend, H: SourceHost>(
         ids.get(i).map(|id| id.as_str().to_string())
     });
     let mut open_id: Option<ArtistId> = None;
-    virtualized_list(
-        ui,
-        "library-followed-artists",
-        WIDE_ROW_HEIGHT,
-        ids.len(),
-        None,
-        |ui, i| {
-            let id = &ids[i];
-            match controller.library().artist(id).cloned() {
-                Some(artist) => {
-                    let entity = RowEntity::Artist(artist);
-                    let key = entity_key(&entity);
-                    let is_selected = selection.is_selected("library-followed-artists", key, i);
-                    match list_row(ui, artwork, &entity, is_selected) {
-                        Some(RowEvent::Open) => open_id = Some(id.clone()),
-                        Some(RowEvent::Action(a)) => *action = Some((entity, a)),
-                        Some(RowEvent::Select) => {
-                            selection.select("library-followed-artists", key, i);
-                        }
-                        None => {}
+    let key = ViewKey::Library(LibraryViewKey::Tab(LibraryTab::FollowedArtists));
+    let scroll = memory.scroll_area(&key).auto_shrink([false, true]);
+    let (_, offset) = virtualized_list_in(ui, scroll, WIDE_ROW_HEIGHT, ids.len(), |ui, i| {
+        let id = &ids[i];
+        match controller.library().artist(id).cloned() {
+            Some(artist) => {
+                let entity = RowEntity::Artist(artist);
+                let row_key = entity_key(&entity);
+                let is_selected = selection.is_selected("library-followed-artists", row_key, i);
+                match list_row(ui, artwork, &entity, is_selected) {
+                    Some(RowEvent::Open) => open_id = Some(id.clone()),
+                    Some(RowEvent::Action(a)) => *action = Some((entity, a)),
+                    Some(RowEvent::Select) => {
+                        selection.select("library-followed-artists", row_key, i);
                     }
+                    None => {}
                 }
-                None => skeleton_row(ui, WIDE_ROW_HEIGHT),
             }
-        },
-    );
+            None => skeleton_row(ui, WIDE_ROW_HEIGHT),
+        }
+    });
+    memory.record(key, offset);
     match open_id {
         Some(id) => LibraryOutcome::OpenArtist(id),
         None => LibraryOutcome::None,
@@ -480,6 +520,7 @@ fn show_playlists<B: OutputBackend, H: SourceHost>(
     artwork: &mut ArtworkCache,
     action: &mut Option<(RowEntity, RowAction)>,
     selection: &mut RowSelection,
+    memory: &mut SectionMemory,
 ) -> LibraryOutcome {
     let ids: Vec<PlaylistId> = controller.library().playlists().to_vec();
     if ids.is_empty() {
@@ -501,31 +542,27 @@ fn show_playlists<B: OutputBackend, H: SourceHost>(
         ids.get(i).map(|id| id.as_str().to_string())
     });
     let mut open_id: Option<PlaylistId> = None;
-    virtualized_list(
-        ui,
-        "library-playlists",
-        WIDE_ROW_HEIGHT,
-        ids.len(),
-        None,
-        |ui, i| {
-            let id = &ids[i];
-            // A `Playlists` page is always fully resolved on merge
-            // (contracts/catalog-source.md §3) — no skeleton branch needed
-            // here.
-            let Some(playlist) = controller.library().playlist_ref(id).cloned() else {
-                return;
-            };
-            let entity = RowEntity::Playlist(playlist);
-            let key = entity_key(&entity);
-            let is_selected = selection.is_selected("library-playlists", key, i);
-            match list_row(ui, artwork, &entity, is_selected) {
-                Some(RowEvent::Open) => open_id = Some(id.clone()),
-                Some(RowEvent::Action(a)) => *action = Some((entity, a)),
-                Some(RowEvent::Select) => selection.select("library-playlists", key, i),
-                None => {}
-            }
-        },
-    );
+    let key = ViewKey::Library(LibraryViewKey::Tab(LibraryTab::Playlists));
+    let scroll = memory.scroll_area(&key).auto_shrink([false, true]);
+    let (_, offset) = virtualized_list_in(ui, scroll, WIDE_ROW_HEIGHT, ids.len(), |ui, i| {
+        let id = &ids[i];
+        // A `Playlists` page is always fully resolved on merge
+        // (contracts/catalog-source.md §3) — no skeleton branch needed
+        // here.
+        let Some(playlist) = controller.library().playlist_ref(id).cloned() else {
+            return;
+        };
+        let entity = RowEntity::Playlist(playlist);
+        let row_key = entity_key(&entity);
+        let is_selected = selection.is_selected("library-playlists", row_key, i);
+        match list_row(ui, artwork, &entity, is_selected) {
+            Some(RowEvent::Open) => open_id = Some(id.clone()),
+            Some(RowEvent::Action(a)) => *action = Some((entity, a)),
+            Some(RowEvent::Select) => selection.select("library-playlists", row_key, i),
+            None => {}
+        }
+    });
+    memory.record(key, offset);
     match open_id {
         Some(id) => LibraryOutcome::OpenPlaylist(id),
         None => LibraryOutcome::None,

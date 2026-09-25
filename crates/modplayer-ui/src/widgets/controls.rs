@@ -8,8 +8,8 @@
 
 use egui::accesskit::{Role, Toggled};
 use egui::{
-    Button, Color32, Context, Frame, Id, Label, LayerId, Order, Response, RichText, Sense,
-    StrokeKind, TextWrapMode, Ui, WidgetInfo, WidgetType, pos2,
+    Button, Color32, Context, FontSelection, Frame, Id, Label, LayerId, Order, Response, RichText,
+    Sense, StrokeKind, TextWrapMode, Ui, WidgetInfo, WidgetText, WidgetType, pos2,
 };
 
 use crate::theme::{controls, tokens};
@@ -217,6 +217,75 @@ pub fn tab(ui: &mut Ui, selected: bool, label: &str) -> Response {
         } else {
             Toggled::False
         });
+    });
+
+    response
+}
+
+// ---------------------------------------------------------------------
+// `nav_item` (020-shell-navigation-and-gates, US3, data-model.md §3,
+// contracts/shell-chrome.md C5-C8, research R3)
+// ---------------------------------------------------------------------
+
+/// The nav rail's own host widget (FR-005, FR-006): a plain, full-rail-
+/// width clickable label, painted and interacted entirely by hand (the
+/// same style as [`switch`]) so its click/hover rect always spans the
+/// rail's full width regardless of the label's own text width — never a
+/// filled `selectable_label` background (research R3, which 016 already
+/// settled for tabs: "a stroke, never a filled accent background").
+/// `selected` paints one [`controls::nav_indicator`] stroke as a leading-
+/// edge vertical bar spanning the item's full height, in place of any
+/// fill, and colours the label `roles.text_primary` (`roles.text_secondary`
+/// unselected); the existing hover fill (015-control-variants) only shows
+/// while unselected and hovered, since a selected item already carries its
+/// own indicator. `Role::Button` (it activates navigation — research R3
+/// rejects `Role::Tab`, which would change what 007/014's existing rail
+/// a11y expectations describe), `set_selected(selected)`, and the
+/// accessible name pinned to the exact, un-uppercased `label` — folding
+/// `Shell::nav_rail`'s own pre-existing accesskit override (014 FR-019)
+/// into the host widget itself.
+pub fn nav_item(ui: &mut Ui, selected: bool, label: &str) -> Response {
+    let roles = tokens::roles(ui.visuals());
+    let text_color = if selected {
+        roles.text_primary
+    } else {
+        roles.text_secondary
+    };
+
+    let width = ui.available_width();
+    let padding = ui.spacing().button_padding;
+    let galley = WidgetText::from(tokens::section_label(label).color(text_color)).into_galley(
+        ui,
+        Some(TextWrapMode::Extend),
+        (width - 2.0 * padding.x).max(0.0),
+        FontSelection::Default,
+    );
+    let height = (galley.size().y + 2.0 * padding.y).max(ui.spacing().interact_size.y);
+
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), Sense::click());
+
+    if ui.is_rect_visible(rect) {
+        if !selected && response.hovered() {
+            ui.painter()
+                .rect_filled(rect, 0.0, controls::hover_fill(roles));
+        }
+        let text_pos = pos2(
+            rect.left() + padding.x,
+            rect.center().y - galley.size().y / 2.0,
+        );
+        ui.painter().galley(text_pos, galley, text_color);
+        if selected {
+            ui.painter().line_segment(
+                [rect.left_top(), rect.left_bottom()],
+                controls::nav_indicator(roles),
+            );
+        }
+    }
+
+    ui.ctx().accesskit_node_builder(response.id, |b| {
+        b.set_role(Role::Button);
+        b.set_label(label.to_string());
+        b.set_selected(selected);
     });
 
     response
@@ -525,5 +594,76 @@ mod tests {
             Some("queue"),
             "the accessible name must be the exact, un-uppercased header string"
         );
+    }
+
+    // -------------------------------------------------------------
+    // T038 (020-shell-navigation-and-gates, contracts/shell-chrome.md
+    // C6/C8): `nav_item`
+    // -------------------------------------------------------------
+
+    /// C6: a selected item paints one leading-edge indicator line and no
+    /// hover fill; an unselected, hovered item paints the hover fill and no
+    /// indicator line.
+    #[test]
+    fn nav_item_paints_indicator_only_when_selected_no_fill_when_selected() {
+        let ctx = Context::default();
+        crate::theme::apply_tokens(&ctx);
+        ctx.set_theme(egui::ThemePreference::from(egui::Theme::Light));
+        let roles = tokens::LIGHT;
+
+        let mut rect = egui::Rect::NOTHING;
+        let output = ctx.run_ui(RawInput::default(), |ui| {
+            rect = nav_item(ui, true, "Library").rect;
+        });
+        let indicator = controls::nav_indicator(&roles);
+        let has_indicator_line = output.shapes.iter().any(|clipped| {
+            matches!(&clipped.shape, egui::Shape::LineSegment { stroke, .. } if stroke.color == indicator.color)
+        });
+        let has_fill = output.shapes.iter().any(|clipped| {
+            matches!(&clipped.shape, egui::Shape::Rect(r) if r.rect == rect && r.fill != Color32::TRANSPARENT)
+        });
+        output.drop_without_applying_deltas();
+        assert!(
+            has_indicator_line,
+            "selected nav_item must paint the indicator line"
+        );
+        assert!(!has_fill, "selected nav_item must paint no filled rect");
+    }
+
+    /// C8: the selected item's AccessKit node reports `is_selected() ==
+    /// Some(true)`, the label stays the exact, un-uppercased string passed
+    /// in, and every item is `Role::Button`.
+    #[test]
+    fn nav_item_accesskit_reports_selected_state_and_exact_label() {
+        let ctx = Context::default();
+        crate::theme::apply_tokens(&ctx);
+        ctx.enable_accesskit();
+
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
+            nav_item(ui, true, "Library");
+            nav_item(ui, false, "Search");
+        });
+        let update = output
+            .platform_output
+            .accesskit_update
+            .take()
+            .unwrap_or_else(|| unreachable!("accesskit_update should be populated once enabled"));
+        output.drop_without_applying_deltas();
+
+        let selected = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.label() == Some("Library"))
+            .unwrap_or_else(|| panic!("expected a node labelled Library"));
+        assert_eq!(selected.1.role(), Role::Button);
+        assert_eq!(selected.1.is_selected(), Some(true));
+
+        let unselected = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.label() == Some("Search"))
+            .unwrap_or_else(|| panic!("expected a node labelled Search"));
+        assert_eq!(unselected.1.role(), Role::Button);
+        assert_eq!(unselected.1.is_selected(), Some(false));
     }
 }
