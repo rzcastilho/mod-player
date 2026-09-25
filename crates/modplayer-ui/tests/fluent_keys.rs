@@ -28,6 +28,18 @@ const SHELL_AND_NOTIFICATION_KEYS: &[&str] = &[
     "severity-info",
     "notification-dismiss",
     "notification-action-sign-in",
+    // 019-notification-presentation (US2, contract fluent-strings.md): the
+    // collapsed stack's overflow control, once expanded.
+    "notification-show-fewer",
+    // 019-notification-presentation (US4, contract fluent-strings.md): the
+    // per-card truncation toggle, the Details toggle, and the two generic
+    // device phrases resolved at raise time.
+    "notification-show-more",
+    "notification-show-less",
+    "notification-details",
+    "notification-hide-details",
+    "notification-device-unknown",
+    "notification-device-fallback-default",
     // 002-first-launch-and-sign-in launch-gate placeholders (Phase 2;
     // replaced by real Welcome/Sign-in screen keys in US1/US2).
     "launch-gate-placeholder-welcome",
@@ -48,6 +60,11 @@ const SHELL_AND_NOTIFICATION_KEYS: &[&str] = &[
     "setting-raise-notification",
     "setting-raise-notification-desc",
 ];
+
+/// 019-notification-presentation (US2, contract fluent-strings.md,
+/// data-model.md §6): the collapsed stack's overflow control, templated
+/// with `$count` and a Fluent plural selector (`[one]`/`*[other]`).
+const NOTIFICATION_STACK_COUNT_ARG_KEYS: &[&str] = &["notification-more"];
 
 /// Now Playing status-line / stream-notification / transfer-banner /
 /// queue keys with no Fluent placeholder (003-streaming-playback-and-queue,
@@ -277,6 +294,10 @@ const CONTROLS_KEYS: &[&str] = &[
     "controls-reject-mac-control",
     "controls-reject-modifier-only",
     "controls-reject-duplicate",
+    // 019-notification-presentation (US4, research R11, contract fluent-
+    // strings.md): `$ids` was removed — the dropped ids now live in
+    // `Notification.detail`, so this key takes no placeholder any more.
+    "keybindings-invalid-entries",
 ];
 
 /// `controls.ftl` keys that take a Fluent placeholder — resolved via
@@ -293,11 +314,6 @@ const CONTROLS_ARG_KEYS: &[&str] = &[
     "controls-conflict-with-plugin",
     "controls-plugin-group",
 ];
-
-/// `controls.ftl`'s one new settings-load warning (FR-013;
-/// contracts/keymap-settings.md), templated with `{ $ids }` — resolved via
-/// `tr_args` like `DEVICE_NAMED_KEYS`.
-const CONTROLS_WARNING_ARG_KEYS: &[&str] = &["keybindings-invalid-entries"];
 
 /// `effects.ftl` keys added by 008 Phase 4 (US2), Phase 5 (US3) and
 /// Phase 6 (US4; contracts/ui-effect-chain.md §6) with no Fluent
@@ -731,6 +747,23 @@ fn every_shell_nav_and_notification_key_resolves() {
         );
     }
 
+    // 019-notification-presentation (US2): `notification-more` resolves
+    // non-empty for both the singular (`count = 1`) and plural
+    // (`count = 2`) Fluent selector arms.
+    for key in NOTIFICATION_STACK_COUNT_ARG_KEYS {
+        for count in ["1", "2"] {
+            let resolved = tr_args(key, &[("count", count.to_string())]);
+            assert_ne!(
+                &resolved, key,
+                "Fluent key `{key}` is missing from locales/en-US/app.ftl (tr_args() fell back to the raw key, count={count})"
+            );
+            assert!(
+                !resolved.trim().is_empty(),
+                "Fluent key `{key}` resolved to an empty string for count={count}"
+            );
+        }
+    }
+
     for key in DISCLOSURE_KEYS {
         let resolved = tr(key);
         assert_ne!(
@@ -763,8 +796,17 @@ fn every_shell_nav_and_notification_key_resolves() {
         );
     }
 
+    // 019-notification-presentation (US4): `device-lost`/`device-missing-
+    // at-launch` now also take `$fallback`; `device-available-again` still
+    // takes only `$device` but tolerates the extra unused arg.
     for key in DEVICE_NAMED_KEYS {
-        let resolved = tr_args(key, &[("device", "Example Device".to_string())]);
+        let resolved = tr_args(
+            key,
+            &[
+                ("device", "Example Device".to_string()),
+                ("fallback", "the system default output".to_string()),
+            ],
+        );
         assert_ne!(
             &resolved, key,
             "Fluent key `{key}` is missing from locales/en-US/*.ftl (tr_args() fell back to the raw key)"
@@ -928,14 +970,6 @@ fn every_shell_nav_and_notification_key_resolves() {
                 ("plugin", "Fixture".to_string()),
             ],
         );
-        assert_ne!(
-            &resolved, key,
-            "Fluent key `{key}` is missing from locales/en-US/controls.ftl (tr_args() fell back to the raw key)"
-        );
-    }
-
-    for key in CONTROLS_WARNING_ARG_KEYS {
-        let resolved = tr_args(key, &[("ids", "host.nope.x".to_string())]);
         assert_ne!(
             &resolved, key,
             "Fluent key `{key}` is missing from locales/en-US/controls.ftl (tr_args() fell back to the raw key)"
@@ -1122,7 +1156,6 @@ fn no_unused_keys_in_playback_and_settings_ftl() {
         .chain(PLAYBACK_SETTINGS_KEYS)
         .chain(CONTROLS_KEYS)
         .chain(CONTROLS_ARG_KEYS)
-        .chain(CONTROLS_WARNING_ARG_KEYS)
         .chain(EFFECTS_KEYS)
         .chain(EFFECTS_PCT_ARG_KEYS)
         .chain(EFFECTS_COUNT_ARG_KEYS)
@@ -1225,6 +1258,64 @@ fn getting_started_strings_exist() {
         assert_ne!(
             &resolved, key,
             "Fluent key `{key}` is missing from locales/en-US/app.ftl (tr() fell back to the raw key)"
+        );
+    }
+}
+
+/// T026 (US4, contract fluent-strings.md): the six new US4 chrome keys —
+/// truncation toggle, Details toggle, and the two generic device phrases —
+/// each resolve to a real, non-empty string, not merely "not the raw key"
+/// (`every_shell_nav_and_notification_key_resolves` above already covers
+/// the latter for every `SHELL_AND_NOTIFICATION_KEYS` entry, including
+/// these six; this pins the non-empty half explicitly, as `tr()` could in
+/// principle resolve a key to `""` without falling back to it).
+const US4_NOTIFICATION_CHROME_KEYS: &[&str] = &[
+    "notification-show-more",
+    "notification-show-less",
+    "notification-details",
+    "notification-hide-details",
+    "notification-device-unknown",
+    "notification-device-fallback-default",
+];
+
+#[test]
+fn us4_notification_chrome_keys_resolve_non_empty() {
+    for key in US4_NOTIFICATION_CHROME_KEYS {
+        let resolved = tr(key);
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/app.ftl (tr() fell back to the raw key)"
+        );
+        assert!(
+            !resolved.trim().is_empty(),
+            "Fluent key `{key}` resolved to an empty string"
+        );
+    }
+}
+
+/// SC-005 (contract fluent-strings.md): `device-lost`/`device-missing-at-
+/// launch`'s resolved text contains both the real device name and the
+/// real fallback name passed as `$device`/`$fallback` — not just "some
+/// non-empty string" (`every_shell_nav_and_notification_key_resolves`'s
+/// own `DEVICE_NAMED_KEYS` loop above already covers that these keys
+/// resolve at all).
+#[test]
+fn device_lost_and_missing_wording_names_both_devices() {
+    for key in ["device-lost", "device-missing-at-launch"] {
+        let resolved = tr_args(
+            key,
+            &[
+                ("device", "Scarlett 2i2".to_string()),
+                ("fallback", "MacBook Pro Speakers".to_string()),
+            ],
+        );
+        assert!(
+            resolved.contains("Scarlett 2i2"),
+            "`{key}` resolved to `{resolved}`, which doesn't name the lost/missing device"
+        );
+        assert!(
+            resolved.contains("MacBook Pro Speakers"),
+            "`{key}` resolved to `{resolved}`, which doesn't name the fallback device"
         );
     }
 }

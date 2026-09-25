@@ -14,9 +14,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use modplayer_audio_io::FakeBackend;
 use modplayer_audio_source::{Availability, TrackId, TrackRef};
 use modplayer_audio_source_synthetic::SyntheticHost;
+use modplayer_core::device_policy::display_name_for_saved;
 use modplayer_core::settings::SettingsStore;
 use modplayer_core::{PlaybackController, Severity};
 use modplayer_engine::{BufferPreset, DeviceId, SampleRate, Transport};
+use proptest::prelude::*;
 
 /// A single fixture track (003 T047 changed `play()` to require a current
 /// queue item, contracts/transport-and-queue.md §2 rule T1) — this file's
@@ -497,4 +499,77 @@ fn rate_change_rebuilds_output_stage_only() {
     let before = controller.shared().clock_frames();
     controller.backend_mut().render_buffers(5);
     assert!(controller.shared().clock_frames() > before);
+}
+
+// ---------------------------------------------------------------------
+// 019-notification-presentation, Phase 6/US4 (T020, data-model.md §4,
+// contract C5): `display_name_for_saved`'s resolution order.
+// ---------------------------------------------------------------------
+
+/// `saved_name` (trimmed, non-empty) wins over everything, including a
+/// `name:`-form id.
+#[test]
+fn saved_name_wins_over_legacy_id_form() {
+    let id = DeviceId::new("name:Legacy Name").unwrap_or_else(|| unreachable!());
+    assert_eq!(
+        display_name_for_saved(Some(&id), Some("  Scarlett 2i2  ")),
+        Some("Scarlett 2i2".to_string()),
+        "saved_name must be trimmed and preferred"
+    );
+}
+
+/// A whitespace-only `saved_name` is treated as absent, falling through to
+/// the `name:`-form id.
+#[test]
+fn whitespace_only_saved_name_falls_through_to_legacy_id_form() {
+    let id = DeviceId::new("name:Old Interface").unwrap_or_else(|| unreachable!());
+    assert_eq!(
+        display_name_for_saved(Some(&id), Some("   ")),
+        Some("Old Interface".to_string())
+    );
+}
+
+/// No `saved_name`, no `name:`-form id, or no id at all: `None`.
+#[test]
+fn no_saved_name_and_no_legacy_id_form_is_none() {
+    let id = DeviceId::new("coreaudio:AppleUSBAudioEngine:1234").unwrap_or_else(|| unreachable!());
+    assert_eq!(display_name_for_saved(Some(&id), None), None);
+    assert_eq!(display_name_for_saved(None, None), None);
+}
+
+/// A `name:` id whose remainder is itself whitespace-only resolves to
+/// `None`, never an empty-but-`Some` string.
+#[test]
+fn legacy_id_form_with_blank_remainder_is_none() {
+    let id = DeviceId::new("name:   ").unwrap_or_else(|| unreachable!());
+    assert_eq!(display_name_for_saved(Some(&id), None), None);
+}
+
+proptest! {
+    /// Property test (Constitution VIII): for an arbitrary id string not
+    /// in `name:` form and `saved_name = None`, the output is `None` — and
+    /// more generally, whatever the output is, it is never any other
+    /// substring of the raw id than the `name:` remainder itself.
+    #[test]
+    fn arbitrary_non_legacy_id_with_no_saved_name_is_none(
+        raw in "[a-zA-Z0-9:_-]{1,64}"
+    ) {
+        prop_assume!(!raw.starts_with("name:"));
+        let id = DeviceId::new(raw.clone()).unwrap_or_else(|| unreachable!());
+        prop_assert_eq!(display_name_for_saved(Some(&id), None), None);
+    }
+
+    /// For an arbitrary `name:<remainder>` id with no `saved_name`, the
+    /// output is exactly the trimmed remainder — never any other
+    /// substring of the raw id (e.g. never containing the `name:` prefix).
+    #[test]
+    fn arbitrary_legacy_id_resolves_to_its_trimmed_remainder(
+        remainder in "[a-zA-Z0-9 ]{1,32}"
+    ) {
+        prop_assume!(!remainder.trim().is_empty());
+        let raw = format!("name:{remainder}");
+        let id = DeviceId::new(raw).unwrap_or_else(|| unreachable!());
+        let resolved = display_name_for_saved(Some(&id), None);
+        prop_assert_eq!(resolved, Some(remainder.trim().to_string()));
+    }
 }

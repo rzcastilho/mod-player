@@ -170,7 +170,44 @@ fn credential_never_appears_outside_secure_store() {
         for (_, value) in &notification.args {
             assert_leak_free(value.as_bytes(), "notification arg");
         }
+        // T025 (019-notification-presentation, US4, Constitution VI): the
+        // new `detail` field (raise_with_detail, FR-013) is a second place
+        // raw, non-localised text can carry content — covered by the same
+        // scan as message/args.
+        if let Some(detail) = &notification.detail {
+            assert_leak_free(detail.as_bytes(), "notification detail field");
+        }
     }
+
+    // Surface 2b (T025, Constitution VI, contract S6/FR-013): the
+    // *rendered* stack, in its default (collapsed, "Details" closed)
+    // state — the one surface a user actually sees without an extra
+    // click. `detail` only ever renders once "Details" is explicitly
+    // opened (`StackState::details` starts empty), so this proves the
+    // credential can never reach the accessible tree by default even if a
+    // future call site mistakenly routed it into `detail` or an arg.
+    let mut stack_state = modplayer_ui::notifications::StackState::default();
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = modplayer_ui::notifications::show(ui, &notifications, &mut stack_state);
+    });
+    let update = output
+        .platform_output
+        .accesskit_update
+        .take()
+        .expect("accesskit_update should be populated once enabled");
+    output.drop_without_applying_deltas();
+    let rendered_text: String = update
+        .nodes
+        .iter()
+        .filter_map(|(_, node)| node.label().or_else(|| node.value()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_leak_free(
+        rendered_text.as_bytes(),
+        "rendered notification stack (Details closed)",
+    );
 
     // Surface 3: `Debug` output of every public value `AccountService`
     // exposes — `SessionCredential`/`TokenSet`/`Profile`'s redacting

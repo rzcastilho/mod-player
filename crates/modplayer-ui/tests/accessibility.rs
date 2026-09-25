@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use egui::accesskit::{Role, Toggled};
-use egui::{Context, Event, Key, Modifiers, Pos2, RawInput, Rect};
+use egui::{Context, Event, Key, Modifiers, PointerButton, Pos2, RawInput, Rect};
 use modplayer_audio_io::{FakeBackend, FakeDevice};
 use modplayer_audio_source::{
     ArtistId, ArtistRef, Availability, CatalogError, LibraryItem, LibraryPage, LibrarySet, Repeat,
@@ -194,6 +194,9 @@ struct AccessNode {
     selected: Option<bool>,
     disabled: bool,
     labelled_by_something: bool,
+    /// T024 (US4): a node's screen rect, needed to click "Show more"/
+    /// "Details" and re-render to see their toggled-on labels.
+    bounds: Option<Rect>,
 }
 
 impl AccessNode {
@@ -213,7 +216,19 @@ impl AccessNode {
 fn render_nodes(render: impl FnMut(&mut egui::Ui)) -> Vec<AccessNode> {
     let ctx = fresh_ctx();
     ctx.enable_accesskit();
-    let mut output = ctx.run_ui(default_input(), render);
+    render_nodes_on(&ctx, default_input(), render)
+}
+
+/// Same as [`render_nodes`], but on a caller-supplied `Context`/`RawInput`
+/// (T024, US4): reused across frames so a click's press and release land
+/// on the same widget ids and memory — a fresh `Context` each frame, as
+/// `render_nodes` uses, cannot register a click at all.
+fn render_nodes_on(
+    ctx: &Context,
+    input: RawInput,
+    mut render: impl FnMut(&mut egui::Ui),
+) -> Vec<AccessNode> {
+    let mut output = ctx.run_ui(input, |ui| render(ui));
     let update = output
         .platform_output
         .accesskit_update
@@ -233,8 +248,38 @@ fn render_nodes(render: impl FnMut(&mut egui::Ui)) -> Vec<AccessNode> {
             selected: node.is_selected(),
             disabled: node.is_disabled(),
             labelled_by_something: !node.labelled_by().is_empty(),
+            bounds: node.bounds().map(|b| {
+                Rect::from_min_max(
+                    Pos2::new(b.x0 as f32, b.y0 as f32),
+                    Pos2::new(b.x1 as f32, b.y1 as f32),
+                )
+            }),
         })
         .collect()
+}
+
+/// Press then release the primary button at `pos`, on the same `ctx`
+/// (T024; mirrors `tests/notification_stack.rs`'s own `click`).
+fn click_at(ctx: &Context, pos: Pos2, mut render: impl FnMut(&mut egui::Ui)) {
+    let mut press = default_input();
+    press.events.push(Event::PointerButton {
+        pos,
+        button: PointerButton::Primary,
+        pressed: true,
+        modifiers: Modifiers::default(),
+    });
+    let output = ctx.run_ui(press, |ui| render(ui));
+    output.drop_without_applying_deltas();
+
+    let mut release = default_input();
+    release.events.push(Event::PointerButton {
+        pos,
+        button: PointerButton::Primary,
+        pressed: false,
+        modifiers: Modifiers::default(),
+    });
+    let output = ctx.run_ui(release, |ui| render(ui));
+    output.drop_without_applying_deltas();
 }
 
 /// Every node of `role` whose accessible name equals `name`, most recently
@@ -671,13 +716,120 @@ fn notification_action_buttons_expose_accessible_names() {
         ],
     );
 
+    let mut stack_state = modplayer_ui::notifications::StackState::default();
     let nodes = render_nodes(|ui| {
-        let _ = modplayer_ui::notifications::show(ui, &center);
+        let _ = modplayer_ui::notifications::show(ui, &center, &mut stack_state);
     });
 
     find_one(&nodes, Role::Button, &tr("action-status-page"));
     find_one(&nodes, Role::Button, &tr("action-retry"));
     find_one(&nodes, Role::Button, &tr("notification-dismiss"));
+}
+
+/// T014 (US3, contract S8, FR-008): every card's severity is present as
+/// its own accessible text node — `severity-critical`/`-warning`/`-info`
+/// — never conveyed by colour/icon alone. Accent-bar/icon colour and
+/// glyph-distinctness (FR-007) are covered in `tests/notifications.rs`
+/// (SC-003), which a headless AccessKit tree can't assert (no colour on
+/// the tree).
+#[test]
+fn notification_severity_word_is_exposed_as_text_for_every_card() {
+    let mut center = NotificationCenter::new();
+    center.raise(Severity::Critical, "no-output-devices");
+    center.raise(Severity::Warning, "no-output-devices");
+    center.raise(Severity::Info, "no-output-devices");
+
+    let mut stack_state = modplayer_ui::notifications::StackState::default();
+    let nodes = render_nodes(|ui| {
+        let _ = modplayer_ui::notifications::show(ui, &center, &mut stack_state);
+    });
+
+    find_one(&nodes, Role::Label, &tr("severity-critical"));
+    find_one(&nodes, Role::Label, &tr("severity-warning"));
+    find_one(&nodes, Role::Label, &tr("severity-info"));
+}
+
+/// T024 (US4, contract S5/S6/S8, FR-010/FR-013/FR-015): "Show more"/"Show
+/// less" and "Details"/"Hide details" each carry a non-empty accessible
+/// name in both their off and on states, and the message label's
+/// accessible name is always the full, untruncated resolved text — even
+/// while the visible galley is 2-row-elided (a long device name forces
+/// that here).
+#[test]
+fn notification_show_more_and_details_toggles_expose_accessible_names() {
+    let mut center = NotificationCenter::new();
+    let args = vec![
+        (
+            "device",
+            "A remarkably long saved output device name used to force wrapping".to_string(),
+        ),
+        ("fallback", "the system default output".to_string()),
+    ];
+    center.raise_with_detail(
+        Severity::Warning,
+        "device-missing-at-launch",
+        args.clone(),
+        "coreaudio:accessibility-detail-id".to_string(),
+    );
+    let resolved = tr_args("device-missing-at-launch", &args);
+
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut state = modplayer_ui::notifications::StackState::default();
+
+    // Off state: the message's accessible name is already the full
+    // resolved text (never the visibly elided one), and both toggles are
+    // present with non-empty names.
+    let nodes = render_nodes_on(&ctx, default_input(), |ui| {
+        let _ = modplayer_ui::notifications::show(ui, &center, &mut state);
+    });
+    find_one(&nodes, Role::Label, &resolved);
+    let show_more = find_one(&nodes, Role::Button, &tr("notification-show-more"));
+    assert!(
+        show_more.accessible_name().is_some_and(|n| !n.is_empty()),
+        "\"Show more\" must have a non-empty accessible name: {show_more:?}"
+    );
+    let show_more_pos = show_more.bounds.expect("bounds").center();
+    let details = find_one(&nodes, Role::Button, &tr("notification-details"));
+    assert!(
+        details.accessible_name().is_some_and(|n| !n.is_empty()),
+        "\"Details\" must have a non-empty accessible name: {details:?}"
+    );
+
+    // Toggle "Show more" -> "Show less".
+    click_at(&ctx, show_more_pos, |ui| {
+        let _ = modplayer_ui::notifications::show(ui, &center, &mut state);
+    });
+    let nodes = render_nodes_on(&ctx, default_input(), |ui| {
+        let _ = modplayer_ui::notifications::show(ui, &center, &mut state);
+    });
+    let show_less = find_one(&nodes, Role::Button, &tr("notification-show-less"));
+    assert!(
+        show_less.accessible_name().is_some_and(|n| !n.is_empty()),
+        "\"Show less\" must have a non-empty accessible name: {show_less:?}"
+    );
+    // The message's accessible name never changes with expansion state.
+    find_one(&nodes, Role::Label, &resolved);
+
+    // Toggle "Details" -> "Hide details" (bounds refetched: the extra
+    // "Show less" row above may have shifted it).
+    let details_pos = find_one(&nodes, Role::Button, &tr("notification-details"))
+        .bounds
+        .expect("bounds")
+        .center();
+    click_at(&ctx, details_pos, |ui| {
+        let _ = modplayer_ui::notifications::show(ui, &center, &mut state);
+    });
+    let nodes = render_nodes_on(&ctx, default_input(), |ui| {
+        let _ = modplayer_ui::notifications::show(ui, &center, &mut state);
+    });
+    let hide_details = find_one(&nodes, Role::Button, &tr("notification-hide-details"));
+    assert!(
+        hide_details
+            .accessible_name()
+            .is_some_and(|n| !n.is_empty()),
+        "\"Hide details\" must have a non-empty accessible name: {hide_details:?}"
+    );
 }
 
 // -- Search (004-search-and-library-browse, T033) ---------------------------

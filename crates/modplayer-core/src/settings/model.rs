@@ -101,6 +101,13 @@ impl DisclosureAcknowledgement {
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioSettings {
     pub output_device: Option<DeviceId>,
+    /// `[audio] output_device_name` (019-notification-presentation,
+    /// contract K1-K7, data-model.md §5): the confirmed device's display
+    /// name, written only by `PlaybackController::confirm_device` alongside
+    /// `output_device`. `None` when absent, or when the on-disk value is
+    /// empty/whitespace-only (no `InvalidField`, no warning) — a display
+    /// hint, never used to match or select a device.
+    pub output_device_name: Option<String>,
     pub device_confirmed: bool,
     pub buffer_preset: BufferPreset,
     pub limiter_ceiling_db: CeilingDb,
@@ -161,6 +168,7 @@ impl Default for AudioSettings {
     fn default() -> Self {
         Self {
             output_device: None,
+            output_device_name: None,
             device_confirmed: false,
             buffer_preset: BufferPreset::default(),
             limiter_ceiling_db: CeilingDb::default(),
@@ -446,6 +454,11 @@ fn default_focus_policy() -> String {
 pub struct RawAudio {
     #[serde(default)]
     pub output_device: Option<String>,
+    /// 019-notification-presentation (contract K4): only ever serialized
+    /// when `Some` — a pre-019 file re-saved without a confirm keeps no
+    /// `output_device_name` key at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_device_name: Option<String>,
     #[serde(default)]
     pub device_confirmed: bool,
     #[serde(default = "default_buffer_preset")]
@@ -462,6 +475,7 @@ impl Default for RawAudio {
     fn default() -> Self {
         Self {
             output_device: None,
+            output_device_name: None,
             device_confirmed: false,
             buffer_preset: default_buffer_preset(),
             limiter_ceiling_db: default_ceiling(),
@@ -597,6 +611,7 @@ impl RawSettings {
                     .output_device
                     .as_ref()
                     .map(|id| id.as_str().to_string()),
+                output_device_name: settings.output_device_name.clone(),
                 device_confirmed: settings.device_confirmed,
                 buffer_preset: match settings.buffer_preset {
                     BufferPreset::Performance => "performance",
@@ -779,6 +794,15 @@ impl RawSettings {
 
         let output_device = self.audio.output_device.and_then(DeviceId::new);
 
+        // K2: empty/whitespace-only -> `None`, no `InvalidField`, no
+        // warning — a display hint, not a validated value (019-
+        // notification-presentation, contract K1/K2). Only the emptiness
+        // check trims; a non-blank value round-trips byte-for-byte.
+        let output_device_name = self
+            .audio
+            .output_device_name
+            .filter(|s| !s.trim().is_empty());
+
         // `acknowledged_version == 0` means never acknowledged
         // (data-model.md §1.1); an unparseable/absent timestamp on an
         // otherwise-acknowledged record still counts as acknowledged
@@ -856,6 +880,7 @@ impl RawSettings {
 
         let settings = AudioSettings {
             output_device,
+            output_device_name,
             device_confirmed: self.audio.device_confirmed,
             buffer_preset,
             limiter_ceiling_db: CeilingDb::from_f64(self.audio.limiter_ceiling_db),
