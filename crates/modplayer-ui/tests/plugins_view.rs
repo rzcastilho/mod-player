@@ -678,8 +678,9 @@ fn notification_actions_call_facade() {
     let ctx = Context::default();
     ctx.enable_accesskit();
     let mut interaction = notifications::NotificationInteraction::default();
+    let mut stack_state = notifications::StackState::default();
     let nodes = render_nodes_on(&ctx, |ui| {
-        interaction = notifications::show(ui, &center);
+        interaction = notifications::show(ui, &center, &mut stack_state);
     });
     let restart = find_one(
         &nodes,
@@ -688,7 +689,13 @@ fn notification_actions_call_facade() {
     );
     let restart_pos = restart.bounds.expect("button must have bounds").center();
 
-    click_notification_action(&ctx, &center, &mut interaction, restart_pos);
+    click_notification_action(
+        &ctx,
+        &center,
+        &mut interaction,
+        &mut stack_state,
+        restart_pos,
+    );
     assert_eq!(
         interaction.action_clicked,
         Some((
@@ -699,7 +706,7 @@ fn notification_actions_call_facade() {
     );
 
     let nodes = render_nodes_on(&ctx, |ui| {
-        interaction = notifications::show(ui, &center);
+        interaction = notifications::show(ui, &center, &mut stack_state);
     });
     let disable = find_one(
         &nodes,
@@ -707,7 +714,13 @@ fn notification_actions_call_facade() {
         &tr("notification-action-disable-plugin"),
     );
     let disable_pos = disable.bounds.expect("button must have bounds").center();
-    click_notification_action(&ctx, &center, &mut interaction, disable_pos);
+    click_notification_action(
+        &ctx,
+        &center,
+        &mut interaction,
+        &mut stack_state,
+        disable_pos,
+    );
     assert_eq!(
         interaction.action_clicked,
         Some((
@@ -727,6 +740,7 @@ fn click_notification_action(
     ctx: &Context,
     center: &NotificationCenter,
     interaction: &mut notifications::NotificationInteraction,
+    stack_state: &mut notifications::StackState,
     pos: Pos2,
 ) {
     let mut press = default_input();
@@ -737,7 +751,7 @@ fn click_notification_action(
         modifiers: egui::Modifiers::default(),
     });
     let output = ctx.run_ui(press, |ui| {
-        let _ = notifications::show(ui, center);
+        let _ = notifications::show(ui, center, stack_state);
     });
     output.drop_without_applying_deltas();
 
@@ -749,7 +763,7 @@ fn click_notification_action(
         modifiers: egui::Modifiers::default(),
     });
     let output = ctx.run_ui(release, |ui| {
-        *interaction = notifications::show(ui, center);
+        *interaction = notifications::show(ui, center, stack_state);
     });
     output.drop_without_applying_deltas();
 }

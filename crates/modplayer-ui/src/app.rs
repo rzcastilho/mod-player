@@ -116,6 +116,10 @@ pub struct App<B: OutputBackend, H: SourceHost> {
     /// D9) — seeded from the restored/default `[window]` inner size at
     /// construction, observed every frame from the live viewport.
     window_size: WindowSizeTracker,
+    /// The notification stack's own cap/expand state (019-notification-
+    /// presentation, US2, data-model.md §6) — constructed once and reused
+    /// like `shell`/`settings`; never persisted.
+    notification_stack: notifications::StackState,
 }
 
 impl<B: OutputBackend, H: SourceHost> App<B, H> {
@@ -195,6 +199,7 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
             detail_view: detail_view::DetailViewState::default(),
             waveform: WaveformState::default(),
             window_size: WindowSizeTracker::new(restored_size),
+            notification_stack: notifications::StackState::default(),
         }
     }
 
@@ -310,16 +315,34 @@ impl<B: OutputBackend, H: SourceHost> eframe::App for App<B, H> {
             self.shell.nav_rail(ui);
         });
 
-        // Top-right, newest-first, non-modal — never blocks navigation or
-        // playback (contracts/ui-surface.md).
+        // Bottom-right, newest-first, non-modal — never blocks navigation
+        // or playback, and never covers the header/tab strip/category
+        // list/table headers/nav rail a top anchor used to hide
+        // (019-notification-presentation, FR-001/FR-002, contract S1).
         let interaction = Area::new(Id::new("shell-notifications"))
-            .anchor(Align2::RIGHT_TOP, vec2(-8.0, 8.0))
+            .anchor(Align2::RIGHT_BOTTOM, vec2(-8.0, -8.0))
             .show(&ctx, |ui| {
-                notifications::show(ui, self.controller.notifications())
+                notifications::show(
+                    ui,
+                    self.controller.notifications(),
+                    &mut self.notification_stack,
+                )
             })
             .inner;
         if let Some(id) = interaction.dismissed {
             self.controller.notifications_mut().dismiss(id);
+        }
+        // 019-notification-presentation (FR-009, contract S7, research R8):
+        // hold/release an `Info` card's auto-dismiss timer while its "Show
+        // more" or "Details" is expanded (WCAG 2.2.1).
+        for (id, hold) in interaction.hold_changes {
+            if hold {
+                self.controller.notifications_mut().hold_auto_dismiss(id);
+            } else {
+                self.controller
+                    .notifications_mut()
+                    .release_auto_dismiss(id, Instant::now());
+            }
         }
         // A notification action button click (US2 T071, US4 T090): route
         // by which action it was — `open_url` only ever happens here, from

@@ -156,9 +156,10 @@ mod tests {
         center.raise(Severity::Warning, "sample-notification-warning");
         center.raise(Severity::Info, "sample-notification-info");
 
+        let mut stack_state = crate::notifications::StackState::default();
         let mut output = ctx.run_ui(RawInput::default(), |ui| {
             shell.nav_rail(ui);
-            crate::notifications::show(ui, &center);
+            crate::notifications::show(ui, &center, &mut stack_state);
         });
 
         let Some(update) = output.platform_output.accesskit_update.take() else {

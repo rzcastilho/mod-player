@@ -6,9 +6,9 @@ master-volume = Master volume
 peak-meter = Peak meter
 transport-disabled-no-device = No output device is available. Connect a device to enable playback.
 
-device-lost = { $device } was disconnected. Switched to the system default output device.
-device-missing-at-launch = { $device } is not available. Using the system default output device instead.
-device-available-again = { $device } is available again. Switch back to it from Settings › Audio if you want to.
+device-lost = { $device } disconnected. Now playing through { $fallback }.
+device-missing-at-launch = { $device } isn't connected. Playing through { $fallback } instead.
+device-available-again = { $device } is available again. You can switch back in Settings › Audio.
 no-output-devices = No output devices are available. Connect a device to enable playback.
 device-appeared = An output device is now available.
 settings-unreadable = Your settings file could not be read and default settings were used instead.
@@ -30,6 +30,25 @@ severity-warning = Warning
 severity-info = Info
 notification-dismiss = Dismiss
 notification-action-sign-in = Sign in
+
+# 019-notification-presentation (US2, contract fluent-strings.md): the
+# collapsed stack's overflow control ("{N} more") and its expanded-state
+# counterpart ("Show fewer").
+notification-more = { $count ->
+    [one] { $count } more
+   *[other] { $count } more
+}
+notification-show-fewer = Show fewer
+
+# 019-notification-presentation (US4, contract fluent-strings.md): the
+# per-card truncation toggle, the Details toggle, and the two generic
+# device phrases resolved at raise time (research R9).
+notification-show-more = Show more
+notification-show-less = Show less
+notification-details = Details
+notification-hide-details = Hide details
+notification-device-unknown = Your saved output device
+notification-device-fallback-default = the system default output
 
 # 002-first-launch-and-sign-in: placeholder launch-gate content until the
 # real Welcome (US1) and Sign-in (US2) screens land.

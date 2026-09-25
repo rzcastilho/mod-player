@@ -176,6 +176,22 @@ pub struct Notification {
     /// This notification's plugin origin (US5 N2), `None` for every
     /// host-raised notification (every `raise*` method above).
     pub attribution: Option<PluginAttribution>,
+    /// Non-localised technical text shown behind "Details" (019-
+    /// notification-presentation, FR-013, data-model.md §1). `None` unless
+    /// raised via [`NotificationCenter::raise_with_detail`]; never set by
+    /// `raise_attributed` (plugins cannot set it — Principle IX). When
+    /// `Some`, always non-empty.
+    pub detail: Option<String>,
+    /// The origin of the `Info` auto-dismiss timer (019, data-model.md
+    /// §1): `= created_at` at raise, reset to "now" by
+    /// [`NotificationCenter::release_auto_dismiss`]. `created_at` itself
+    /// stays the truthful "raised at" timestamp with its other readers
+    /// untouched.
+    pub(crate) auto_dismiss_from: Instant,
+    /// `true` while the UI reports this card's "Show more" or "Details"
+    /// expanded (019, FR-009): held `Info` notifications never auto-dismiss
+    /// (WCAG 2.2.1).
+    pub(crate) held: bool,
 }
 
 /// The most action buttons a single notification renders alongside
@@ -266,8 +282,31 @@ impl NotificationCenter {
         dedupe_key: Option<String>,
         attribution: Option<PluginAttribution>,
     ) -> u64 {
+        self.raise_full_detailed(
+            severity,
+            message_key,
+            args,
+            actions,
+            dedupe_key,
+            attribution,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn raise_full_detailed(
+        &mut self,
+        severity: Severity,
+        message_key: &'static str,
+        args: Vec<(&'static str, String)>,
+        actions: Vec<NotificationAction>,
+        dedupe_key: Option<String>,
+        attribution: Option<PluginAttribution>,
+        detail: Option<String>,
+    ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
+        let created_at = Instant::now();
         self.items.push_front(Notification {
             id,
             severity,
@@ -275,12 +314,79 @@ impl NotificationCenter {
             args,
             action: actions.first().copied(),
             actions,
-            created_at: Instant::now(),
+            created_at,
             dismissed: false,
             dedupe_key,
             attribution,
+            detail,
+            auto_dismiss_from: created_at,
+            held: false,
         });
         id
+    }
+
+    /// Raise a notification carrying non-localised technical `detail` text
+    /// shown behind a "Details" toggle (019-notification-presentation,
+    /// FR-013, contract C2) — e.g. a raw device id or dropped keybinding
+    /// ids, never shown in the main message. No actions, no dedupe key, no
+    /// attribution. `detail` must be non-empty (debug-asserted); a release
+    /// build stores `None` for an empty string rather than panicking.
+    /// Returns the new notification's id.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use modplayer_core::{NotificationCenter, Severity};
+    ///
+    /// let mut center = NotificationCenter::new();
+    /// let id = center.raise_with_detail(
+    ///     Severity::Warning,
+    ///     "device-missing-at-launch",
+    ///     vec![("device", "Scarlett 2i2".to_string())],
+    ///     "coreaudio:device-42".to_string(),
+    /// );
+    /// let notification = center.visible().find(|n| n.id == id).unwrap();
+    /// assert_eq!(notification.detail.as_deref(), Some("coreaudio:device-42"));
+    /// ```
+    pub fn raise_with_detail(
+        &mut self,
+        severity: Severity,
+        message_key: &'static str,
+        args: Vec<(&'static str, String)>,
+        detail: String,
+    ) -> u64 {
+        debug_assert!(
+            !detail.is_empty(),
+            "raise_with_detail: detail must not be empty"
+        );
+        let detail = (!detail.is_empty()).then_some(detail);
+        self.raise_full_detailed(severity, message_key, args, Vec::new(), None, None, detail)
+    }
+
+    /// Test/fixture-only combination of [`Self::raise_with_actions`] and
+    /// [`Self::raise_with_detail`] (019-notification-presentation, research
+    /// R2): no production raise site needs actions and `detail` together
+    /// (contract C4), but `tests/notification_stack.rs`'s SC-001 worst-case
+    /// fixture needs a single card exercising every optional row — actions,
+    /// "Show more" and "Details" — at once, to bound the tallest a real
+    /// card can ever get. Up to `MAX_NOTIFICATION_ACTIONS` actions kept, as
+    /// in `raise_with_actions`. `detail` must be non-empty (debug-asserted;
+    /// release stores `None` for empty). Returns the new notification's id.
+    pub fn raise_with_actions_and_detail(
+        &mut self,
+        severity: Severity,
+        message_key: &'static str,
+        args: Vec<(&'static str, String)>,
+        mut actions: Vec<NotificationAction>,
+        detail: String,
+    ) -> u64 {
+        actions.truncate(MAX_NOTIFICATION_ACTIONS);
+        debug_assert!(
+            !detail.is_empty(),
+            "raise_with_actions_and_detail: detail must not be empty"
+        );
+        let detail = (!detail.is_empty()).then_some(detail);
+        self.raise_full_detailed(severity, message_key, args, actions, None, None, detail)
     }
 
     /// Raise a plugin-attributed notification (US5, contracts/overlays-
@@ -335,16 +441,70 @@ impl NotificationCenter {
         }
     }
 
-    /// Age out `Info` notifications older than `INFO_AUTO_DISMISS`.
-    /// `Warning`/`Critical` are never auto-dismissed.
+    /// Age out `Info` notifications whose auto-dismiss timer
+    /// (`auto_dismiss_from`) has run past `INFO_AUTO_DISMISS` and that are
+    /// not currently held (019-notification-presentation, FR-009, contract
+    /// C3 rule H1). `Warning`/`Critical` are never auto-dismissed (H4).
     pub fn tick(&mut self, now: Instant) {
         for item in &mut self.items {
             if item.severity == Severity::Info
                 && !item.dismissed
-                && now.saturating_duration_since(item.created_at) >= INFO_AUTO_DISMISS
+                && !item.held
+                && now.saturating_duration_since(item.auto_dismiss_from) >= INFO_AUTO_DISMISS
             {
                 item.dismissed = true;
             }
+        }
+    }
+
+    /// Hold an `Info` notification's auto-dismiss timer while its "Show
+    /// more" or "Details" is expanded (019, FR-009, contract C3 rule H2,
+    /// WCAG 2.2.1). Idempotent; a no-op for an unknown or already-dismissed
+    /// id.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::{Duration, Instant};
+    /// use modplayer_core::{NotificationCenter, Severity};
+    ///
+    /// let mut center = NotificationCenter::new();
+    /// let id = center.raise(Severity::Info, "device-available-again");
+    /// center.hold_auto_dismiss(id);
+    /// center.tick(Instant::now() + Duration::from_secs(3600));
+    /// assert!(center.visible().any(|n| n.id == id), "held notifications never age out");
+    /// ```
+    pub fn hold_auto_dismiss(&mut self, id: u64) {
+        if let Some(item) = self.items.iter_mut().find(|n| n.id == id && !n.dismissed) {
+            item.held = true;
+        }
+    }
+
+    /// Release a previously held `Info` notification's auto-dismiss timer,
+    /// restarting the `INFO_AUTO_DISMISS` window from `now` (019, contract
+    /// C3 rule H3). A no-op if the id is unknown, dismissed, or not
+    /// currently held.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Instant;
+    /// use modplayer_core::{NotificationCenter, Severity};
+    ///
+    /// let mut center = NotificationCenter::new();
+    /// let id = center.raise(Severity::Info, "device-available-again");
+    /// center.hold_auto_dismiss(id);
+    /// center.release_auto_dismiss(id, Instant::now());
+    /// assert!(center.visible().any(|n| n.id == id));
+    /// ```
+    pub fn release_auto_dismiss(&mut self, id: u64, now: Instant) {
+        if let Some(item) = self
+            .items
+            .iter_mut()
+            .find(|n| n.id == id && !n.dismissed && n.held)
+        {
+            item.held = false;
+            item.auto_dismiss_from = now;
         }
     }
 
@@ -474,5 +634,139 @@ mod tests {
         center.raise(Severity::Info, "key");
         center.dismiss_by_key("no-such-key");
         assert_eq!(center.visible().count(), 1);
+    }
+
+    // -------------------------------------------------------------------
+    // 019-notification-presentation, Phase 6/US4 (T018): `detail`,
+    // `hold_auto_dismiss`/`release_auto_dismiss`, and the refined `tick`
+    // rules H1-H5 (contract C1-C3, data-model.md §1).
+    // -------------------------------------------------------------------
+
+    /// Every existing `raise*` method sets `detail: None` (contract C1) —
+    /// only `raise_with_detail` ever populates it.
+    #[test]
+    fn existing_raise_methods_leave_detail_none() {
+        let mut center = NotificationCenter::new();
+        center.raise(Severity::Info, "key");
+        center.raise_with_args(Severity::Info, "key", vec![("a", "b".to_string())]);
+        center.raise_with_action(Severity::Warning, "key", NotificationAction::SignIn);
+        center.raise_keyed(Severity::Warning, "key", Vec::new(), Vec::new(), "dedupe");
+        for n in center.all() {
+            assert_eq!(n.detail, None);
+        }
+    }
+
+    /// `raise_with_detail` stores the given text and no actions/dedupe/
+    /// attribution.
+    #[test]
+    fn raise_with_detail_stores_the_detail_text() {
+        let mut center = NotificationCenter::new();
+        let id = center.raise_with_detail(
+            Severity::Warning,
+            "device-missing-at-launch",
+            vec![("device", "Scarlett 2i2".to_string())],
+            "coreaudio:device-42".to_string(),
+        );
+        let notification = center
+            .visible()
+            .find(|n| n.id == id)
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(notification.detail.as_deref(), Some("coreaudio:device-42"));
+        assert!(notification.actions.is_empty());
+        assert_eq!(notification.dedupe_key, None);
+        assert!(notification.attribution.is_none());
+    }
+
+    /// H1: a held `Info` notification never ages out no matter how much
+    /// time passes.
+    #[test]
+    fn held_info_never_auto_dismisses() {
+        let mut center = NotificationCenter::new();
+        let id = center.raise(Severity::Info, "key");
+        center.hold_auto_dismiss(id);
+        center.tick(Instant::now() + Duration::from_secs(3600));
+        assert!(center.visible().any(|n| n.id == id));
+    }
+
+    /// H2: `hold_auto_dismiss` is idempotent and a no-op for an unknown or
+    /// already-dismissed id.
+    #[test]
+    fn hold_auto_dismiss_is_idempotent_and_noop_for_unknown_or_dismissed() {
+        let mut center = NotificationCenter::new();
+        let id = center.raise(Severity::Info, "key");
+        center.hold_auto_dismiss(id);
+        center.hold_auto_dismiss(id); // idempotent
+        center.tick(Instant::now() + Duration::from_secs(3600));
+        assert!(center.visible().any(|n| n.id == id));
+
+        center.hold_auto_dismiss(999_999); // unknown id: no panic, no effect
+
+        let dismissed_id = center.raise(Severity::Info, "other");
+        center.dismiss(dismissed_id);
+        center.hold_auto_dismiss(dismissed_id); // no-op: already dismissed
+        assert!(!center.visible().any(|n| n.id == dismissed_id));
+    }
+
+    /// H3: `release_auto_dismiss` restarts the 10s window from `now`
+    /// rather than the original raise time.
+    #[test]
+    fn release_auto_dismiss_restarts_the_window_from_now() {
+        let mut center = NotificationCenter::new();
+        let id = center.raise(Severity::Info, "key");
+        let raised_at = Instant::now();
+
+        center.hold_auto_dismiss(id);
+        // Held well past the original 10s window: still visible.
+        center.tick(raised_at + Duration::from_secs(20));
+        assert!(center.visible().any(|n| n.id == id));
+
+        let release_at = raised_at + Duration::from_secs(20);
+        center.release_auto_dismiss(id, release_at);
+        // 9s after release: still visible (a fresh window, not the stale one).
+        center.tick(release_at + Duration::from_secs(9));
+        assert!(center.visible().any(|n| n.id == id));
+        // 10s after release: dismissed.
+        center.tick(release_at + Duration::from_secs(10));
+        assert!(!center.visible().any(|n| n.id == id));
+    }
+
+    /// H3 (no-op half): releasing a notification that was never held does
+    /// nothing (its window is untouched).
+    #[test]
+    fn release_auto_dismiss_is_a_no_op_when_not_held() {
+        let mut center = NotificationCenter::new();
+        let id = center.raise(Severity::Info, "key");
+        let raised_at = Instant::now();
+        // Not held; releasing must not reset the window.
+        center.release_auto_dismiss(id, raised_at + Duration::from_secs(5));
+        center.tick(raised_at + Duration::from_secs(11));
+        assert!(
+            !center.visible().any(|n| n.id == id),
+            "release on a non-held notification must not extend its window"
+        );
+    }
+
+    /// H4: `Warning`/`Critical` are unaffected by hold/release (they never
+    /// auto-dismiss regardless).
+    #[test]
+    fn warning_and_critical_ignore_hold_and_release() {
+        let mut center = NotificationCenter::new();
+        let warning_id = center.raise(Severity::Warning, "key");
+        let critical_id = center.raise(Severity::Critical, "key");
+        center.hold_auto_dismiss(warning_id);
+        center.hold_auto_dismiss(critical_id);
+        center.tick(Instant::now() + Duration::from_secs(3600));
+        assert!(center.visible().any(|n| n.id == warning_id));
+        assert!(center.visible().any(|n| n.id == critical_id));
+    }
+
+    /// H5: an explicit `dismiss` still dismisses a held notification.
+    #[test]
+    fn explicit_dismiss_still_dismisses_a_held_notification() {
+        let mut center = NotificationCenter::new();
+        let id = center.raise(Severity::Info, "key");
+        center.hold_auto_dismiss(id);
+        center.dismiss(id);
+        assert!(!center.visible().any(|n| n.id == id));
     }
 }
