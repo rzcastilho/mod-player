@@ -11,6 +11,7 @@ pub mod about;
 pub mod account;
 pub mod appearance;
 pub mod audio;
+pub mod category_row;
 pub mod controls;
 pub mod developer;
 pub mod language;
@@ -27,7 +28,9 @@ use modplayer_core::{AudioSettings, PlaybackController, PluginId, tr};
 
 use crate::actions::{self, Claim};
 use crate::device_check::DeviceCheckScreen;
+use crate::section_memory::{SectionMemory, ViewKey};
 use crate::settings::about::AboutScreen;
+use crate::settings::category_row::CategoryRowState;
 use crate::settings::controls::ControlsScreen;
 use crate::theme;
 
@@ -54,6 +57,9 @@ pub struct SettingsScreen {
     playback: playback::PlaybackScreen,
     controls: ControlsScreen,
     plugins: plugins::PluginsScreen,
+    /// 020-shell-navigation-and-gates (US2): the category row's own
+    /// partition/menu state (contracts/settings-category-row.md).
+    row: CategoryRowState,
 }
 
 impl SettingsScreen {
@@ -71,7 +77,31 @@ impl SettingsScreen {
             playback: playback::PlaybackScreen::new(controller),
             controls: ControlsScreen::default(),
             plugins: plugins::PluginsScreen::new(),
+            row: CategoryRowState::default(),
         }
+    }
+
+    /// Reset the selected category back to the first, fixed-order category
+    /// (020-shell-navigation-and-gates, US3-AS4, contracts/section-
+    /// memory.md M4): called on sign-out/revocation, alongside
+    /// `SectionMemory::reset` and the other section sub-views, via
+    /// `app::reset_session_ui`. Leaves the search query, focus targets and
+    /// every category screen's own state untouched — only the *selected*
+    /// category is part of US3-AS4's "every section starts at its default
+    /// view".
+    pub fn reset_category(&mut self) {
+        self.category = SettingsCategory::ALL[0];
+    }
+
+    /// The currently selected category (read-only): changed only by
+    /// selecting a category in the row/menu, a search-result click, or
+    /// [`Self::reset_category`]. 020-shell-navigation-and-gates,
+    /// contracts/section-memory.md M4: lets a caller (`app::
+    /// reset_session_ui`'s own tests) observe the reset without reaching
+    /// into a private field.
+    #[must_use]
+    pub const fn category(&self) -> SettingsCategory {
+        self.category
     }
 }
 
@@ -87,7 +117,21 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     controller: &mut PlaybackController<B, H>,
     account: &mut AccountService,
     screen: &mut SettingsScreen,
+    memory: &mut SectionMemory,
 ) -> (Option<DeviceCheckScreen>, Vec<AccountEvent>) {
+    show_header(ui, controller, screen);
+    show_content(ui, controller, account, screen, memory)
+}
+
+/// The search box, its live results, and the category row (020-shell-
+/// navigation-and-gates, US3, contracts/section-memory.md: "the search box
+/// and the category row stay fixed at the top" — FR-010, the selected
+/// category must always be visible). Never scrolls.
+fn show_header<B: OutputBackend, H: SourceHost>(
+    ui: &mut Ui,
+    controller: &mut PlaybackController<B, H>,
+    screen: &mut SettingsScreen,
+) {
     let search_id = Id::new(SEARCH_BOX_ID);
 
     ui.horizontal(|ui| {
@@ -141,25 +185,31 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     // from the search box to this list, and `app.rs`/`shell.rs` draw no
     // per-section title above it either, T031), so `title` has nothing to
     // apply to here.
-    ui.horizontal_wrapped(|ui| {
-        for category in SettingsCategory::ALL {
-            let label = tr(category.label_key());
-            let response =
-                ui.selectable_label(screen.category == category, theme::section_label(&label));
-            // Accessible name pinned back to the exact, un-uppercased
-            // label (FR-019) — see `shell::nav_rail`'s identical note.
-            ui.ctx().accesskit_node_builder(response.id, |b| {
-                b.set_label(label.clone());
-            });
-            if response.clicked() {
-                screen.category = category;
-            }
-        }
-    });
+    // 020-shell-navigation-and-gates (US2, FR-008-FR-012): the row never
+    // wraps — whatever does not fit at the current width collapses into a
+    // keyboard-operable "More" menu instead (contracts/settings-category-
+    // row.md), replacing the old `ui.horizontal_wrapped` block.
+    if let Some(category) = category_row::show(ui, screen.category, &mut screen.row) {
+        screen.category = category;
+    }
     ui.add_space(theme::space::XL);
+}
 
+/// The selected category's own body (020-shell-navigation-and-gates, US3,
+/// contracts/section-memory.md): wrapped in `memory.scroll_area(&ViewKey::
+/// Settings(category))` so it retains its own scroll offset across a round
+/// trip, keyed per category — the search box and row above never scroll.
+fn show_content<B: OutputBackend, H: SourceHost>(
+    ui: &mut Ui,
+    controller: &mut PlaybackController<B, H>,
+    account: &mut AccountService,
+    screen: &mut SettingsScreen,
+    memory: &mut SectionMemory,
+) -> (Option<DeviceCheckScreen>, Vec<AccountEvent>) {
     let focus = screen.focus_target.take();
-    match screen.category {
+    let key = ViewKey::Settings(screen.category);
+    let scroll = memory.scroll_area(&key);
+    let output = scroll.show(ui, |ui| match screen.category {
         SettingsCategory::Audio => (
             audio::show(ui, controller, &mut screen.cached_settings, focus),
             Vec::new(),
@@ -199,5 +249,46 @@ pub fn show<B: OutputBackend, H: SourceHost>(
             ui.label(tr("placeholder-settings-category"));
             (None, Vec::new())
         }
+    });
+    memory.record(key, output.state.offset.y);
+    output.inner
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fresh_screen() -> SettingsScreen {
+        use modplayer_audio_io::FakeBackend;
+        use modplayer_audio_source_synthetic::ScriptedHost;
+        use modplayer_core::settings::SettingsStore;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "modplayer-ui-settings-reset-category-{}-{unique}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let store = SettingsStore::with_path(dir.join("settings.toml"));
+        let controller =
+            PlaybackController::new(FakeBackend::new(vec![]), ScriptedHost::new(), store);
+        SettingsScreen::new(&controller)
+    }
+
+    /// 020-shell-navigation-and-gates (US3, contracts/section-memory.md
+    /// M4): `reset_category` sets the selected category back to
+    /// `SettingsCategory::ALL[0]`, even from a category that isn't it.
+    #[test]
+    fn reset_category_returns_to_the_first_fixed_order_category() {
+        let mut screen = fresh_screen();
+        assert_eq!(screen.category(), SettingsCategory::ALL[0], "test setup");
+
+        screen.category = SettingsCategory::Audio;
+        assert_ne!(screen.category(), SettingsCategory::ALL[0], "test setup");
+
+        screen.reset_category();
+        assert_eq!(screen.category(), SettingsCategory::ALL[0]);
     }
 }

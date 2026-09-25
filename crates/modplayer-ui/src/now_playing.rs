@@ -51,12 +51,18 @@ pub fn toggle_queue_panel<B: OutputBackend, H: SourceHost>(
 /// Draw the Now Playing screen, applying any transport/volume/seek change
 /// directly to `controller`. `waveform` is the session's own waveform
 /// widget state (drag preview, detail window — `App`-owned, like
-/// `artwork`).
+/// `artwork`). `memory_epoch` is `SectionMemory::epoch()` (020-shell-
+/// navigation-and-gates, US3, research.md R5): Now Playing has no
+/// section-level scroll area of its own (an outer scroll area would break
+/// `effects_panel_reserved_height`/018's responsive dock sizing), but the
+/// inner effect-chain scroll area's id salt folds the epoch in too, so it
+/// resets on sign-out exactly like every other section's scroll state.
 pub fn show<B: OutputBackend, H: SourceHost>(
     ui: &mut Ui,
     controller: &mut PlaybackController<B, H>,
     artwork: &mut ArtworkCache,
     waveform: &mut WaveformState,
+    memory_epoch: u64,
 ) {
     // 018-window-sizing-and-responsive-dock (contract D8, research R11,
     // FR-012): captured as the very first statement — the `CentralPanel`
@@ -300,7 +306,7 @@ pub fn show<B: OutputBackend, H: SourceHost>(
         let reserved = effects_panel_reserved_height(ui, transport_open, queue_open);
         let max_height = (ui.available_height() - reserved).max(160.0);
         egui::ScrollArea::vertical()
-            .id_salt("now-playing-effect-chain-scroll")
+            .id_salt(("now-playing-effect-chain-scroll", memory_epoch))
             .max_height(max_height)
             .auto_shrink([false, true])
             .show(ui, |ui| {

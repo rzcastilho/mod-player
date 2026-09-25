@@ -260,7 +260,7 @@ fn settle_frame(
 ) {
     let output = ctx.run_ui(default_input(), |ui| {
         dispatch_for_test(&ui.ctx().clone(), controller, waveform);
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform)
+        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0)
     });
     output.drop_without_applying_deltas();
 }
@@ -281,7 +281,7 @@ fn press_key(
     input.events.push(key_release(key));
     let output = ctx.run_ui(input, |ui| {
         dispatch_for_test(&ui.ctx().clone(), controller, waveform);
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform)
+        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0)
     });
     output.drop_without_applying_deltas();
 }
@@ -307,7 +307,7 @@ fn press_key_with(
     input.events.push(key_release(key));
     let output = ctx.run_ui(input, |ui| {
         dispatch_for_test(&ui.ctx().clone(), controller, waveform);
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform)
+        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0)
     });
     output.drop_without_applying_deltas();
 }
@@ -323,7 +323,7 @@ fn find_node_bounds(
     matches: impl Fn(&egui::accesskit::Node) -> bool,
 ) -> Rect {
     let mut output = ctx.run_ui(default_input(), |ui| {
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform)
+        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0)
     });
     let update = output
         .platform_output
@@ -388,7 +388,7 @@ fn rendered_texts(
     waveform: &mut WaveformState,
 ) -> Vec<String> {
     let mut output = ctx.run_ui(default_input(), |ui| {
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform)
+        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0)
     });
     let update = output
         .platform_output
@@ -1236,7 +1236,7 @@ fn drag_from_overview_zooms_detail_and_lands_within_5ms() {
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(press, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     output.drop_without_applying_deltas();
 
@@ -1244,7 +1244,7 @@ fn drag_from_overview_zooms_detail_and_lands_within_5ms() {
     drag.events
         .push(Event::PointerMoved(Pos2::new(target_x, press_pos.y)));
     let output = ctx.run_ui(drag, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     output.drop_without_applying_deltas();
     assert!(
@@ -1260,7 +1260,7 @@ fn drag_from_overview_zooms_detail_and_lands_within_5ms() {
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(release, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     output.drop_without_applying_deltas();
 
@@ -1315,7 +1315,7 @@ fn drag_esc_restores_position_and_window() {
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(press, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     output.drop_without_applying_deltas();
 
@@ -1323,7 +1323,7 @@ fn drag_esc_restores_position_and_window() {
     drag.events
         .push(Event::PointerMoved(Pos2::new(target_x, press_pos.y)));
     let output = ctx.run_ui(drag, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     output.drop_without_applying_deltas();
     assert!(
@@ -1345,7 +1345,7 @@ fn drag_esc_restores_position_and_window() {
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(esc, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     output.drop_without_applying_deltas();
 
@@ -1598,13 +1598,13 @@ fn tab_focus_on_a_glyph_enables_the_marker_key_table() {
 
     let glyph_id = egui::Id::new(("marker-glyph", "overview", id));
     let output = ctx.run_ui(default_input(), |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     output.drop_without_applying_deltas();
     ctx.memory_mut(|memory| memory.request_focus(glyph_id));
 
     let output = ctx.run_ui(default_input(), |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     output.drop_without_applying_deltas();
     assert_eq!(
@@ -1652,7 +1652,7 @@ fn markers_panel_renders_as_a_card_with_no_added_interactive_controls() {
     let mut waveform = WaveformState::default();
 
     let mut output = ctx.run_ui(default_input(), |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     let update = output
         .platform_output

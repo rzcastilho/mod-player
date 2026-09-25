@@ -17,7 +17,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use egui::{Align2, Area, CentralPanel, Id, OpenUrl, Panel, Ui, vec2};
+use egui::{Align2, Area, CentralPanel, Id, OpenUrl, Ui, vec2};
 use modplayer_account::{
     AccountEvent, AccountService, LaunchStep, ReadOutcome, RequestId, SessionState, Tier,
     UPGRADE_URL, next_step,
@@ -37,8 +37,9 @@ use crate::device_check::DeviceCheckScreen;
 use crate::getting_started::{self, GettingStartedOutcome};
 use crate::layout::{self, WindowSizeTracker};
 use crate::library_view::{self, LibraryOutcome};
+use crate::section_memory;
 use crate::settings::SettingsScreen;
-use crate::shell::{Section, Shell};
+use crate::shell::{self, Section, Shell};
 use crate::sign_in::{self, SignInScreen, TierResult};
 use crate::ticker::Ticker;
 use crate::waveform::WaveformState;
@@ -120,6 +121,11 @@ pub struct App<B: OutputBackend, H: SourceHost> {
     /// presentation, US2, data-model.md §6) — constructed once and reused
     /// like `shell`/`settings`; never persisted.
     notification_stack: notifications::StackState,
+    /// Each scrollable section view's own retained sub-view/scroll offset
+    /// (020-shell-navigation-and-gates, US3, contracts/section-memory.md)
+    /// — constructed once and reused like `shell`/`settings`; reset on
+    /// sign-out/revocation via `reset_session_ui` (never persisted, M6).
+    section_memory: section_memory::SectionMemory,
 }
 
 impl<B: OutputBackend, H: SourceHost> App<B, H> {
@@ -200,6 +206,7 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
             waveform: WaveformState::default(),
             window_size: WindowSizeTracker::new(restored_size),
             notification_stack: notifications::StackState::default(),
+            section_memory: section_memory::SectionMemory::default(),
         }
     }
 
@@ -288,7 +295,15 @@ impl<B: OutputBackend, H: SourceHost> eframe::App for App<B, H> {
         // this frame's fresh registrations (design note 2).
         let claims = actions::claims_snapshot(&ctx);
         actions::clear_claims(&ctx);
-        if self.launch_step() == LaunchStep::Main && self.device_check.is_none() {
+        // 020-shell-navigation-and-gates (contracts/shell-chrome.md, T011):
+        // one predicate — `Chrome::navigation_enabled()` — now gates the
+        // dispatcher, replacing the ad hoc `launch_step() == Main &&
+        // device_check.is_none()` check, so it can never drift from the
+        // rail's own visibility (FR-001b). Evaluated from the pre-tick
+        // step (research R1: dispatch consumes *this* frame's input before
+        // `account.tick()` runs).
+        let pre = shell::Chrome::for_frame(self.launch_step(), self.device_check.is_some());
+        if pre.navigation_enabled() {
             let scope = self.scope_state();
             let invocations = actions::dispatch(&ctx, &claims, self.controller.actions(), &scope);
             for inv in invocations {
@@ -311,9 +326,18 @@ impl<B: OutputBackend, H: SourceHost> eframe::App for App<B, H> {
         }
         self.request_other_device_name_if_needed();
 
-        Panel::left(Id::new("shell-nav-rail")).show(ui, |ui| {
-            self.shell.nav_rail(ui);
-        });
+        // 020-shell-navigation-and-gates (contracts/shell-chrome.md T011):
+        // `step`/`chrome` computed once here, *after* account events drain
+        // (a sign-out this frame must not leave the rail visible one frame
+        // late, research R1), and reused below for the `CentralPanel`
+        // match — no second `launch_step()` call within the frame.
+        // `show_chrome` adds the left rail `Panel` iff `chrome.rail` and
+        // the top step-indicator `Panel` iff `chrome.gate.is_some()`;
+        // neither is added at all otherwise, so egui never reserves its
+        // space (FR-004).
+        let step = self.launch_step();
+        let chrome = shell::Chrome::for_frame(step, self.device_check.is_some());
+        shell::show_chrome(ui, chrome, &mut self.shell);
 
         // Bottom-right, newest-first, non-modal — never blocks navigation
         // or playback, and never covers the header/tab strip/category
@@ -378,14 +402,33 @@ impl<B: OutputBackend, H: SourceHost> eframe::App for App<B, H> {
             }
         }
 
-        let step = self.launch_step();
+        let drawn = CentralPanel::default()
+            .show(ui, |ui| match step {
+                LaunchStep::Welcome => {
+                    self.show_welcome(ui);
+                    None
+                }
+                LaunchStep::SignIn => {
+                    self.show_sign_in(ui);
+                    None
+                }
+                LaunchStep::DeviceCheck => {
+                    self.show_launch_gate_device_check(ui);
+                    None
+                }
+                LaunchStep::Main => self.show_main(ui),
+            })
+            .inner;
 
-        CentralPanel::default().show(ui, |ui| match step {
-            LaunchStep::Welcome => self.show_welcome(ui),
-            LaunchStep::SignIn => self.show_sign_in(ui),
-            LaunchStep::DeviceCheck => self.show_launch_gate_device_check(ui),
-            LaunchStep::Main => self.show_main(ui),
-        });
+        // 020-shell-navigation-and-gates (US3, contracts/section-memory.md,
+        // contracts/shell-chrome.md's normative frame order): after every
+        // section that might have drawn a memory-backed view, and before
+        // the focus ring. `drawn` is `None` whenever nothing memory-backed
+        // was on screen this frame (a gate, Now Playing, a Settings-
+        // triggered Device Check preview) — `end_frame` then clears
+        // `shown_last_frame` so the next frame a view *is* drawn, its
+        // stored offset is correctly re-applied.
+        self.section_memory.end_frame(drawn.as_ref());
 
         // The app-wide focus ring (015-control-variants, research R3,
         // contract F4): one pass, after every panel, so no view file
@@ -489,6 +532,17 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
                 // artwork cache is per-session state too.
                 self.artwork = ArtworkCache::new();
                 self.waveform = WaveformState::default();
+                // US3-AS4 (020-shell-navigation-and-gates, contracts/
+                // section-memory.md M4): every section starts back at its
+                // default view, scrolled to the top.
+                reset_session_ui(
+                    &mut self.section_memory,
+                    &mut self.shell,
+                    &mut self.library_view,
+                    &mut self.library_detail,
+                    &mut self.search_view,
+                    &mut self.settings,
+                );
                 let joined = categories
                     .iter()
                     .map(|key| tr(key))
@@ -519,6 +573,16 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
                 self.controller.clear_for_sign_out();
                 self.artwork = ArtworkCache::new();
                 self.waveform = WaveformState::default();
+                // US3-AS4 (020-shell-navigation-and-gates, contracts/
+                // section-memory.md M4): same reset as `SignedOut` above.
+                reset_session_ui(
+                    &mut self.section_memory,
+                    &mut self.shell,
+                    &mut self.library_view,
+                    &mut self.library_detail,
+                    &mut self.search_view,
+                    &mut self.settings,
+                );
                 self.controller.notifications_mut().raise_with_action(
                     Severity::Critical,
                     "session-revoked",
@@ -591,13 +655,18 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
     /// The normal app shell (001's nav rail sections), including a
     /// Settings-triggered Device Check preview overlay if one is open —
     /// independent of the launch gate (`settings::show`'s "Test output
-    /// device" hands one back regardless of confirmation state).
-    fn show_main(&mut self, ui: &mut Ui) {
+    /// device" hands one back regardless of confirmation state). Returns
+    /// the `section_memory::ViewKey` of whichever memory-backed view was
+    /// drawn this frame (020-shell-navigation-and-gates, US3), or `None`
+    /// for the Device Check preview and Now Playing (which has none,
+    /// research.md R5) — the caller (`App::ui`) hands this straight to
+    /// `SectionMemory::end_frame`.
+    fn show_main(&mut self, ui: &mut Ui) -> Option<section_memory::ViewKey> {
         if let Some(mut screen) = self.device_check.take() {
             if !screen.show(ui, &mut self.controller) {
                 self.device_check = Some(screen);
             }
-            return;
+            return None;
         }
 
         match self.shell.section {
@@ -607,26 +676,44 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
             // detail-navigation stack layered over it (T065).
             Section::Library => self.show_library(ui),
             Section::Search => {
-                search_view::show(
+                let key = section_memory::ViewKey::Search;
+                let scroll = self.section_memory.scroll_area(&key);
+                let output = scroll.show(ui, |ui| {
+                    search_view::show(
+                        ui,
+                        &mut self.controller,
+                        &mut self.artwork,
+                        &mut self.shell.focus_search_requested,
+                        &mut self.search_view,
+                    );
+                });
+                self.section_memory
+                    .record(key.clone(), output.state.offset.y);
+                Some(key)
+            }
+            Section::NowPlaying => {
+                now_playing::show(
                     ui,
                     &mut self.controller,
                     &mut self.artwork,
-                    &mut self.shell.focus_search_requested,
-                    &mut self.search_view,
+                    &mut self.waveform,
+                    self.section_memory.epoch(),
                 );
+                None
             }
-            Section::NowPlaying => now_playing::show(
-                ui,
-                &mut self.controller,
-                &mut self.artwork,
-                &mut self.waveform,
-            ),
             // 009 US4 (T106, contracts/ui-plugins.md §2): a 500 ms repaint
             // request keeps the live CPU/memory gauges moving while the
             // section is visible, on top of the global ≥ 30 Hz loop above.
             Section::Plugins => {
                 ui.ctx().request_repaint_after(Duration::from_millis(500));
-                plugins_view::show(ui, &mut self.controller);
+                let key = section_memory::ViewKey::Plugins;
+                let scroll = self.section_memory.scroll_area(&key);
+                let output = scroll.show(ui, |ui| {
+                    plugins_view::show(ui, &mut self.controller);
+                });
+                self.section_memory
+                    .record(key.clone(), output.state.offset.y);
+                Some(key)
             }
             Section::Settings => {
                 let (device_check, events) = settings::show(
@@ -634,6 +721,7 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
                     &mut self.controller,
                     &mut self.account,
                     &mut self.settings,
+                    &mut self.section_memory,
                 );
                 if let Some(screen) = device_check {
                     self.device_check = Some(screen);
@@ -642,6 +730,7 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
                 for event in events {
                     self.handle_account_event(&ctx, event);
                 }
+                Some(section_memory::ViewKey::Settings(self.settings.category()))
             }
         }
     }
@@ -651,8 +740,11 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
     /// whole panel until **Back**; otherwise the tabbed Library view
     /// itself, whose outcomes (open a detail, or focus Search from an
     /// empty state) are handled here since they cross this view's own
-    /// scope (library_view.rs's doc comment).
-    fn show_library(&mut self, ui: &mut Ui) {
+    /// scope (library_view.rs's doc comment). Returns the
+    /// `section_memory::ViewKey` of whichever list was drawn this frame
+    /// (020-shell-navigation-and-gates, US3) — the active tab's, or the
+    /// open detail target's.
+    fn show_library(&mut self, ui: &mut Ui) -> Option<section_memory::ViewKey> {
         if let Some(target) = self.library_detail.clone() {
             let outcome = detail_view::show(
                 ui,
@@ -660,11 +752,15 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
                 &mut self.artwork,
                 &target,
                 &mut self.detail_view,
+                &mut self.section_memory,
             );
             if outcome == DetailOutcome::Back {
                 self.library_detail = None;
+                return None;
             }
-            return;
+            return Some(section_memory::ViewKey::Library(
+                section_memory::LibraryViewKey::Detail(target),
+            ));
         }
 
         // 013-key-and-tempo-plugin (US4, contracts/getting-started-card.md
@@ -690,7 +786,16 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
             &mut self.controller,
             &mut self.artwork,
             &mut self.library_view,
+            &mut self.section_memory,
         );
+        // Captured after `library_view::show` returns, exactly like
+        // Settings' own category (`show_main`, above): a tab-click this
+        // same frame already updated `library_view.tab` before the tab's
+        // content was drawn, so this is the tab that was actually on
+        // screen this frame.
+        let drawn = Some(section_memory::ViewKey::Library(
+            section_memory::LibraryViewKey::Tab(self.library_view.tab),
+        ));
         match outcome {
             LibraryOutcome::None => {}
             LibraryOutcome::FocusSearch => {
@@ -707,7 +812,31 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
                 self.library_detail = Some(DetailTarget::Artist(id));
             }
         }
+        drawn
     }
+}
+
+/// Reset every per-session UI sub-view, together with `memory` itself
+/// (020-shell-navigation-and-gates, US3-AS4, contracts/section-memory.md
+/// M4): called from `App::handle_account_event`'s `SignedOut`/
+/// `SessionRevoked` arms. A free function, not an `App` method, so it is
+/// directly unit-testable without an `eframe::CreationContext`
+/// (research.md R1's constraint on constructing `App` headlessly) — every
+/// parameter is a plain, independently-constructible piece of state.
+pub fn reset_session_ui(
+    memory: &mut section_memory::SectionMemory,
+    shell: &mut Shell,
+    library_view: &mut library_view::LibraryViewState,
+    library_detail: &mut Option<DetailTarget>,
+    search_view: &mut search_view::SearchViewState,
+    settings: &mut SettingsScreen,
+) {
+    memory.reset();
+    *shell = Shell::default();
+    *library_view = library_view::LibraryViewState::default();
+    *library_detail = None;
+    *search_view = search_view::SearchViewState::default();
+    settings.reset_category();
 }
 
 /// `controller.set_playback_permitted(..)` from the account session's

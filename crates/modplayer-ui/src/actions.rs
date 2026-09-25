@@ -224,6 +224,20 @@ pub fn effect_handle_claims() -> Vec<ChordPattern> {
     ]
 }
 
+/// `settings/category_row.rs`'s "More" overflow menu items
+/// (020-shell-navigation-and-gates, contracts/settings-category-row.md R9):
+/// a focused menu item owns `↑`/`↓` (moves focus between items, clamped at
+/// the ends) and `Enter`/`Escape` (select / close), so no global binding on
+/// those keys ever fires while a menu item has focus.
+pub fn category_menu_item_claims() -> Vec<ChordPattern> {
+    vec![
+        plain(key("Up")),
+        plain(key("Down")),
+        plain(key("Enter")),
+        plain(key("Escape")),
+    ]
+}
+
 /// `rows.rs`'s library/search/queue rows (contracts/ui-actions.md §2).
 pub fn row_claims() -> Vec<ChordPattern> {
     vec![
