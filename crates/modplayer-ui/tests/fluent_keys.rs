@@ -476,6 +476,10 @@ const PLUGINS_KEYS: &[&str] = &[
     "plugin-panel-restart",
     "plugin-generic-glyph-desc",
     "plugin-marker-list-empty",
+    // 018-window-sizing-and-responsive-dock (data-model.md §7): the
+    // "Panels" transport-row toggle and the dock's resize splitter.
+    "plugin-dock-panels-toggle",
+    "plugin-dock-resize",
 ];
 
 /// `plugins.ftl` keys that take a Fluent placeholder — resolved via
@@ -490,6 +494,9 @@ const PLUGINS_ARG_KEYS: &[&str] = &[
     "plugin-panel-suspended",
     "plugin-panel-header",
     "plugin-notification",
+    // 018-window-sizing-and-responsive-dock (data-model.md §7): the
+    // splitter's AccessKit value text, templated with `{ $width }`.
+    "plugin-dock-resize-value",
 ];
 
 /// Every Settings-screen key (US5, T086): the eleven fixed-order category
@@ -1077,6 +1084,7 @@ fn plugins_ftl_keys_used_exist() {
                 ("cause", "it stopped responding".to_string()),
                 ("title", "Controls".to_string()),
                 ("text", "example text".to_string()),
+                ("width", "280".to_string()),
             ],
         );
         assert_ne!(

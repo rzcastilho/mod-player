@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use super::window::{self, WindowSettings};
 use crate::actions::{Chord, HostAction, KeymapOverrides};
 use crate::plugins::FocusPolicy;
 
@@ -147,6 +148,12 @@ pub struct AudioSettings {
     /// today's `unwrap_or(false)` egui-memory lookups. Markers has no
     /// toggle (FR-021) and is not represented here.
     pub now_playing_panels: NowPlayingPanels,
+    /// `[window]` (018-window-sizing-and-responsive-dock, contract W1/W2):
+    /// the main window's restored inner size and the plugin dock's width.
+    /// Absent section (or any individual invalid key within it) falls
+    /// back to [`WindowSettings::default`] field-by-field — see
+    /// `settings/window.rs`.
+    pub window: WindowSettings,
     pub schema_version: u32,
 }
 
@@ -170,6 +177,7 @@ impl Default for AudioSettings {
             plugin_panels: BTreeMap::new(),
             getting_started_dismissed: false,
             now_playing_panels: NowPlayingPanels::default(),
+            window: WindowSettings::default(),
             schema_version: SCHEMA_VERSION,
         }
     }
@@ -331,6 +339,11 @@ pub struct RawSettings {
     /// load every panel closed.
     #[serde(default)]
     pub now_playing_panels: RawNowPlayingPanels,
+    /// `[window]` (018-window-sizing-and-responsive-dock, contract W1): an
+    /// optional table so older files (with no such section) load the
+    /// default size/dock width.
+    #[serde(default)]
+    pub window: RawWindow,
 }
 
 fn default_schema_version() -> u32 {
@@ -351,6 +364,7 @@ impl Default for RawSettings {
             plugin_panels: BTreeMap::new(),
             onboarding: RawOnboarding::default(),
             now_playing_panels: RawNowPlayingPanels::default(),
+            window: RawWindow::default(),
         }
     }
 }
@@ -558,6 +572,21 @@ pub struct RawNowPlayingPanels {
     pub queue_open: bool,
 }
 
+/// The `[window]` section's wire shape (018-window-sizing-and-responsive-
+/// dock, contract W1): every field independently optional and permissive
+/// (`Option<toml::Value>`, mirroring `RawAppearance::high_contrast`'s own
+/// pattern above) so a malformed value falls back to its own default in
+/// `into_settings` without failing the whole file.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RawWindow {
+    #[serde(default)]
+    pub inner_width: Option<toml::Value>,
+    #[serde(default)]
+    pub inner_height: Option<toml::Value>,
+    #[serde(default)]
+    pub dock_width: Option<toml::Value>,
+}
+
 impl RawSettings {
     /// Serialize `settings` to its wire form.
     pub fn from_settings(settings: &AudioSettings) -> Self {
@@ -658,6 +687,13 @@ impl RawSettings {
                 effect_chain_open: settings.now_playing_panels.effect_chain_open,
                 transport_open: settings.now_playing_panels.transport_open,
                 queue_open: settings.now_playing_panels.queue_open,
+            },
+            // Contract W1: save always writes all three `[window]` keys
+            // with the current (already-clamped) shadow values.
+            window: RawWindow {
+                inner_width: Some(toml::Value::Float(f64::from(settings.window.inner_width))),
+                inner_height: Some(toml::Value::Float(f64::from(settings.window.inner_height))),
+                dock_width: Some(toml::Value::Float(f64::from(settings.window.dock_width))),
             },
         }
     }
@@ -809,6 +845,15 @@ impl RawSettings {
             }
         }
 
+        // 018-window-sizing-and-responsive-dock (contract W1): each key
+        // validates independently and silently — no `InvalidField`
+        // variant, matching `nudge_step_ms`'s own silent-clamp precedent.
+        let window = WindowSettings {
+            inner_width: window::sanitize_inner_width(self.window.inner_width.as_ref()),
+            inner_height: window::sanitize_inner_height(self.window.inner_height.as_ref()),
+            dock_width: window::sanitize_dock_width(self.window.dock_width.as_ref()),
+        };
+
         let settings = AudioSettings {
             output_device,
             device_confirmed: self.audio.device_confirmed,
@@ -834,6 +879,7 @@ impl RawSettings {
                 transport_open: self.now_playing_panels.transport_open,
                 queue_open: self.now_playing_panels.queue_open,
             },
+            window,
             schema_version: self.schema_version,
         };
 

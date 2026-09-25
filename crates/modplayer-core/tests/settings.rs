@@ -862,3 +862,96 @@ fn getting_started_flag_survives_sign_out() {
         "the persisted flag must also survive sign-out, got:\n{on_disk}"
     );
 }
+
+// ---------------------------------------------------------------------
+// 018-window-sizing-and-responsive-dock (contract W1, data-model.md §1):
+// `[window]` — absent defaults, out-of-range clamping, and per-key
+// silent fallback on a malformed value (W4.1-W4.3).
+// ---------------------------------------------------------------------
+
+#[test]
+fn window_section_absent_loads_defaults() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let _ = fs::write(store.path(), "schema_version = 1\n");
+
+    let outcome = store.load();
+    assert_eq!(outcome.settings.window.inner_width, 1200.0);
+    assert_eq!(outcome.settings.window.inner_height, 820.0);
+    assert_eq!(outcome.settings.window.dock_width, 280.0);
+    assert!(outcome.warnings.is_empty());
+}
+
+#[test]
+fn window_section_clamps_out_of_range_values() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let content = "schema_version = 1\n\n[window]\ninner_width = 100.0\ninner_height = 50.0\ndock_width = 10.0\n";
+    let _ = fs::write(store.path(), content);
+
+    let outcome = store.load();
+    assert_eq!(outcome.settings.window.inner_width, 960.0);
+    assert_eq!(outcome.settings.window.inner_height, 640.0);
+    assert_eq!(outcome.settings.window.dock_width, 240.0);
+    assert!(outcome.warnings.is_empty());
+
+    let too_wide_dock = "schema_version = 1\n\n[window]\ndock_width = 1000.0\n";
+    let _ = fs::write(store.path(), too_wide_dock);
+    let outcome = store.load();
+    assert_eq!(outcome.settings.window.dock_width, 480.0);
+    assert!(outcome.warnings.is_empty());
+}
+
+#[test]
+fn window_section_per_key_garbage_falls_back_silently() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+
+    for bad in ["\"wide\"", "nan", "inf", "-5", "0"] {
+        let content = format!(
+            "schema_version = 1\n\n[window]\ninner_width = {bad}\ninner_height = 820.0\ndock_width = 280.0\n"
+        );
+        let _ = fs::write(store.path(), &content);
+        let outcome = store.load();
+        assert_eq!(
+            outcome.settings.window.inner_width, 1200.0,
+            "inner_width = {bad} must fall back to the default"
+        );
+        // Other `[window]` keys in the same section are unaffected.
+        assert_eq!(outcome.settings.window.inner_height, 820.0);
+        assert_eq!(outcome.settings.window.dock_width, 280.0);
+        // Other sections are unaffected and no `InvalidField` is raised.
+        assert!(
+            outcome.warnings.is_empty(),
+            "bad value {bad} must not raise a warning"
+        );
+    }
+}
+
+#[test]
+fn window_section_round_trips_through_a_real_save_load() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let settings = AudioSettings {
+        window: modplayer_core::settings::WindowSettings {
+            inner_width: 1500.0,
+            inner_height: 900.0,
+            dock_width: 320.0,
+        },
+        ..AudioSettings::default()
+    };
+    assert!(store.save(&settings).is_ok());
+
+    let outcome = store.load();
+    assert_eq!(outcome.settings, settings);
+    assert!(outcome.warnings.is_empty());
+
+    let on_disk = fs::read_to_string(store.path()).unwrap_or_default();
+    assert!(
+        on_disk.contains("[window]")
+            && on_disk.contains("inner_width")
+            && on_disk.contains("inner_height")
+            && on_disk.contains("dock_width"),
+        "settings.toml must persist all three [window] keys, got:\n{on_disk}"
+    );
+}

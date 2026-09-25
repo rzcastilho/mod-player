@@ -712,6 +712,14 @@ pub struct PlaybackController<B: OutputBackend, H: SourceHost> {
     /// through `persist_settings`, on every `set_now_playing_panel_open`
     /// call — mirrors `getting_started_dismissed`'s own precedent above.
     now_playing_panels: crate::settings::NowPlayingPanels,
+
+    /// `[window]` shadow state (018-window-sizing-and-responsive-dock,
+    /// contract W2): seeded from `settings.window` at construction and
+    /// persisted, through `persist_settings`, on every `set_dock_width`/
+    /// `set_window_inner_size` call whose clamped result actually changes
+    /// it — mirrors `now_playing_panels`'s own shadow-state convention
+    /// above.
+    window: crate::settings::WindowSettings,
 }
 
 /// Which Now Playing block a persisted open/closed flag addresses
@@ -883,6 +891,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
             plugin_panels: settings.plugin_panels.clone(),
             getting_started_dismissed: settings.getting_started_dismissed,
             now_playing_panels: settings.now_playing_panels,
+            window: settings.window,
         };
         // 006, contracts/marker-service.md §4: resolved unconditionally at
         // construction, like `AnalysisPaths::resolve()` just above —
@@ -2538,6 +2547,61 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         }
         let panels = self.now_playing_panels;
         self.persist_settings(|settings| settings.now_playing_panels = panels);
+    }
+
+    /// Current `[window]` shadow state (018-window-sizing-and-responsive-
+    /// dock, contract W2): read from the cached shadow state seeded at
+    /// construction, never a fresh disk read — mirrors
+    /// `now_playing_panel_open`'s own precedent above.
+    #[must_use]
+    pub fn window_settings(&self) -> crate::settings::WindowSettings {
+        self.window
+    }
+
+    /// Set the plugin dock's width, clamped to `[DOCK_WIDTH_MIN,
+    /// DOCK_WIDTH_MAX]`, and persist it only when the clamped value
+    /// differs from the shadow state (018-window-sizing-and-responsive-
+    /// dock, contract W2, FR-005): the splitter's drag-end and every
+    /// keyboard step call this same setter, so a drag and a shortcut can
+    /// never diverge. A non-finite or non-positive `width` is ignored (no
+    /// shadow update, no write).
+    pub fn set_dock_width(&mut self, width: f32) {
+        if !width.is_finite() || width <= 0.0 {
+            return;
+        }
+        let clamped = width.clamp(
+            crate::settings::DOCK_WIDTH_MIN,
+            crate::settings::DOCK_WIDTH_MAX,
+        );
+        if clamped == self.window.dock_width {
+            return;
+        }
+        self.window.dock_width = clamped;
+        let window = self.window;
+        self.persist_settings(|settings| settings.window = window);
+    }
+
+    /// Set the main window's restored inner size, clamped to at least
+    /// `MIN_INNER_SIZE`, and persist it only when the clamped result
+    /// differs from the shadow state (018-window-sizing-and-responsive-
+    /// dock, contract W2, FR-003): `App`'s debounced `WindowSizeTracker`
+    /// and its exit-time flush both call this same setter. A non-finite
+    /// or non-positive `width`/`height` is ignored (no shadow update, no
+    /// write) — the tracker never observes a maximized/fullscreen size,
+    /// but a defensive guard costs nothing.
+    pub fn set_window_inner_size(&mut self, width: f32, height: f32) {
+        if !width.is_finite() || width <= 0.0 || !height.is_finite() || height <= 0.0 {
+            return;
+        }
+        let clamped_width = width.max(crate::settings::MIN_INNER_SIZE.0);
+        let clamped_height = height.max(crate::settings::MIN_INNER_SIZE.1);
+        if clamped_width == self.window.inner_width && clamped_height == self.window.inner_height {
+            return;
+        }
+        self.window.inner_width = clamped_width;
+        self.window.inner_height = clamped_height;
+        let window = self.window;
+        self.persist_settings(|settings| settings.window = window);
     }
 
     /// The user's "Give focus" (FR-008, C8): a no-op unless `id` is a
