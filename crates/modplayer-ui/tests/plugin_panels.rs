@@ -977,6 +977,70 @@ fn header_attribution() {
     );
 }
 
+/// D7 (018-window-sizing-and-responsive-dock, research R9): a title too
+/// long for the fixed dock width truncates (but its AccessKit label stays
+/// the full text, FR-010) while every header button across every docked
+/// panel still renders with its full, un-elided label (FR-011) — the
+/// header rework's whole point, replacing the old single-row header that
+/// would have clipped the trailing buttons instead.
+#[test]
+fn long_title_truncates_without_eliding_buttons() {
+    let (mut controller, _dir, _psd, _tsd, id) = launch_ui_panel("long-title");
+
+    let long_title = "A".repeat(64);
+    call(
+        &mut controller,
+        id,
+        Request::RegisterPanel {
+            panel: wid("long"),
+            title: long_title.clone(),
+            widgets: vec![modplayer_capability_gateway::ui::WidgetSpec {
+                id: wid("only"),
+                kind: modplayer_capability_gateway::ui::WidgetKind::Label,
+                label: "Only".to_string(),
+                min: None,
+                max: None,
+                step: None,
+                value: None,
+                items: Vec::new(),
+                selected: None,
+                action: None,
+                text: Some("hi".to_string()),
+            }],
+        },
+    )
+    .unwrap_or_else(|e| unreachable!("long-title panel must register: {e:?}"));
+
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let nodes = render_dock(&ctx, &mut controller);
+
+    let full_header = tr_args(
+        "plugin-panel-header",
+        &[
+            ("plugin", PLUGIN_NAME.to_string()),
+            ("title", long_title.clone()),
+        ],
+    );
+    // AccessKit's label stays the full text even though the painted title
+    // truncates (FR-010).
+    find_one(&nodes, Role::Label, &full_header);
+
+    // Both docked panels' (`main`, `long`) Close/Disable buttons are still
+    // present with their full, un-elided label (FR-011) — none dropped or
+    // silently clipped by the narrow column.
+    assert_eq!(
+        find_all(&nodes, Role::Button, &tr("plugin-panel-close")).len(),
+        2,
+        "both panels' Close button must render, none clipped/elided: {nodes:?}"
+    );
+    assert_eq!(
+        find_all(&nodes, Role::Button, &tr("plugin-panel-disable")).len(),
+        2,
+        "both panels' Disable button must render, none clipped/elided: {nodes:?}"
+    );
+}
+
 // -- 012-section-loop-plugin (User Story 1, SC-006) ------------------------
 
 const SECTION_LOOP: &str = "org.modplayer.section-loop";

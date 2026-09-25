@@ -35,6 +35,7 @@ use crate::artwork::ArtworkCache;
 use crate::detail_view::{self, DetailOutcome, DetailTarget};
 use crate::device_check::DeviceCheckScreen;
 use crate::getting_started::{self, GettingStartedOutcome};
+use crate::layout::{self, WindowSizeTracker};
 use crate::library_view::{self, LibraryOutcome};
 use crate::settings::SettingsScreen;
 use crate::shell::{Section, Shell};
@@ -110,6 +111,11 @@ pub struct App<B: OutputBackend, H: SourceHost> {
     /// playing-waveform, data-model.md §5.2: drag preview, detail window)
     /// — constructed once and reused like `library_view`/`settings`.
     waveform: WaveformState,
+    /// The main window's restored-size debounce/exit-flush state
+    /// (018-window-sizing-and-responsive-dock, data-model.md §2, contract
+    /// D9) — seeded from the restored/default `[window]` inner size at
+    /// construction, observed every frame from the live viewport.
+    window_size: WindowSizeTracker,
 }
 
 impl<B: OutputBackend, H: SourceHost> App<B, H> {
@@ -166,6 +172,11 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
 
         let ticker = Ticker::spawn(cc.egui_ctx.clone());
 
+        let restored_size = {
+            let w = controller.window_settings();
+            vec2(w.inner_width, w.inner_height)
+        };
+
         Self {
             controller,
             account,
@@ -183,6 +194,7 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
             search_view: search_view::SearchViewState::default(),
             detail_view: detail_view::DetailViewState::default(),
             waveform: WaveformState::default(),
+            window_size: WindowSizeTracker::new(restored_size),
         }
     }
 
@@ -234,6 +246,35 @@ impl<B: OutputBackend, H: SourceHost> eframe::App for App<B, H> {
         // meter, device events and Info-notification expiry are all polled
         // from this method, so the UI must keep ticking without input.
         ctx.request_repaint_after(REPAINT_INTERVAL);
+
+        // 018-window-sizing-and-responsive-dock (contract D9, data-model.md
+        // §2): observe this frame's live viewport size (ignored outright
+        // while maximized/fullscreen), then persist it once it has settled
+        // — at most one write per `SAVE_DEBOUNCE`. `next_deadline()` makes
+        // sure a resize that settles with no further input still gets
+        // saved, even though the ≥ 30 Hz loop above would otherwise cover
+        // it.
+        // egui-winit only reads `maximized` at viewport creation on macOS
+        // (egui#3494), so a window zoomed after launch is also recognized
+        // by its outer rect filling the monitor (research R2 addendum).
+        let viewport = ctx.input(|i| i.viewport().clone());
+        if let Some(inner_rect) = viewport.inner_rect {
+            let fills_monitor = match (viewport.outer_rect, viewport.monitor_size) {
+                (Some(outer), Some(monitor)) => layout::fills_monitor(outer.size(), monitor),
+                _ => false,
+            };
+            let maximized_or_fullscreen = viewport.maximized.unwrap_or(false)
+                || viewport.fullscreen.unwrap_or(false)
+                || fills_monitor;
+            self.window_size
+                .observe(inner_rect.size(), maximized_or_fullscreen, Instant::now());
+        }
+        if let Some(size) = self.window_size.poll(Instant::now()) {
+            self.controller.set_window_inner_size(size.x, size.y);
+        }
+        if let Some(deadline) = self.window_size.next_deadline() {
+            ctx.request_repaint_after(deadline.saturating_duration_since(Instant::now()));
+        }
 
         // The Action & Binding dispatcher (007, contracts/ui-actions.md
         // §1): runs before any widget draws, consuming every key event it
@@ -335,6 +376,12 @@ impl<B: OutputBackend, H: SourceHost> eframe::App for App<B, H> {
     /// not enable the `glow` feature (default renderer is `wgpu`), so
     /// `on_exit` takes no context parameter.
     fn on_exit(&mut self) {
+        // 018-window-sizing-and-responsive-dock (contract D9, FR-003): a
+        // resize that never settled (still mid-debounce) is persisted
+        // unconditionally on exit, so it isn't lost.
+        if let Some(size) = self.window_size.flush() {
+            self.controller.set_window_inner_size(size.x, size.y);
+        }
         self.controller.shutdown();
     }
 }

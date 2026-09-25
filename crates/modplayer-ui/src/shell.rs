@@ -41,6 +41,14 @@ use crate::theme;
 /// tracked for a follow-up rather than silently left undocumented.
 pub const PLUGIN_FLOATED_WINDOW_ORDER: Order = Order::Middle;
 
+/// 018-window-sizing-and-responsive-dock, contract D1: the narrow-window
+/// dock overlay (`plugin_panels::show_overlay`) is a plain `Order::Middle`
+/// `egui::Area` too — the same layer level as a floated panel window
+/// ([`PLUGIN_FLOATED_WINDOW_ORDER`]), since it stands in for the very same
+/// docked panels a wider window would show in a `Panel::right` column, not
+/// a transient popup.
+pub const PLUGIN_DOCK_OVERLAY_ORDER: Order = Order::Middle;
+
 /// The five navigable sections (contracts/ui-surface.md §1), in the fixed
 /// left-rail display order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -9,7 +9,7 @@
 use egui::accesskit::{Role, Toggled};
 use egui::{
     Button, Color32, Context, Frame, Id, Label, LayerId, Order, Response, RichText, Sense,
-    StrokeKind, Ui, WidgetInfo, WidgetType, pos2,
+    StrokeKind, TextWrapMode, Ui, WidgetInfo, WidgetType, pos2,
 };
 
 use crate::theme::{controls, tokens};
@@ -23,7 +23,14 @@ use crate::theme::{controls, tokens};
 /// (research R4) — `hovered()`/`is_pointer_button_down_on()`, **never**
 /// `widget_state()` (I7, which folds focus into `Active`). The overlay is
 /// composited into the fill handed to `egui::Button`, so the label is
-/// never tinted (research R4, rejecting an over-paint).
+/// never tinted (research R4, rejecting an over-paint). The label is
+/// always built with `TextWrapMode::Extend` (018-window-sizing-and-
+/// responsive-dock, contracts D4/D7): a plain `ui.horizontal` already
+/// defaults to `Extend`, so this is a no-op there, but a caller that
+/// draws this inside a `horizontal_wrapped` row (a wrapping transport row,
+/// a header's overflow button row) would otherwise get `Wrap`, letting
+/// egui shrink the label's text inside the button instead of moving the
+/// whole button to the next line — never what this design system wants.
 pub fn button(ui: &mut Ui, variant: controls::Variant, text: impl Into<RichText>) -> Response {
     let roles = tokens::roles(ui.visuals());
     let paint = controls::variant_paint(roles, variant);
@@ -54,7 +61,8 @@ pub fn button(ui: &mut Ui, variant: controls::Variant, text: impl Into<RichText>
     ui.add(
         Button::new(text.into().color(paint.label))
             .fill(fill)
-            .stroke(paint.outline),
+            .stroke(paint.outline)
+            .wrap_mode(TextWrapMode::Extend),
     )
 }
 

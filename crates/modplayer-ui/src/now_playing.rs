@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use egui::{Button, RichText, Ui, Vec2};
+use egui::{Button, RichText, TextWrapMode, Ui, Vec2};
 use modplayer_audio_io::OutputBackend;
 use modplayer_audio_source::{SourceHealth, SourceHost};
 use modplayer_core::{
@@ -19,6 +19,7 @@ use modplayer_core::{
 
 use crate::artwork::{ArtworkCache, ArtworkState};
 use crate::effects_view;
+use crate::layout::{self, DockPresentation};
 use crate::markers;
 use crate::plugin_overlays::{self, ViewKind};
 use crate::plugin_panels;
@@ -57,6 +58,14 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     artwork: &mut ArtworkCache,
     waveform: &mut WaveformState,
 ) {
+    // 018-window-sizing-and-responsive-dock (contract D8, research R11,
+    // FR-012): captured as the very first statement — the `CentralPanel`
+    // inner height, unaffected by anything drawn into `ui` below (dock,
+    // scroll, wrapped rows) — and resolved once per frame into the
+    // overview/detail heights `show_waveform` allocates.
+    let waveform_h = ui.max_rect().height();
+    let (overview_height, detail_height) = layout::waveform_heights(waveform_h);
+
     // A track change drops any in-flight drag preview from the previous
     // track (data-model.md §5.2) and re-centres the detail window on the
     // new track's playhead, keeping the previous width if any
@@ -69,11 +78,32 @@ pub fn show<B: OutputBackend, H: SourceHost>(
         waveform.last_track = current_id;
     }
 
-    // 011-plugin-ui-contributions, contracts/ui-panels.md L1: the docked
-    // column must draw first, exactly like `app.rs`'s own nav rail
+    // 018-window-sizing-and-responsive-dock (contract D1, data-model.md
+    // §3): captured before anything else draws into `ui` — both
+    // `show_dock`'s docked column and `show_overlay`'s right-anchored
+    // `Area` need the Now Playing content `Ui`'s own rect, and only the
+    // former (if either runs) actually consumes `ui` below.
+    let content_rect = ui.max_rect();
+    let presentation = plugin_panels::dock_presentation(ui.ctx(), controller);
+    let mut focus_panels_toggle = plugin_panels::continue_focus_past_dock(ui.ctx(), presentation);
+
+    // 011-plugin-ui-contributions, contracts/ui-panels.md L1 (018-window-
+    // sizing-and-responsive-dock, contract D1): the docked column, when
+    // drawn, must draw first, exactly like `app.rs`'s own nav rail
     // (`Panel::left`), so the rest of this content correctly sees the
-    // narrower remaining width once at least one panel is docked.
-    plugin_panels::show_dock(ui, controller);
+    // narrower remaining width. Below 1024 pt wide it auto-hides instead
+    // (`Hidden`), reachable through the "Panels" toggle in the transport
+    // row below as a dismissible overlay (`Overlay`) drawn over this same
+    // content rect rather than narrowing it.
+    match presentation {
+        DockPresentation::Docked => plugin_panels::show_dock(ui, controller),
+        DockPresentation::Overlay => {
+            if plugin_panels::show_overlay(ui.ctx(), controller, content_rect) {
+                focus_panels_toggle = true;
+            }
+        }
+        DockPresentation::Hidden | DockPresentation::None => {}
+    }
 
     show_heading(ui, controller, artwork);
     show_status_line(ui, controller);
@@ -88,8 +118,47 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     let mut effects_open = controller.now_playing_panel_open(NowPlayingPanel::EffectChain);
     let mut transport_open = controller.now_playing_panel_open(NowPlayingPanel::Transport);
 
+    // 018-window-sizing-and-responsive-dock (contract D4, research R10,
+    // FR-013): `horizontal_wrapped` so the whole row of controls wraps to
+    // extra rows instead of overflowing/overlapping at 960 × 640 under
+    // +40 % pseudo-localized text; every `Button` is built with
+    // `TextWrapMode::Extend` so its own label is never itself elided — it
+    // is the whole control that moves to the next row, never a truncated
+    // label squeezed onto this one (`switch`'s own nested `ui.horizontal`
+    // already extends by default, contract D4).
+    // 018-window-sizing-and-responsive-dock (contract D1/D4, FR-007): the
+    // "Panels" toggle is the row's own last item, present only while the
+    // dock is auto-hidden (`Hidden`/`Overlay`) — absent at ≥ 1024 pt wide
+    // or with nothing docked (`Docked`/`None`).
+    let show_panels_toggle = matches!(
+        presentation,
+        DockPresentation::Hidden | DockPresentation::Overlay
+    );
+    let mut panels_open = plugin_panels::overlay_open(ui.ctx());
+
+    // 018-window-sizing-and-responsive-dock (contract D1, research R8/
+    // R12): while `Overlay` is open, it covers the right portion of this
+    // same content rect but, being an `Area`, never reflows `ui` itself
+    // (research R8) — so each toggle switch below pre-measures its own
+    // width and forces itself onto a fresh row whenever it would cross
+    // this boundary, keeping every one of them clear of the overlay
+    // regardless (SC-007). Every other presentation still needs the same
+    // pre-measure against the row's own right edge — `horizontal_wrapped`
+    // never wraps a `switch` by itself (its nested `ui.horizontal` is
+    // placed before its size is known), which let "Transport" run across
+    // the docked column's edge (manual walk M8, 2026-09-25).
+    // (`ui.max_rect()` is not narrowed by the nested docked `Panel`, so the
+    // docked column's edge is derived the same way as the overlay's.)
+    let wrap_boundary = match presentation {
+        DockPresentation::Overlay | DockPresentation::Docked => {
+            content_rect.right()
+                - plugin_panels::live_dock_width(ui.ctx(), controller, content_rect.width())
+        }
+        DockPresentation::Hidden | DockPresentation::None => ui.max_rect().right(),
+    };
+
     let toggled = ui
-        .horizontal(|ui| {
+        .horizontal_wrapped(|ui| {
             let playing = controller.transport_state().intent == Intent::Playing;
             let play_pause_key = if playing {
                 "transport-pause"
@@ -97,7 +166,10 @@ pub fn show<B: OutputBackend, H: SourceHost>(
                 "transport-play"
             };
             if ui
-                .add_enabled(available, Button::new(tr(play_pause_key)))
+                .add_enabled(
+                    available,
+                    Button::new(tr(play_pause_key)).wrap_mode(TextWrapMode::Extend),
+                )
                 .clicked()
             {
                 if playing {
@@ -108,46 +180,78 @@ pub fn show<B: OutputBackend, H: SourceHost>(
             }
 
             if ui
-                .add_enabled(available, Button::new(tr("transport-stop")))
+                .add_enabled(
+                    available,
+                    Button::new(tr("transport-stop")).wrap_mode(TextWrapMode::Extend),
+                )
                 .clicked()
             {
                 controller.stop();
             }
 
             if ui
-                .add_enabled(available, Button::new(tr("transport-skip-back")))
+                .add_enabled(
+                    available,
+                    Button::new(tr("transport-skip-back")).wrap_mode(TextWrapMode::Extend),
+                )
                 .clicked()
             {
                 controller.skip_back();
             }
 
             if ui
-                .add_enabled(available, Button::new(tr("transport-skip-forward")))
+                .add_enabled(
+                    available,
+                    Button::new(tr("transport-skip-forward")).wrap_mode(TextWrapMode::Extend),
+                )
                 .clicked()
             {
                 controller.skip_forward();
             }
 
+            let queue_label = tr("queue-toggle");
+            wrap_switch_before(ui, wrap_boundary, &queue_label);
             let queue_changed =
-                switch(ui, SwitchKind::Toggle, &mut queue_open, &tr("queue-toggle")).changed();
+                switch(ui, SwitchKind::Toggle, &mut queue_open, &queue_label).changed();
 
-            let effects_changed = switch(
-                ui,
-                SwitchKind::Toggle,
-                &mut effects_open,
-                &tr("effects-toggle"),
-            )
-            .changed();
+            let effects_label = tr("effects-toggle");
+            wrap_switch_before(ui, wrap_boundary, &effects_label);
+            let effects_changed =
+                switch(ui, SwitchKind::Toggle, &mut effects_open, &effects_label).changed();
 
+            let transport_label = tr("transport-toggle");
+            wrap_switch_before(ui, wrap_boundary, &transport_label);
             let transport_changed = switch(
                 ui,
                 SwitchKind::Toggle,
                 &mut transport_open,
-                &tr("transport-toggle"),
+                &transport_label,
             )
             .changed();
 
-            (queue_changed, effects_changed, transport_changed)
+            // D5/D6: focus lands here exactly when the dock/overlay just
+            // stopped being drawn (`Hidden` transition,
+            // `continue_focus_past_dock`) or an in-overlay `Escape` just
+            // closed it (`show_overlay`) — never on a widget that is no
+            // longer drawn.
+            let panels_changed = if show_panels_toggle {
+                let panels_label = tr("plugin-dock-panels-toggle");
+                wrap_switch_before(ui, wrap_boundary, &panels_label);
+                let response = switch(ui, SwitchKind::Toggle, &mut panels_open, &panels_label);
+                if focus_panels_toggle {
+                    response.request_focus();
+                }
+                response.changed()
+            } else {
+                false
+            };
+
+            (
+                queue_changed,
+                effects_changed,
+                transport_changed,
+                panels_changed,
+            )
         })
         .inner;
 
@@ -163,9 +267,22 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     if toggled.2 {
         controller.set_now_playing_panel_open(NowPlayingPanel::Transport, transport_open);
     }
+    // D5: the overlay's open flag is session-only (never persisted) —
+    // written straight to egui memory, not through the controller.
+    if toggled.3 {
+        plugin_panels::set_overlay_open(ui.ctx(), panels_open);
+    }
 
     if controller.current_track().is_some() {
-        show_waveform(ui, controller, waveform, available, track_changed);
+        show_waveform(
+            ui,
+            controller,
+            waveform,
+            available,
+            track_changed,
+            overview_height,
+            detail_height,
+        );
         markers::panel(ui, controller, waveform);
         markers::handle_focused_marker_keys(ui, controller, waveform);
     }
@@ -222,6 +339,29 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     // stay live even with no mouse/keyboard activity.
     if controller.transport_state().intent == Intent::Playing {
         ui.ctx().request_repaint_after(Duration::from_millis(16));
+    }
+}
+
+/// 018-window-sizing-and-responsive-dock (contract D1, research R8/R12):
+/// pre-measures one `switch`'s own rendered width (its track plus item
+/// spacing plus its label's galley, mirroring `widgets::controls::
+/// switch`'s own internal layout) and, if drawing it from the current
+/// cursor position would cross `boundary` (an absolute x — the overlay's
+/// own left edge, or else the row's own right edge, i.e. the docked
+/// column's left edge), forces it onto a fresh row first (`Ui::end_row`) —
+/// `horizontal_wrapped`'s own automatic wrap alone is not enough here:
+/// once *any* sibling's rect already extends past a row's original wrap
+/// bound, egui's `Ui` (which never clips content to fit) treats that as
+/// the row's new bound for everything drawn after it, so a later switch
+/// can still lay out under the overlay even though it query the same
+/// `available_width()` its earlier sibling did.
+fn wrap_switch_before(ui: &mut Ui, boundary: f32, label: &str) {
+    let metrics = theme::controls::switch_metrics();
+    let galley =
+        egui::WidgetText::from(label).into_galley(ui, None, f32::INFINITY, egui::TextStyle::Body);
+    let width = metrics.track.x + ui.spacing().item_spacing.x + galley.size().x;
+    if ui.cursor().min.x + width > boundary {
+        ui.end_row();
     }
 }
 
@@ -395,6 +535,8 @@ fn show_waveform<B: OutputBackend, H: SourceHost>(
     waveform: &mut WaveformState,
     available: bool,
     track_changed: bool,
+    overview_height: f32,
+    detail_height: f32,
 ) {
     // A Connect track always plays at 44.1 kHz; `source_sample_rate()`
     // only reports it once a `TrackStarted`/`BecameActive` has actually
@@ -496,6 +638,7 @@ fn show_waveform<B: OutputBackend, H: SourceHost>(
         playhead_frame,
         previewing,
         available,
+        overview_height,
         &overview_paint,
         &mut |painter, space| {
             markers::paint_overlay(
@@ -566,6 +709,7 @@ fn show_waveform<B: OutputBackend, H: SourceHost>(
         playhead_frame,
         previewing,
         available,
+        detail_height,
         &detail_paint,
         &mut |painter, space| {
             markers::paint_overlay(
