@@ -15,8 +15,9 @@ use modplayer_core::{PlaybackController, TrackListState, tr, tr_args};
 use crate::artwork::ArtworkCache;
 use crate::library_view::apply_row_action;
 use crate::rows::{
-    RowAction, RowEntity, RowEvent, RowSelection, entity_key, list_row, virtualized_list,
+    RowAction, RowEntity, RowEvent, RowSelection, entity_key, list_row, virtualized_list_in,
 };
+use crate::section_memory::{LibraryViewKey, SectionMemory, ViewKey};
 use crate::theme;
 use crate::widgets::skeleton::{ROW_HEIGHT, skeleton_row};
 
@@ -35,7 +36,12 @@ fn heading_text(ui: &Ui, text: &str) -> RichText {
 /// Which detail view is open (owned by `App`'s single-level detail-
 /// navigation stack, T065 — nothing in this slice links from one detail
 /// view to another).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Hash` (020-shell-navigation-and-gates, data-model.md §4): a
+/// `DetailTarget` is half of `section_memory::LibraryViewKey`'s `Detail`
+/// variant, the key type of `SectionMemory`'s offset map. `AlbumId`/
+/// `PlaylistId`/`ArtistId` are already `Hash` (`catalog.rs`'s `id_newtype!`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DetailTarget {
     Album(AlbumId),
     Playlist(PlaylistId),
@@ -61,13 +67,16 @@ pub struct DetailViewState {
 
 /// Draw one detail view: the Back control, the header, then the track list
 /// (or "This playlist has no tracks" / a loading skeleton). `state` owns
-/// this view's selection (US2).
+/// this view's selection (US2). `memory` retains the track list's own
+/// scroll offset across section round trips (020-shell-navigation-and-
+/// gates, US3, contracts/section-memory.md).
 pub fn show<B: OutputBackend, H: SourceHost>(
     ui: &mut Ui,
     controller: &mut PlaybackController<B, H>,
     artwork: &mut ArtworkCache,
     target: &DetailTarget,
     state: &mut DetailViewState,
+    memory: &mut SectionMemory,
 ) -> DetailOutcome {
     // FR-028, contract S8: a different detail target invalidates the
     // previous target's row order — the selection no longer applies.
@@ -109,13 +118,10 @@ pub fn show<B: OutputBackend, H: SourceHost>(
                 // currently show are laid out or fetch artwork, same as
                 // every other list (contracts/ui-surface.md §4/§7).
                 let mut pending: Option<(RowEntity, RowAction)> = None;
-                virtualized_list(
-                    ui,
-                    "detail-tracks",
-                    ROW_HEIGHT,
-                    tracks.len(),
-                    None,
-                    |ui, i| {
+                let view_key = ViewKey::Library(LibraryViewKey::Detail(target.clone()));
+                let scroll = memory.scroll_area(&view_key).auto_shrink([false, true]);
+                let (_, offset) =
+                    virtualized_list_in(ui, scroll, ROW_HEIGHT, tracks.len(), |ui, i| {
                         let entity = RowEntity::Track(tracks[i].clone());
                         let key = entity_key(&entity);
                         let is_selected = state.selection.is_selected("detail-tracks", key, i);
@@ -126,8 +132,8 @@ pub fn show<B: OutputBackend, H: SourceHost>(
                             }
                             Some(RowEvent::Open) | None => {}
                         }
-                    },
-                );
+                    });
+                memory.record(view_key, offset);
                 if let Some((entity, action)) = pending {
                     apply_row_action(controller, &entity, &tracks, action);
                 }

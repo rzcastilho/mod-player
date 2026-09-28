@@ -852,7 +852,7 @@ pub fn virtualized_list(
     row_height: f32,
     count: usize,
     max_height: Option<f32>,
-    mut draw_row: impl FnMut(&mut Ui, usize),
+    draw_row: impl FnMut(&mut Ui, usize),
 ) -> Range<usize> {
     let mut scroll = ScrollArea::vertical()
         .id_salt(id_salt)
@@ -860,14 +860,33 @@ pub fn virtualized_list(
     if let Some(max_height) = max_height {
         scroll = scroll.max_height(max_height);
     }
+    virtualized_list_in(ui, scroll, row_height, count, draw_row).0
+}
+
+/// The pre-configured-area core [`virtualized_list`] wraps (020-shell-
+/// navigation-and-gates, US3, contracts/section-memory.md): identical
+/// virtualisation (`ScrollArea::show_rows`, only the viewport's rows laid
+/// out), but the caller supplies the already-`id_salt`ed/`auto_shrink`ed
+/// `scroll` — typically `SectionMemory::scroll_area(&key)` — instead of this
+/// function building one from a bare `id_salt`/`max_height` pair. Returns
+/// the drawn row range (exactly as `virtualized_list` did) plus the area's
+/// vertical scroll offset this frame, for the caller to hand to
+/// `SectionMemory::record`.
+pub fn virtualized_list_in(
+    ui: &mut Ui,
+    scroll: ScrollArea,
+    row_height: f32,
+    count: usize,
+    mut draw_row: impl FnMut(&mut Ui, usize),
+) -> (Range<usize>, f32) {
     let mut visible = 0..0;
-    scroll.show_rows(ui, row_height, count, |ui, range| {
+    let output = scroll.show_rows(ui, row_height, count, |ui, range| {
         visible = range.clone();
         for i in range {
             draw_row(ui, i);
         }
     });
-    visible
+    (visible, output.state.offset.y)
 }
 
 #[cfg(test)]

@@ -582,7 +582,11 @@ fn keybindings_invalid_entries_warning_reaches_controller_notifications() {
         .unwrap_or_else(|| {
             panic!("PlaybackController::new must raise keybindings-invalid-entries")
         });
-    assert_eq!(notification.args, vec![("ids", "host.nope.x".to_string())]);
+    // 019-notification-presentation (research R11, contract C4): the
+    // dropped id now lands in `detail`, not `args` — the message itself
+    // takes no placeholder any more.
+    assert!(notification.args.is_empty());
+    assert_eq!(notification.detail.as_deref(), Some("host.nope.x"));
 }
 
 // ---------------------------------------------------------------------
@@ -739,6 +743,25 @@ proptest! {
         prop_assert_eq!(outcome.settings.schema_version, modplayer_core::settings::SCHEMA_VERSION);
     }
 
+    // 019-notification-presentation (contract K1-K4, data-model.md §5,
+    // Constitution VIII): an arbitrary non-empty, non-whitespace-only
+    // `output_device_name` round-trips through a real save/load.
+    #[test]
+    fn output_device_name_round_trip_proptest(name in "[a-zA-Z0-9 ]{1,40}") {
+        prop_assume!(!name.trim().is_empty());
+        let dir = TempDir::new();
+        let store = store_in(&dir);
+        let settings = AudioSettings {
+            output_device_name: Some(name.clone()),
+            ..AudioSettings::default()
+        };
+        prop_assert!(store.save(&settings).is_ok());
+
+        let outcome = store.load();
+        prop_assert_eq!(outcome.settings.output_device_name, Some(name));
+        prop_assert!(outcome.warnings.is_empty());
+    }
+
     // 017-high-contrast-appearance (T003, contracts/appearance-setting.md
     // A10, Constitution VIII): for an arbitrary `(Theme, bool)` pair,
     // `from_settings` -> serialize -> deserialize -> `into_settings`
@@ -860,5 +883,171 @@ fn getting_started_flag_survives_sign_out() {
     assert!(
         on_disk.contains("[onboarding]") && on_disk.contains("getting_started_dismissed = true"),
         "the persisted flag must also survive sign-out, got:\n{on_disk}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// 018-window-sizing-and-responsive-dock (contract W1, data-model.md §1):
+// `[window]` — absent defaults, out-of-range clamping, and per-key
+// silent fallback on a malformed value (W4.1-W4.3).
+// ---------------------------------------------------------------------
+
+#[test]
+fn window_section_absent_loads_defaults() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let _ = fs::write(store.path(), "schema_version = 1\n");
+
+    let outcome = store.load();
+    assert_eq!(outcome.settings.window.inner_width, 1200.0);
+    assert_eq!(outcome.settings.window.inner_height, 820.0);
+    assert_eq!(outcome.settings.window.dock_width, 280.0);
+    assert!(outcome.warnings.is_empty());
+}
+
+#[test]
+fn window_section_clamps_out_of_range_values() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let content = "schema_version = 1\n\n[window]\ninner_width = 100.0\ninner_height = 50.0\ndock_width = 10.0\n";
+    let _ = fs::write(store.path(), content);
+
+    let outcome = store.load();
+    assert_eq!(outcome.settings.window.inner_width, 960.0);
+    assert_eq!(outcome.settings.window.inner_height, 640.0);
+    assert_eq!(outcome.settings.window.dock_width, 240.0);
+    assert!(outcome.warnings.is_empty());
+
+    let too_wide_dock = "schema_version = 1\n\n[window]\ndock_width = 1000.0\n";
+    let _ = fs::write(store.path(), too_wide_dock);
+    let outcome = store.load();
+    assert_eq!(outcome.settings.window.dock_width, 480.0);
+    assert!(outcome.warnings.is_empty());
+}
+
+#[test]
+fn window_section_per_key_garbage_falls_back_silently() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+
+    for bad in ["\"wide\"", "nan", "inf", "-5", "0"] {
+        let content = format!(
+            "schema_version = 1\n\n[window]\ninner_width = {bad}\ninner_height = 820.0\ndock_width = 280.0\n"
+        );
+        let _ = fs::write(store.path(), &content);
+        let outcome = store.load();
+        assert_eq!(
+            outcome.settings.window.inner_width, 1200.0,
+            "inner_width = {bad} must fall back to the default"
+        );
+        // Other `[window]` keys in the same section are unaffected.
+        assert_eq!(outcome.settings.window.inner_height, 820.0);
+        assert_eq!(outcome.settings.window.dock_width, 280.0);
+        // Other sections are unaffected and no `InvalidField` is raised.
+        assert!(
+            outcome.warnings.is_empty(),
+            "bad value {bad} must not raise a warning"
+        );
+    }
+}
+
+#[test]
+fn window_section_round_trips_through_a_real_save_load() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let settings = AudioSettings {
+        window: modplayer_core::settings::WindowSettings {
+            inner_width: 1500.0,
+            inner_height: 900.0,
+            dock_width: 320.0,
+        },
+        ..AudioSettings::default()
+    };
+    assert!(store.save(&settings).is_ok());
+
+    let outcome = store.load();
+    assert_eq!(outcome.settings, settings);
+    assert!(outcome.warnings.is_empty());
+
+    let on_disk = fs::read_to_string(store.path()).unwrap_or_default();
+    assert!(
+        on_disk.contains("[window]")
+            && on_disk.contains("inner_width")
+            && on_disk.contains("inner_height")
+            && on_disk.contains("dock_width"),
+        "settings.toml must persist all three [window] keys, got:\n{on_disk}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// 019-notification-presentation (T021, contract K1-K7, data-model.md §5):
+// `[audio] output_device_name`.
+// ---------------------------------------------------------------------
+
+/// K1: a pre-019 file with no `output_device_name` key loads with `None`
+/// and re-saves without adding the key (K4: only ever serialized when
+/// `Some`).
+#[test]
+fn output_device_name_absent_key_loads_none_and_resave_adds_nothing() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let content =
+        "schema_version = 1\n\n[audio]\noutput_device = \"dev-1\"\ndevice_confirmed = true\n";
+    let _ = fs::write(store.path(), content);
+
+    let outcome = store.load();
+    assert_eq!(outcome.settings.output_device_name, None);
+    assert!(outcome.warnings.is_empty());
+
+    assert!(store.save(&outcome.settings).is_ok());
+    let on_disk = fs::read_to_string(store.path()).unwrap_or_default();
+    assert!(
+        !on_disk.contains("output_device_name"),
+        "a re-save with no confirmed name must not add the key, got:\n{on_disk}"
+    );
+}
+
+/// K2: an empty or whitespace-only on-disk value loads as `None`, with no
+/// `InvalidField` and no `settings-invalid-value` warning.
+#[test]
+fn output_device_name_empty_or_whitespace_loads_none_with_no_warning() {
+    for bad in ["\"\"", "\"   \""] {
+        let dir = TempDir::new();
+        let store = store_in(&dir);
+        let content = format!("schema_version = 1\n\n[audio]\noutput_device_name = {bad}\n");
+        let _ = fs::write(store.path(), &content);
+
+        let outcome = store.load();
+        assert_eq!(
+            outcome.settings.output_device_name, None,
+            "output_device_name = {bad} must load as None"
+        );
+        assert!(
+            outcome.warnings.is_empty(),
+            "output_device_name = {bad} must not raise a warning"
+        );
+    }
+}
+
+/// K3/K4: `confirm_device` persists the name in the same save as the id,
+/// and it is written to disk under `[audio]`.
+#[test]
+fn output_device_name_round_trips_through_a_real_save_load() {
+    let dir = TempDir::new();
+    let store = store_in(&dir);
+    let settings = AudioSettings {
+        output_device_name: Some("Scarlett 2i2 USB".to_string()),
+        ..AudioSettings::default()
+    };
+    assert!(store.save(&settings).is_ok());
+
+    let outcome = store.load();
+    assert_eq!(outcome.settings, settings);
+    assert!(outcome.warnings.is_empty());
+
+    let on_disk = fs::read_to_string(store.path()).unwrap_or_default();
+    assert!(
+        on_disk.contains("[audio]") && on_disk.contains("output_device_name"),
+        "settings.toml must persist output_device_name under [audio], got:\n{on_disk}"
     );
 }

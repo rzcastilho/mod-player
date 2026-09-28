@@ -579,6 +579,13 @@ fn welcome_has_exactly_one_primary() {
 /// `queue-play-next`, `queue-remove`) in `queue_view.rs`, and
 /// `queue-remove` is never paired with `Variant::Destructive` (FR-004) —
 /// a queue removal stays trivially reversible, not destructive.
+///
+/// 020-shell-navigation-and-gates (US2, T025, contracts/settings-category-
+/// row.md R7-R9) adds exactly one more `Variant::Quiet` call site: the
+/// Settings category row's "More" overflow button in
+/// `settings/category_row.rs`. B7 itself (queue_view.rs's four sites) is
+/// unchanged; this test's allow-list is widened to name both files rather
+/// than pin `queue_view.rs` as the only one.
 #[test]
 fn queue_row_actions_are_quiet() {
     let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -589,6 +596,8 @@ fn queue_row_actions_are_quiet() {
         "queue-play-next",
         "queue-remove",
     ];
+    let expected_site_count = expected_keys.len() + 1; // + settings/category_row.rs's "More".
+    let allowed_files = ["queue_view.rs", "settings/category_row.rs"];
 
     let mut quiet_sites = Vec::new();
     for path in walk_src_rs_files() {
@@ -609,15 +618,14 @@ fn queue_row_actions_are_quiet() {
 
     assert_eq!(
         quiet_sites.len(),
-        expected_keys.len(),
-        "expected exactly {} Variant::Quiet call site(s) in src/**, found {}: {quiet_sites:?}",
-        expected_keys.len(),
+        expected_site_count,
+        "expected exactly {expected_site_count} Variant::Quiet call site(s) in src/**, found {}: {quiet_sites:?}",
         quiet_sites.len()
     );
     for (rel, _idx, _line) in &quiet_sites {
-        assert_eq!(
-            rel, "queue_view.rs",
-            "every Variant::Quiet site must be in queue_view.rs, found {rel}"
+        assert!(
+            allowed_files.contains(&rel.as_str()),
+            "every Variant::Quiet site must be in {allowed_files:?}, found {rel}"
         );
     }
 

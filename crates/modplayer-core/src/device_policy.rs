@@ -51,10 +51,65 @@ pub enum DeviceResolution {
 /// A warning to raise alongside a `DeviceResolution`, if any.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeviceWarning {
-    /// The confirmed/preferred device is gone; fell back to the default.
-    MissingPreferred { device_name: String },
+    /// The confirmed/preferred device is gone; fell back to the default
+    /// (019-notification-presentation, data-model.md §3). `device_name` is
+    /// a resolved human display name (never the raw id) — `None` means no
+    /// name could be resolved and the caller substitutes a generic phrase.
+    /// `device_id` carries the raw id for `detail` (FR-013); `fallback_name`
+    /// is the fallback device's own name.
+    MissingPreferred {
+        device_name: Option<String>,
+        device_id: Option<DeviceId>,
+        fallback_name: String,
+    },
     /// No output-capable devices are available at all.
     NoDevices,
+}
+
+/// Resolve a missing preferred device's display name (019-notification-
+/// presentation, data-model.md §4, contract C5): `saved_name` (trimmed,
+/// non-empty) wins; else, when `id`'s own string is in `name:<name>` form,
+/// the trimmed, non-empty remainder; else `None` (the caller substitutes a
+/// generic phrase, e.g. `tr("notification-device-unknown")`). Never returns
+/// any other substring of the raw id — in particular, an id that is not in
+/// `name:` form never contributes to the result.
+///
+/// # Examples
+///
+/// ```
+/// use modplayer_core::device_policy::display_name_for_saved;
+/// use modplayer_engine::DeviceId;
+///
+/// let id = DeviceId::new("coreaudio:AppleUSBAudioEngine:1234").unwrap();
+/// assert_eq!(
+///     display_name_for_saved(Some(&id), Some("Scarlett 2i2")),
+///     Some("Scarlett 2i2".to_string())
+/// );
+///
+/// let legacy = DeviceId::new("name:Old Interface").unwrap();
+/// assert_eq!(
+///     display_name_for_saved(Some(&legacy), None),
+///     Some("Old Interface".to_string())
+/// );
+///
+/// assert_eq!(display_name_for_saved(Some(&id), None), None);
+/// ```
+pub fn display_name_for_saved(id: Option<&DeviceId>, saved_name: Option<&str>) -> Option<String> {
+    if let Some(saved) = saved_name {
+        let trimmed = saved.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    if let Some(id) = id
+        && let Some(remainder) = id.as_str().strip_prefix("name:")
+    {
+        let trimmed = remainder.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
 }
 
 /// Resolve which device should become active, per data-model.md §6.2's
@@ -64,9 +119,16 @@ pub enum DeviceWarning {
 /// - confirmed && present (id, then name) → `Active(preferred)`, no warning
 /// - confirmed && absent → `Active(default, is_fallback)` + `MissingPreferred`
 /// - not confirmed → `Active(default)` (preview; not a fallback), no warning
+///
+/// `saved_name` (019-notification-presentation, data-model.md §3) is the
+/// persisted `[audio] output_device_name`, threaded into
+/// `MissingPreferred.device_name` via [`display_name_for_saved`] so the
+/// warning can name the missing device without ever falling back to its
+/// raw id.
 pub fn resolve(
     devices: &[OutputDeviceInfo],
     preferred: Option<&DeviceId>,
+    saved_name: Option<&str>,
     confirmed: bool,
 ) -> (DeviceResolution, Option<DeviceWarning>) {
     if devices.is_empty() {
@@ -85,9 +147,9 @@ pub fn resolve(
         }
         // Confirmed but the preferred device (or no preference at all) is
         // absent: fall back to the default with a warning that names the
-        // *missing* device (FR-014), not the fallback. Only its id is
-        // persisted (contracts/settings-file.md), so the id is the best
-        // name available until the settings schema also stores the name.
+        // *missing* device (FR-014, FR-011) by resolved display name, not
+        // its raw id — the raw id survives only in `device_id` for the
+        // caller's `detail` (FR-013).
         return match default_device(devices) {
             Some(default) => (
                 DeviceResolution::Active {
@@ -95,9 +157,9 @@ pub fn resolve(
                     is_fallback: true,
                 },
                 Some(DeviceWarning::MissingPreferred {
-                    device_name: preferred
-                        .map(|id| id.as_str().to_string())
-                        .unwrap_or_else(|| default.name.clone()),
+                    device_name: display_name_for_saved(preferred, saved_name),
+                    device_id: preferred.cloned(),
+                    fallback_name: default.name.clone(),
                 }),
             ),
             None => (DeviceResolution::NoDevice, Some(DeviceWarning::NoDevices)),
@@ -182,7 +244,7 @@ mod tests {
 
     #[test]
     fn zero_devices_is_no_device_with_warning() {
-        let (resolution, warning) = resolve(&[], None, false);
+        let (resolution, warning) = resolve(&[], None, None, false);
         assert_eq!(resolution, DeviceResolution::NoDevice);
         assert_eq!(warning, Some(DeviceWarning::NoDevices));
     }
@@ -190,7 +252,7 @@ mod tests {
     #[test]
     fn not_confirmed_previews_default_without_warning() {
         let devices = [device("a", "A", false), device("b", "B", true)];
-        let (resolution, warning) = resolve(&devices, None, false);
+        let (resolution, warning) = resolve(&devices, None, None, false);
         assert_eq!(
             resolution,
             DeviceResolution::Active {
@@ -205,7 +267,7 @@ mod tests {
     fn confirmed_and_present_resolves_active_no_warning() {
         let devices = [device("a", "A", true), device("b", "B", false)];
         let preferred = DeviceId::new("b").unwrap_or_else(|| unreachable!());
-        let (resolution, warning) = resolve(&devices, Some(&preferred), true);
+        let (resolution, warning) = resolve(&devices, Some(&preferred), None, true);
         assert_eq!(
             resolution,
             DeviceResolution::Active {
@@ -222,7 +284,7 @@ mod tests {
         let preferred = DeviceId::new("old-id").unwrap_or_else(|| unreachable!());
         // Simulate a name-based match by using the same name as `preferred`'s id.
         let by_name = DeviceId::new("Speakers").unwrap_or_else(|| unreachable!());
-        let (resolution, _) = resolve(&devices, Some(&by_name), true);
+        let (resolution, _) = resolve(&devices, Some(&by_name), None, true);
         assert_eq!(
             resolution,
             DeviceResolution::Active {
@@ -231,7 +293,7 @@ mod tests {
             }
         );
         // A genuinely unrelated preferred id/name falls back with a warning.
-        let (resolution, warning) = resolve(&devices, Some(&preferred), true);
+        let (resolution, warning) = resolve(&devices, Some(&preferred), None, true);
         assert_eq!(
             resolution,
             DeviceResolution::Active {
@@ -249,7 +311,7 @@ mod tests {
     fn confirmed_and_absent_falls_back_to_default_with_warning() {
         let devices = [device("a", "A", true)];
         let preferred = DeviceId::new("missing").unwrap_or_else(|| unreachable!());
-        let (resolution, warning) = resolve(&devices, Some(&preferred), true);
+        let (resolution, warning) = resolve(&devices, Some(&preferred), None, true);
         assert_eq!(
             resolution,
             DeviceResolution::Active {
@@ -257,11 +319,56 @@ mod tests {
                 is_fallback: true
             }
         );
-        // FR-014: the warning names the *missing* device, not the fallback.
+        // FR-014: the warning names the *missing* device by resolved display
+        // name, never the raw id — "missing" isn't a `name:`-form id and no
+        // `saved_name` was given, so `device_name` is `None` (the caller
+        // substitutes a generic phrase); the raw id survives only in
+        // `device_id`, for `detail`.
         assert_eq!(
             warning,
             Some(DeviceWarning::MissingPreferred {
-                device_name: "missing".to_string()
+                device_name: None,
+                device_id: Some(preferred),
+                fallback_name: "A".to_string(),
+            })
+        );
+    }
+
+    /// 019-notification-presentation (data-model.md §4, contract C5): a
+    /// `saved_name` wins over a `name:`-form id, which wins over `None`.
+    #[test]
+    fn missing_preferred_prefers_saved_name_then_legacy_id_form_then_none() {
+        let devices = [device("a", "A", true)];
+
+        let plain_id = DeviceId::new("coreaudio:xyz").unwrap_or_else(|| unreachable!());
+        let (_, warning) = resolve(&devices, Some(&plain_id), Some("My Interface"), true);
+        assert_eq!(
+            warning,
+            Some(DeviceWarning::MissingPreferred {
+                device_name: Some("My Interface".to_string()),
+                device_id: Some(plain_id.clone()),
+                fallback_name: "A".to_string(),
+            })
+        );
+
+        let legacy_id = DeviceId::new("name:Old Interface").unwrap_or_else(|| unreachable!());
+        let (_, warning) = resolve(&devices, Some(&legacy_id), None, true);
+        assert_eq!(
+            warning,
+            Some(DeviceWarning::MissingPreferred {
+                device_name: Some("Old Interface".to_string()),
+                device_id: Some(legacy_id),
+                fallback_name: "A".to_string(),
+            })
+        );
+
+        let (_, warning) = resolve(&devices, Some(&plain_id), None, true);
+        assert_eq!(
+            warning,
+            Some(DeviceWarning::MissingPreferred {
+                device_name: None,
+                device_id: Some(plain_id),
+                fallback_name: "A".to_string(),
             })
         );
     }

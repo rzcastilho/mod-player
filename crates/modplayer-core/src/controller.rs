@@ -464,6 +464,11 @@ pub struct PlaybackController<B: OutputBackend, H: SourceHost> {
     /// Mirrors `settings.output_device`; never overwritten by a fallback
     /// (data-model.md §5.2).
     preferred_device: Option<DeviceId>,
+    /// Mirrors `settings.output_device_name` (019-notification-
+    /// presentation, data-model.md §5, research R10): a shadow of the
+    /// confirmed device's display name, alongside `preferred_device`, used
+    /// to name a missing preferred device without its raw id (FR-011).
+    preferred_device_name: Option<String>,
     /// Mirrors `settings.device_confirmed` (FR-002-FR-004): `false` means
     /// the Device Check screen must be shown before normal use.
     device_confirmed: bool,
@@ -712,6 +717,14 @@ pub struct PlaybackController<B: OutputBackend, H: SourceHost> {
     /// through `persist_settings`, on every `set_now_playing_panel_open`
     /// call — mirrors `getting_started_dismissed`'s own precedent above.
     now_playing_panels: crate::settings::NowPlayingPanels,
+
+    /// `[window]` shadow state (018-window-sizing-and-responsive-dock,
+    /// contract W2): seeded from `settings.window` at construction and
+    /// persisted, through `persist_settings`, on every `set_dock_width`/
+    /// `set_window_inner_size` call whose clamped result actually changes
+    /// it — mirrors `now_playing_panels`'s own shadow-state convention
+    /// above.
+    window: crate::settings::WindowSettings,
 }
 
 /// Which Now Playing block a persisted open/closed flag addresses
@@ -815,6 +828,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
             high_contrast: settings.high_contrast,
             active_device: None,
             preferred_device: settings.output_device.clone(),
+            preferred_device_name: settings.output_device_name.clone(),
             device_confirmed: settings.device_confirmed,
             stream: None,
             command_tx: None,
@@ -883,6 +897,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
             plugin_panels: settings.plugin_panels.clone(),
             getting_started_dismissed: settings.getting_started_dismissed,
             now_playing_panels: settings.now_playing_panels,
+            window: settings.window,
         };
         // 006, contracts/marker-service.md §4: resolved unconditionally at
         // construction, like `AnalysisPaths::resolve()` just above —
@@ -1696,6 +1711,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         let (resolution, warning) = device_policy::resolve(
             &devices,
             self.preferred_device.as_ref(),
+            self.preferred_device_name.as_deref(),
             self.device_confirmed,
         );
         self.raise_device_warning(warning);
@@ -2538,6 +2554,61 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         }
         let panels = self.now_playing_panels;
         self.persist_settings(|settings| settings.now_playing_panels = panels);
+    }
+
+    /// Current `[window]` shadow state (018-window-sizing-and-responsive-
+    /// dock, contract W2): read from the cached shadow state seeded at
+    /// construction, never a fresh disk read — mirrors
+    /// `now_playing_panel_open`'s own precedent above.
+    #[must_use]
+    pub fn window_settings(&self) -> crate::settings::WindowSettings {
+        self.window
+    }
+
+    /// Set the plugin dock's width, clamped to `[DOCK_WIDTH_MIN,
+    /// DOCK_WIDTH_MAX]`, and persist it only when the clamped value
+    /// differs from the shadow state (018-window-sizing-and-responsive-
+    /// dock, contract W2, FR-005): the splitter's drag-end and every
+    /// keyboard step call this same setter, so a drag and a shortcut can
+    /// never diverge. A non-finite or non-positive `width` is ignored (no
+    /// shadow update, no write).
+    pub fn set_dock_width(&mut self, width: f32) {
+        if !width.is_finite() || width <= 0.0 {
+            return;
+        }
+        let clamped = width.clamp(
+            crate::settings::DOCK_WIDTH_MIN,
+            crate::settings::DOCK_WIDTH_MAX,
+        );
+        if clamped == self.window.dock_width {
+            return;
+        }
+        self.window.dock_width = clamped;
+        let window = self.window;
+        self.persist_settings(|settings| settings.window = window);
+    }
+
+    /// Set the main window's restored inner size, clamped to at least
+    /// `MIN_INNER_SIZE`, and persist it only when the clamped result
+    /// differs from the shadow state (018-window-sizing-and-responsive-
+    /// dock, contract W2, FR-003): `App`'s debounced `WindowSizeTracker`
+    /// and its exit-time flush both call this same setter. A non-finite
+    /// or non-positive `width`/`height` is ignored (no shadow update, no
+    /// write) — the tracker never observes a maximized/fullscreen size,
+    /// but a defensive guard costs nothing.
+    pub fn set_window_inner_size(&mut self, width: f32, height: f32) {
+        if !width.is_finite() || width <= 0.0 || !height.is_finite() || height <= 0.0 {
+            return;
+        }
+        let clamped_width = width.max(crate::settings::MIN_INNER_SIZE.0);
+        let clamped_height = height.max(crate::settings::MIN_INNER_SIZE.1);
+        if clamped_width == self.window.inner_width && clamped_height == self.window.inner_height {
+            return;
+        }
+        self.window.inner_width = clamped_width;
+        self.window.inner_height = clamped_height;
+        let window = self.window;
+        self.persist_settings(|settings| settings.window = window);
     }
 
     /// The user's "Give focus" (FR-008, C8): a no-op unless `id` is a
@@ -4444,16 +4515,30 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         (u64::from(position_ms) * u64::from(self.source_sample_rate)) / 1000
     }
 
-    /// Device Check "Yes": persist `{output_device, buffer_preset,
-    /// device_confirmed = true}` and make `device` the active, non-fallback
-    /// stream (contracts data-model.md §6.3).
+    /// Device Check "Yes": persist `{output_device, output_device_name,
+    /// buffer_preset, device_confirmed = true}` and make `device` the
+    /// active, non-fallback stream (contracts data-model.md §6.3, 019-
+    /// notification-presentation contract K3/research R10). The device
+    /// list is looked up *before* saving so the confirmed device's name is
+    /// persisted in the very same save as its id; when `device` is not in
+    /// the current list, `output_device_name` is left unchanged (`None` on
+    /// a first confirm).
     pub fn confirm_device(&mut self, device: DeviceId, preset: BufferPreset) {
         self.preset = preset;
         self.preferred_device = Some(device.clone());
         self.device_confirmed = true;
 
+        let devices = self.backend.devices().unwrap_or_default();
+        let info = devices.into_iter().find(|d| d.id == device);
+        if let Some(info) = &info {
+            self.preferred_device_name = Some(info.name.clone());
+        }
+
         let mut settings = self.settings_store.load().settings;
         settings.output_device = Some(device.clone());
+        if let Some(info) = &info {
+            settings.output_device_name = Some(info.name.clone());
+        }
         settings.buffer_preset = preset;
         settings.device_confirmed = true;
         if self.settings_store.save(&settings).is_err() {
@@ -4461,8 +4546,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
                 .raise(Severity::Warning, "settings-save-failed");
         }
 
-        let devices = self.backend.devices().unwrap_or_default();
-        if let Some(info) = devices.into_iter().find(|d| d.id == device) {
+        if let Some(info) = info {
             self.open_stream_on(info, false);
         }
     }
@@ -4482,12 +4566,41 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
                 self.notifications
                     .raise(Severity::Critical, KEY_NO_OUTPUT_DEVICES);
             }
-            Some(DeviceWarning::MissingPreferred { device_name }) => {
-                self.notifications.raise_with_args(
-                    Severity::Warning,
-                    KEY_DEVICE_MISSING_AT_LAUNCH,
-                    vec![("device", device_name)],
-                );
+            Some(DeviceWarning::MissingPreferred {
+                device_name,
+                device_id,
+                fallback_name,
+            }) => {
+                // 019-notification-presentation (FR-011, FR-013, research
+                // R9, contract C4): human wording, no raw id in the
+                // message — `device_name`/`fallback_name` are resolved
+                // display names, falling back to a localised generic
+                // phrase when unresolved/empty; the raw id (when any)
+                // survives only in `detail`.
+                let device = device_name.unwrap_or_else(|| tr("notification-device-unknown"));
+                let fallback = if fallback_name.trim().is_empty() {
+                    tr("notification-device-fallback-default")
+                } else {
+                    fallback_name
+                };
+                let args = vec![("device", device), ("fallback", fallback)];
+                match device_id {
+                    Some(id) => {
+                        self.notifications.raise_with_detail(
+                            Severity::Warning,
+                            KEY_DEVICE_MISSING_AT_LAUNCH,
+                            args,
+                            id.to_string(),
+                        );
+                    }
+                    None => {
+                        self.notifications.raise_with_args(
+                            Severity::Warning,
+                            KEY_DEVICE_MISSING_AT_LAUNCH,
+                            args,
+                        );
+                    }
+                }
             }
         }
     }
@@ -4539,11 +4652,21 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
                 device,
                 lost_device_name,
             } => {
+                // 019-notification-presentation (research R9, contract C4):
+                // name the fallback too, and carry the lost device's raw id
+                // only in `detail` (FR-013).
+                let fallback_name = if device.name.trim().is_empty() {
+                    tr("notification-device-fallback-default")
+                } else {
+                    device.name.clone()
+                };
+                let detail = id.to_string();
                 self.open_stream_on(device, true);
-                self.notifications.raise_with_args(
+                self.notifications.raise_with_detail(
                     Severity::Critical,
                     KEY_DEVICE_LOST,
-                    vec![("device", lost_device_name)],
+                    vec![("device", lost_device_name), ("fallback", fallback_name)],
+                    detail,
                 );
             }
             DeviceLostOutcome::NoDeviceRemains => {
@@ -4577,10 +4700,14 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
                 && let Some(found) = device_policy::reappeared(&devices, preferred)
             {
                 active.reappearance_notified = true;
-                self.notifications.raise_with_args(
+                // 019-notification-presentation (contract C4, data-model.md
+                // §2): the reappeared device's raw id survives only in
+                // `detail` (FR-013).
+                self.notifications.raise_with_detail(
                     Severity::Info,
                     KEY_DEVICE_AVAILABLE_AGAIN,
                     vec![("device", found.name.clone())],
+                    found.id.to_string(),
                 );
             }
             return;
@@ -4592,6 +4719,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         let (resolution, _warning) = device_policy::resolve(
             &devices,
             self.preferred_device.as_ref(),
+            self.preferred_device_name.as_deref(),
             self.device_confirmed,
         );
         if let DeviceResolution::Active {
@@ -4796,15 +4924,17 @@ fn severity_for(warning: &SettingsWarning) -> Severity {
 
 /// Raise one `LoadOutcome.warnings` entry as a notification (007,
 /// contracts/keymap-settings.md: `PlaybackController::new` "raises each").
-/// `InvalidKeybindings` carries the dropped action ids as its Fluent
-/// argument; every other variant raises with no arguments as before.
+/// `InvalidKeybindings` carries the dropped action ids in `detail` (019-
+/// notification-presentation, FR-013, contract C4) rather than the message
+/// itself; every other variant raises with no arguments as before.
 fn raise_settings_warning(notifications: &mut NotificationCenter, warning: &SettingsWarning) {
     match warning {
         SettingsWarning::InvalidKeybindings(ids) => {
-            notifications.raise_with_args(
+            notifications.raise_with_detail(
                 Severity::Warning,
                 warning.message_key(),
-                vec![("ids", ids.join(", "))],
+                Vec::new(),
+                ids.join(", "),
             );
         }
         _ => {

@@ -20,9 +20,6 @@ pub use input::{MarkerKeyAction, WaveformEvent, focused_marker_key};
 pub use paint::{ColumnPaint, WaveformPaint, waveform_columns};
 pub use state::{DetailWindow, DragOrigin, DragPreview, MarkerDrag, WaveformState};
 
-/// The overview's fixed height (contracts/ui-waveform.md §1).
-pub const OVERVIEW_HEIGHT: f32 = 72.0;
-
 /// `"m:ss"` for a frame count at `sample_rate` (no leading-zero minutes,
 /// matching `now_playing.rs`'s existing `format_mmss`).
 fn format_mmss_frames(frame: u64, sample_rate: u32) -> String {
@@ -31,16 +28,19 @@ fn format_mmss_frames(frame: u64, sample_rate: u32) -> String {
 }
 
 /// Draw the whole-track waveform overview and resolve this frame's input
-/// on it (contracts/ui-waveform.md §1-4): a full-width, `OVERVIEW_HEIGHT`-
-/// tall `Sense::click_and_drag()` rect, painted via [`paint::paint`],
-/// exposed to AccessKit as `Role::Slider` named `transport-seek` with value
-/// text `m:ss / m:ss` and description `waveform-overview-desc`. `overlays`
-/// is called after the peaks/highlight and before the playhead (006,
-/// research R16, contracts/ui-markers.md §5) — 005's promised attachment
-/// point for marker lines and the loop-region span. Returns the
-/// [`WaveformResponse`] and at most one [`WaveformEvent`] for the caller
-/// (`now_playing.rs`) to apply — this module never calls
-/// `PlaybackController` itself, keeping it free of that type.
+/// on it (contracts/ui-waveform.md §1-4): a full-width, `height`-tall
+/// `Sense::click_and_drag()` rect, painted via [`paint::paint`], exposed
+/// to AccessKit as `Role::Slider` named `transport-seek` with value text
+/// `m:ss / m:ss` and description `waveform-overview-desc`. `height` is
+/// the caller's `layout::waveform_heights` result (018-window-sizing-and-
+/// responsive-dock, contract D8, FR-012) — this module no longer fixes a
+/// height itself. `overlays` is called after the peaks/highlight and
+/// before the playhead (006, research R16, contracts/ui-markers.md §5) —
+/// 005's promised attachment point for marker lines and the loop-region
+/// span. Returns the [`WaveformResponse`] and at most one
+/// [`WaveformEvent`] for the caller (`now_playing.rs`) to apply — this
+/// module never calls `PlaybackController` itself, keeping it free of
+/// that type.
 #[allow(clippy::too_many_arguments)]
 pub fn overview(
     ui: &mut Ui,
@@ -49,6 +49,7 @@ pub fn overview(
     playhead: u64,
     previewing: bool,
     enabled: bool,
+    height: f32,
     paint_data: &WaveformPaint<'_>,
     overlays: &mut dyn FnMut(&Painter, &TimeSpace),
 ) -> (WaveformResponse, Option<WaveformEvent>) {
@@ -58,7 +59,7 @@ pub fn overview(
     } else {
         Sense::hover()
     };
-    let (rect, response) = ui.allocate_exact_size(vec2(width, OVERVIEW_HEIGHT), sense);
+    let (rect, response) = ui.allocate_exact_size(vec2(width, height), sense);
     let window: Range<u64> = 0..len_frames.max(1);
     let space = TimeSpace::new(rect, window.clone(), sample_rate);
 
@@ -92,21 +93,19 @@ pub fn overview(
     (WaveformResponse { response, space }, event)
 }
 
-/// The zoomed-in detail height (contracts/ui-waveform.md §1) — taller than
-/// the overview since it is the primary navigation surface once zoomed.
-pub const DETAIL_HEIGHT: f32 = 120.0;
-
 /// Draw the zoomed waveform detail view and resolve this frame's input on
 /// it (contracts/ui-waveform.md §1-4): same `Sense::click_and_drag()` /
 /// paint / `WidgetInfo::slider` pattern as [`overview`], but scoped to
 /// `window` (the current [`DetailWindow`]'s bounds) rather than the whole
 /// track, named `waveform-detail` with description `waveform-detail-window
-/// { $start } { $end }` (contracts/ui-waveform.md §1). Returns the
-/// [`WaveformResponse`] and at most one [`WaveformEvent`] — seeks, zoom,
-/// and pan alike — for the caller to apply; this module never touches
-/// `PlaybackController` or `DetailWindow` itself. `overlays` is called
-/// after the peaks and before the playhead, same as [`overview`] (006,
-/// research R16, contracts/ui-markers.md §5).
+/// { $start } { $end }` (contracts/ui-waveform.md §1). `height` is the
+/// caller's `layout::waveform_heights` result, same as [`overview`]
+/// (018-window-sizing-and-responsive-dock, contract D8, FR-012). Returns
+/// the [`WaveformResponse`] and at most one [`WaveformEvent`] — seeks,
+/// zoom, and pan alike — for the caller to apply; this module never
+/// touches `PlaybackController` or `DetailWindow` itself. `overlays` is
+/// called after the peaks and before the playhead, same as [`overview`]
+/// (006, research R16, contracts/ui-markers.md §5).
 #[allow(clippy::too_many_arguments)]
 pub fn detail(
     ui: &mut Ui,
@@ -115,6 +114,7 @@ pub fn detail(
     playhead: u64,
     previewing: bool,
     enabled: bool,
+    height: f32,
     paint_data: &WaveformPaint<'_>,
     overlays: &mut dyn FnMut(&Painter, &TimeSpace),
 ) -> (WaveformResponse, Option<WaveformEvent>) {
@@ -124,7 +124,7 @@ pub fn detail(
     } else {
         Sense::hover()
     };
-    let (rect, response) = ui.allocate_exact_size(vec2(width, DETAIL_HEIGHT), sense);
+    let (rect, response) = ui.allocate_exact_size(vec2(width, height), sense);
     let space = TimeSpace::new(rect, window.clone(), sample_rate);
 
     if ui.is_rect_visible(rect) {

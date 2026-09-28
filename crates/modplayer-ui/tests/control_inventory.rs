@@ -204,18 +204,26 @@ fn every_boolean_control_is_a_switch() {
 
 /// **S6**: every FR-008b one-of-N selection control (data-model.md §9.3)
 /// is left exactly as it was — still a `selectable_label`/`ComboBox`
-/// option, never a `switch(...)` call. `library_view.rs`'s tab strip is
-/// the one deliberate exception: 016-list-row-and-panel-components'
-/// FR-013/contracts/tab-strip.md T1 restyles it from a filled
-/// `selectable_label` into the dedicated `widgets::controls::tab`
-/// underline widget — still not a boolean `switch(...)`, so `no_
-/// library_tab_became_a_switch` below covers it instead of this list.
+/// option, never a `switch(...)` call. `library_view.rs`'s tab strip and
+/// `shell.rs`'s nav rail are the two deliberate exceptions:
+/// 016-list-row-and-panel-components' FR-013/contracts/tab-strip.md T1
+/// restyles the tab strip into the dedicated `widgets::controls::tab`
+/// underline widget, and 020-shell-navigation-and-gates' FR-006/
+/// contracts/shell-chrome.md C6 (research R3: "016 already settled 'a
+/// stroke, never a filled accent background' for tabs") restyles the rail
+/// into `widgets::controls::nav_item` the same way — neither is a boolean
+/// `switch(...)`, so `no_library_tab_became_a_switch`/`no_nav_rail_item_
+/// became_a_switch` below cover them instead of this list.
 #[test]
 fn no_selection_control_became_a_switch() {
     // (file, an anchor line unique to the site).
     let sites: &[(&str, &str)] = &[
-        ("shell.rs", "self.section == section"),
-        ("settings/mod.rs", "screen.category == category"),
+        // 020-shell-navigation-and-gates T028 moved the category row's own
+        // selection comparison out of settings/mod.rs's old
+        // `ui.horizontal_wrapped` block and into `category_row::show`
+        // (contracts/settings-category-row.md); the site itself, and its
+        // FR-008b "still one-of-N, never a switch" guarantee, are unchanged.
+        ("settings/category_row.rs", "Button::selectable(selected"),
         ("settings/mod.rs", "tr(descriptor.category.label_key())"),
         ("settings/mod.rs", "hit.path.clone()"),
         ("settings/audio.rs", "is_selected, device.name.clone()"),
@@ -239,8 +247,10 @@ fn no_selection_control_became_a_switch() {
         let contents = &cache[*file];
         let idx = line_index(contents, anchor, file);
         assert!(
-            window_contains(contents, idx, RADIUS, "selectable_label"),
-            "{file}: expected {anchor:?} to still be a selectable_label (unconverted, FR-008b)"
+            window_contains(contents, idx, RADIUS, "selectable_label")
+                || window_contains(contents, idx, RADIUS, "Button::selectable("),
+            "{file}: expected {anchor:?} to still be a selectable_label/Button::selectable \
+             (unconverted, FR-008b)"
         );
         assert!(
             !window_contains(contents, idx, RADIUS, "switch("),
@@ -268,5 +278,27 @@ fn no_library_tab_became_a_switch() {
     assert!(
         !window_contains(&contents, idx, RADIUS, "switch("),
         "library_view.rs: the tab strip must not have become a switch(...) call (FR-008b)"
+    );
+}
+
+/// **S6 exception** (020-shell-navigation-and-gates, FR-006,
+/// contracts/shell-chrome.md C6): the nav rail is a one-of-N selection
+/// control that intentionally left `selectable_label` behind — for a
+/// dedicated navigation-indicator widget, not a boolean `switch`. Pins the
+/// same negative half of S6 (never `switch(...)`) plus the positive fact
+/// that replaces it (`widgets::controls::nav_item`).
+#[test]
+fn no_nav_rail_item_became_a_switch() {
+    let contents = read("shell.rs");
+    let idx = line_index(&contents, "self.section == section", "shell.rs");
+    const RADIUS: usize = 5;
+    assert!(
+        window_contains(&contents, idx, RADIUS, "nav_item("),
+        "shell.rs: expected \"self.section == section\" to route through the \
+         nav_item widget (020 FR-006)"
+    );
+    assert!(
+        !window_contains(&contents, idx, RADIUS, "switch("),
+        "shell.rs: the nav rail must not have become a switch(...) call (FR-008b)"
     );
 }

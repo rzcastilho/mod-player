@@ -293,7 +293,13 @@ fn render_library<H: SourceHost>(
     ctx.enable_accesskit();
     let mut outcome = LibraryOutcome::None;
     let output = ctx.run_ui(default_input(), |ui| {
-        outcome = library_view::show(ui, controller, artwork, state);
+        outcome = library_view::show(
+            ui,
+            controller,
+            artwork,
+            state,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
     (collect_nodes(&ctx, output), outcome)
 }
@@ -309,7 +315,14 @@ fn render_detail(
     let mut outcome = DetailOutcome::None;
     let mut state = detail_view::DetailViewState::default();
     let output = ctx.run_ui(input, |ui| {
-        outcome = detail_view::show(ui, controller, artwork, target, &mut state);
+        outcome = detail_view::show(
+            ui,
+            controller,
+            artwork,
+            target,
+            &mut state,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
     (collect_nodes(&ctx, output), outcome)
 }
@@ -373,7 +386,13 @@ fn tabs_render_in_the_fixed_order() {
     let ctx = Context::default();
     ctx.enable_accesskit();
     let mut output = ctx.run_ui(default_input(), |ui| {
-        let _ = library_view::show(ui, &mut controller, &mut artwork, &mut state);
+        let _ = library_view::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut state,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
     let update = output
         .platform_output
@@ -472,7 +491,13 @@ fn active_tab_paints_a_stroke_not_a_filled_accent_rect() {
         let roles = theme::tokens::for_dark_mode(dark_mode);
 
         let output = ctx.run_ui(default_input(), |ui| {
-            let _ = library_view::show(ui, &mut controller, &mut artwork, &mut state);
+            let _ = library_view::show(
+                ui,
+                &mut controller,
+                &mut artwork,
+                &mut state,
+                &mut modplayer_ui::section_memory::SectionMemory::default(),
+            );
         });
 
         let has_accent_filled_rect = output.shapes.iter().any(
@@ -594,6 +619,92 @@ fn a_tabs_count_is_its_own_list_length_and_updates_as_it_grows() {
     );
 }
 
+/// **L3** (contracts/library-tab-counts.md, US4/FR-013/FR-014): after the
+/// in-memory list changes for a set that was genuinely empty — Saved
+/// Albums `0` → `2` via a background sync page — the next drawn frame
+/// shows `2` beside Saved Albums, without that tab ever being selected.
+/// T7 above proves the same update mechanism for Saved Tracks growing
+/// `1` → `2`; this proves it starting from a real `0` (distinguishing
+/// "just synced empty" from "not yet known", per L2) and for a different
+/// `LibrarySet`, matching the contract's own example verbatim.
+#[test]
+fn saved_albums_count_updates_from_zero_after_a_sync_page() {
+    let (mut controller, handle, _dir) = active_controller("tab-count-albums-from-zero");
+    sync_library(&mut controller, &handle, vec![], vec![], vec![], vec![]);
+    assert_eq!(controller.library().saved_albums().len(), 0);
+
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+    let mut artwork = ArtworkCache::new();
+    let mut state = LibraryViewState::default();
+
+    let digit_at = |ctx: &Context,
+                    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+                    artwork: &mut ArtworkCache,
+                    state: &mut LibraryViewState| {
+        let mut output = ctx.run_ui(default_input(), |ui| {
+            let _ = library_view::show(
+                ui,
+                controller,
+                artwork,
+                state,
+                &mut modplayer_ui::section_memory::SectionMemory::default(),
+            );
+        });
+        let update = output
+            .platform_output
+            .accesskit_update
+            .take()
+            .expect("accesskit_update should be populated once enabled");
+        let counts: Vec<String> = labels_in_tree_order(&update, Role::Label)
+            .into_iter()
+            .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+            .collect();
+        output.drop_without_applying_deltas();
+        counts
+    };
+
+    let counts = digit_at(&ctx, &mut controller, &mut artwork, &mut state);
+    assert_eq!(
+        counts.get(1).map(String::as_str),
+        Some("0"),
+        "Saved Albums (second tab, fixed order) must show 0 once loaded, \
+         not hide the count: {counts:?}"
+    );
+
+    sync_library(
+        &mut controller,
+        &handle,
+        vec![],
+        vec![
+            LibraryItem::Album {
+                album: album("spotify:album:a", "Album A"),
+                added_at: None,
+            },
+            LibraryItem::Album {
+                album: album("spotify:album:b", "Album B"),
+                added_at: None,
+            },
+        ],
+        vec![],
+        vec![],
+    );
+    assert_eq!(controller.library().saved_albums().len(), 2);
+
+    let counts = digit_at(&ctx, &mut controller, &mut artwork, &mut state);
+    assert_eq!(
+        counts.get(1).map(String::as_str),
+        Some("2"),
+        "Saved Albums must show 2 on the next drawn frame after the sync page, \
+         with the tab never selected: {counts:?}"
+    );
+    assert_eq!(
+        state.tab,
+        LibraryTab::SavedTracks,
+        "Saved Albums' count updated without ever selecting that tab"
+    );
+}
+
 /// **T8** (FR-015): a tab count renders through `theme::mono_text`.
 #[test]
 fn tab_counts_render_in_the_mono_role() {
@@ -614,7 +725,13 @@ fn tab_counts_render_in_the_mono_role() {
     let mut state = LibraryViewState::default();
     let ctx = Context::default();
     let output = ctx.run_ui(default_input(), |ui| {
-        let _ = library_view::show(ui, &mut controller, &mut artwork, &mut state);
+        let _ = library_view::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut state,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
 
     let mono_family = theme::tokens::mono_font_id().family;
@@ -797,12 +914,24 @@ fn selecting_a_row_then_switching_tabs_clears_the_selection() {
     ctx.enable_accesskit();
 
     let discover = ctx.run_ui(default_input(), |ui| {
-        let _ = library_view::show(ui, &mut controller, &mut artwork, &mut state);
+        let _ = library_view::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut state,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
     let row_center = find_node_center(discover, Role::ListItem, "Track A — Artist");
 
     click_at(&ctx, row_center, |ui| {
-        let _ = library_view::show(ui, &mut controller, &mut artwork, &mut state);
+        let _ = library_view::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut state,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
     assert_ne!(
         state.selection,
@@ -811,12 +940,24 @@ fn selecting_a_row_then_switching_tabs_clears_the_selection() {
     );
 
     let discover_tab = ctx.run_ui(default_input(), |ui| {
-        let _ = library_view::show(ui, &mut controller, &mut artwork, &mut state);
+        let _ = library_view::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut state,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
     let tab_center = find_node_center(discover_tab, Role::Tab, &tr("library-tab-saved-albums"));
 
     click_at(&ctx, tab_center, |ui| {
-        let _ = library_view::show(ui, &mut controller, &mut artwork, &mut state);
+        let _ = library_view::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut state,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
     assert_eq!(
         state.tab,
@@ -849,7 +990,13 @@ fn skeleton_rows_expose_no_list_item_and_never_select() {
     ctx.enable_accesskit();
 
     let discover = ctx.run_ui(default_input(), |ui| {
-        let _ = library_view::show(ui, &mut controller, &mut artwork, &mut state);
+        let _ = library_view::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut state,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
     let update = discover
         .platform_output
@@ -879,7 +1026,13 @@ fn skeleton_rows_expose_no_list_item_and_never_select() {
     let skeleton_point = Pos2::new(10.0, tab_bottom + 5.0);
 
     click_at(&ctx, skeleton_point, |ui| {
-        let _ = library_view::show(ui, &mut controller, &mut artwork, &mut state);
+        let _ = library_view::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut state,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
     assert_eq!(
         state.selection,
@@ -1286,7 +1439,14 @@ fn album_detail_shows_header_and_tracks_in_album_order() {
     let mut outcome = DetailOutcome::None;
     let mut state = detail_view::DetailViewState::default();
     let mut output = ctx.run_ui(default_input(), |ui| {
-        outcome = detail_view::show(ui, &mut controller, &mut artwork, &target, &mut state);
+        outcome = detail_view::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &target,
+            &mut state,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
     let _ = outcome;
     let update = output
@@ -1572,7 +1732,13 @@ fn render_library_frame(
     input: &RawInput,
 ) {
     let mut output = ctx.run_ui(input.clone(), |ui| {
-        let _ = library_view::show(ui, controller, artwork, state);
+        let _ = library_view::show(
+            ui,
+            controller,
+            artwork,
+            state,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
     let _ = output.platform_output.accesskit_update.take();
     output.drop_without_applying_deltas();
@@ -1591,7 +1757,13 @@ fn time_library_frame(
 ) -> (usize, std::time::Duration) {
     let started = Instant::now();
     let mut output = ctx.run_ui(input.clone(), |ui| {
-        let _ = library_view::show(ui, controller, artwork, state);
+        let _ = library_view::show(
+            ui,
+            controller,
+            artwork,
+            state,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
     let elapsed = started.elapsed();
     let update = output
@@ -1637,7 +1809,13 @@ fn render_library_with_card(
         if !controller.getting_started_dismissed() {
             card_outcome = getting_started::show(ui);
         }
-        let _ = library_view::show(ui, controller, artwork, state);
+        let _ = library_view::show(
+            ui,
+            controller,
+            artwork,
+            state,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
     (collect_nodes(&ctx, output), card_outcome)
 }

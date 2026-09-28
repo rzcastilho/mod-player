@@ -18,6 +18,11 @@ settings-cat-about = About
 settings-search = Search settings
 placeholder-settings-category = This category has no settings yet in this update.
 
+## 020-shell-navigation-and-gates (US2, contracts/settings-category-row.md
+## R7): the overflow control for the category row at narrow window widths.
+settings-more = More
+settings-more-a11y = More settings categories
+
 ## 011-plugin-ui-contributions (US4 T104, contracts/overlays-settings-
 ## notify.md §2 "S2"/"S6"): the Plugins category's own settings-page list
 ## and its per-plugin sub-page.

@@ -295,6 +295,27 @@ fn text_on_accent_still_pairs_with_the_high_contrast_accent() {
     }
 }
 
+// ---------------------------------------------------------------------
+// 020-shell-navigation-and-gates (US3, contracts/shell-chrome.md C7):
+// nav_indicator ≥ 3:1 against the rail's own surface, in every role set.
+// ---------------------------------------------------------------------
+
+/// C7: `nav_indicator(roles).color` vs `roles.surface_base` measures at
+/// least 3.0:1 for `LIGHT`, `DARK`, and both high-contrast role sets (the
+/// rail's `Panel::left` fill is `panel_fill` == `surface_base`).
+#[test]
+fn nav_indicator_clears_the_non_text_floor_against_the_rail_surface() {
+    use modplayer_ui::theme::controls::nav_indicator;
+
+    for roles in [&LIGHT, &DARK, &LIGHT_HIGH_CONTRAST, &DARK_HIGH_CONTRAST] {
+        let measured = ratio(nav_indicator(roles).color, roles.surface_base);
+        assert!(
+            measured >= NON_TEXT_FLOOR,
+            "nav_indicator vs surface_base = {measured:.2}, floor {NON_TEXT_FLOOR}"
+        );
+    }
+}
+
 #[test]
 fn ratio_matches_the_wcag_reference() {
     assert!((ratio(Color32::WHITE, Color32::WHITE) - 1.0).abs() < 1e-3);

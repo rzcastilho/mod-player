@@ -126,7 +126,18 @@ fn main() -> anyhow::Result<()> {
     let mut account = AccountService::new(secure_store, auth_service, clock, config_dir);
     account.launch();
 
-    let native_options = eframe::NativeOptions::default();
+    // 018-window-sizing-and-responsive-dock (contract W3, FR-001/FR-002):
+    // restore the persisted inner size (or the 1200x820 default) and
+    // enforce a 960x640 minimum; no position/maximized/fullscreen is set,
+    // leaving that to the OS/window manager.
+    let w = controller.window_settings();
+    let native_options = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_title("ModPlayer")
+            .with_inner_size([w.inner_width, w.inner_height])
+            .with_min_inner_size([960.0, 640.0]),
+        ..Default::default()
+    };
     eframe::run_native(
         "ModPlayer",
         native_options,

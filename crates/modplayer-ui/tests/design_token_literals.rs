@@ -431,6 +431,31 @@ fn no_separator_between_panels() {
     }
 }
 
+/// T015 (US3, Phase 5): `notifications.rs`'s new severity-colour/accent-bar
+/// code (`severity_color`, the `Frame`/`painter.rect_filled` call site)
+/// needs no scan carve-out — `scan_roots`/`collect_rs_files` already walk
+/// every `.rs` file directly under this crate's `src/` (only `theme/` and
+/// `tests/` are excluded, S3.1/S3.2), so `notifications.rs` was already
+/// covered before this phase touched it. This pins that fact: if a future
+/// change ever moved the module under an excluded directory, this test —
+/// not a silently-widened `EXPECTED_BASELINE_HITS` — is what would catch
+/// it.
+#[test]
+fn notifications_module_is_covered_by_the_literal_scan() {
+    let files = scan_all_files();
+    let covered = files.iter().any(|p| {
+        p.file_name().and_then(|n| n.to_str()) == Some("notifications.rs")
+            && p.parent()
+                .and_then(|d| d.file_name())
+                .and_then(|n| n.to_str())
+                == Some("src")
+    });
+    assert!(
+        covered,
+        "expected crates/modplayer-ui/src/notifications.rs among the scanned files"
+    );
+}
+
 /// S6 self-check: a broken walk (wrong path, both roots resolving to the
 /// same directory, an early return swallowing every entry) must never
 /// yield a vacuous pass.

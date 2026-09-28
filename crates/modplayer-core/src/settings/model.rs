@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use super::window::{self, WindowSettings};
 use crate::actions::{Chord, HostAction, KeymapOverrides};
 use crate::plugins::FocusPolicy;
 
@@ -100,6 +101,13 @@ impl DisclosureAcknowledgement {
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioSettings {
     pub output_device: Option<DeviceId>,
+    /// `[audio] output_device_name` (019-notification-presentation,
+    /// contract K1-K7, data-model.md §5): the confirmed device's display
+    /// name, written only by `PlaybackController::confirm_device` alongside
+    /// `output_device`. `None` when absent, or when the on-disk value is
+    /// empty/whitespace-only (no `InvalidField`, no warning) — a display
+    /// hint, never used to match or select a device.
+    pub output_device_name: Option<String>,
     pub device_confirmed: bool,
     pub buffer_preset: BufferPreset,
     pub limiter_ceiling_db: CeilingDb,
@@ -147,6 +155,12 @@ pub struct AudioSettings {
     /// today's `unwrap_or(false)` egui-memory lookups. Markers has no
     /// toggle (FR-021) and is not represented here.
     pub now_playing_panels: NowPlayingPanels,
+    /// `[window]` (018-window-sizing-and-responsive-dock, contract W1/W2):
+    /// the main window's restored inner size and the plugin dock's width.
+    /// Absent section (or any individual invalid key within it) falls
+    /// back to [`WindowSettings::default`] field-by-field — see
+    /// `settings/window.rs`.
+    pub window: WindowSettings,
     pub schema_version: u32,
 }
 
@@ -154,6 +168,7 @@ impl Default for AudioSettings {
     fn default() -> Self {
         Self {
             output_device: None,
+            output_device_name: None,
             device_confirmed: false,
             buffer_preset: BufferPreset::default(),
             limiter_ceiling_db: CeilingDb::default(),
@@ -170,6 +185,7 @@ impl Default for AudioSettings {
             plugin_panels: BTreeMap::new(),
             getting_started_dismissed: false,
             now_playing_panels: NowPlayingPanels::default(),
+            window: WindowSettings::default(),
             schema_version: SCHEMA_VERSION,
         }
     }
@@ -331,6 +347,11 @@ pub struct RawSettings {
     /// load every panel closed.
     #[serde(default)]
     pub now_playing_panels: RawNowPlayingPanels,
+    /// `[window]` (018-window-sizing-and-responsive-dock, contract W1): an
+    /// optional table so older files (with no such section) load the
+    /// default size/dock width.
+    #[serde(default)]
+    pub window: RawWindow,
 }
 
 fn default_schema_version() -> u32 {
@@ -351,6 +372,7 @@ impl Default for RawSettings {
             plugin_panels: BTreeMap::new(),
             onboarding: RawOnboarding::default(),
             now_playing_panels: RawNowPlayingPanels::default(),
+            window: RawWindow::default(),
         }
     }
 }
@@ -432,6 +454,11 @@ fn default_focus_policy() -> String {
 pub struct RawAudio {
     #[serde(default)]
     pub output_device: Option<String>,
+    /// 019-notification-presentation (contract K4): only ever serialized
+    /// when `Some` — a pre-019 file re-saved without a confirm keeps no
+    /// `output_device_name` key at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_device_name: Option<String>,
     #[serde(default)]
     pub device_confirmed: bool,
     #[serde(default = "default_buffer_preset")]
@@ -448,6 +475,7 @@ impl Default for RawAudio {
     fn default() -> Self {
         Self {
             output_device: None,
+            output_device_name: None,
             device_confirmed: false,
             buffer_preset: default_buffer_preset(),
             limiter_ceiling_db: default_ceiling(),
@@ -558,6 +586,21 @@ pub struct RawNowPlayingPanels {
     pub queue_open: bool,
 }
 
+/// The `[window]` section's wire shape (018-window-sizing-and-responsive-
+/// dock, contract W1): every field independently optional and permissive
+/// (`Option<toml::Value>`, mirroring `RawAppearance::high_contrast`'s own
+/// pattern above) so a malformed value falls back to its own default in
+/// `into_settings` without failing the whole file.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RawWindow {
+    #[serde(default)]
+    pub inner_width: Option<toml::Value>,
+    #[serde(default)]
+    pub inner_height: Option<toml::Value>,
+    #[serde(default)]
+    pub dock_width: Option<toml::Value>,
+}
+
 impl RawSettings {
     /// Serialize `settings` to its wire form.
     pub fn from_settings(settings: &AudioSettings) -> Self {
@@ -568,6 +611,7 @@ impl RawSettings {
                     .output_device
                     .as_ref()
                     .map(|id| id.as_str().to_string()),
+                output_device_name: settings.output_device_name.clone(),
                 device_confirmed: settings.device_confirmed,
                 buffer_preset: match settings.buffer_preset {
                     BufferPreset::Performance => "performance",
@@ -659,6 +703,13 @@ impl RawSettings {
                 transport_open: settings.now_playing_panels.transport_open,
                 queue_open: settings.now_playing_panels.queue_open,
             },
+            // Contract W1: save always writes all three `[window]` keys
+            // with the current (already-clamped) shadow values.
+            window: RawWindow {
+                inner_width: Some(toml::Value::Float(f64::from(settings.window.inner_width))),
+                inner_height: Some(toml::Value::Float(f64::from(settings.window.inner_height))),
+                dock_width: Some(toml::Value::Float(f64::from(settings.window.dock_width))),
+            },
         }
     }
 
@@ -743,6 +794,15 @@ impl RawSettings {
 
         let output_device = self.audio.output_device.and_then(DeviceId::new);
 
+        // K2: empty/whitespace-only -> `None`, no `InvalidField`, no
+        // warning — a display hint, not a validated value (019-
+        // notification-presentation, contract K1/K2). Only the emptiness
+        // check trims; a non-blank value round-trips byte-for-byte.
+        let output_device_name = self
+            .audio
+            .output_device_name
+            .filter(|s| !s.trim().is_empty());
+
         // `acknowledged_version == 0` means never acknowledged
         // (data-model.md §1.1); an unparseable/absent timestamp on an
         // otherwise-acknowledged record still counts as acknowledged
@@ -809,8 +869,18 @@ impl RawSettings {
             }
         }
 
+        // 018-window-sizing-and-responsive-dock (contract W1): each key
+        // validates independently and silently — no `InvalidField`
+        // variant, matching `nudge_step_ms`'s own silent-clamp precedent.
+        let window = WindowSettings {
+            inner_width: window::sanitize_inner_width(self.window.inner_width.as_ref()),
+            inner_height: window::sanitize_inner_height(self.window.inner_height.as_ref()),
+            dock_width: window::sanitize_dock_width(self.window.dock_width.as_ref()),
+        };
+
         let settings = AudioSettings {
             output_device,
+            output_device_name,
             device_confirmed: self.audio.device_confirmed,
             buffer_preset,
             limiter_ceiling_db: CeilingDb::from_f64(self.audio.limiter_ceiling_db),
@@ -834,6 +904,7 @@ impl RawSettings {
                 transport_open: self.now_playing_panels.transport_open,
                 queue_open: self.now_playing_panels.queue_open,
             },
+            window,
             schema_version: self.schema_version,
         };
 

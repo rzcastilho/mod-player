@@ -86,4 +86,4 @@ controls-reject-mac-control = Use ⌘ instead of Control
 controls-reject-modifier-only = Press a key, not just a modifier
 controls-reject-duplicate = Already bound to this action
 
-keybindings-invalid-entries = Some saved keyboard shortcuts could not be read and were dropped: { $ids }
+keybindings-invalid-entries = Some saved keyboard shortcuts couldn't be read and were reset to their defaults.

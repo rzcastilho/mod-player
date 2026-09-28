@@ -269,7 +269,7 @@ fn e_and_header_toggle_panel_and_it_survives_track_change() {
                  artwork: &mut ArtworkCache,
                  waveform: &mut WaveformState| {
         render_nodes_on(&ctx, |ui| {
-            modplayer_ui::now_playing::show(ui, controller, artwork, waveform)
+            modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0)
         })
         .iter()
         .filter_map(|node| node.accessible_name().map(str::to_string))
@@ -301,7 +301,7 @@ fn e_and_header_toggle_panel_and_it_survives_track_change() {
 
     // The header toggle button closes it again.
     let nodes = render_nodes_on(&ctx, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     let bounds = find_one(&nodes, Role::Button, &tr("effects-toggle"))
         .bounds
@@ -314,7 +314,7 @@ fn e_and_header_toggle_panel_and_it_survives_track_change() {
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(press, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     output.drop_without_applying_deltas();
     let mut release = default_input();
@@ -325,7 +325,7 @@ fn e_and_header_toggle_panel_and_it_survives_track_change() {
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(release, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     output.drop_without_applying_deltas();
 
@@ -932,7 +932,7 @@ fn click_on_waveform_takes_focus_so_plus_zooms() {
     let mut waveform = WaveformState::default();
 
     let nodes = render_nodes_on(&ctx, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     // The overview strip is the top-most `Slider` on the screen.
     let mut sliders: Vec<Rect> = nodes
@@ -962,7 +962,7 @@ fn click_on_waveform_takes_focus_so_plus_zooms() {
             modifiers: Modifiers::default(),
         });
         let output = ctx.run_ui(input, |ui| {
-            modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+            modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
         });
         output.drop_without_applying_deltas();
     }
@@ -984,7 +984,7 @@ fn click_on_waveform_takes_focus_so_plus_zooms() {
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(plus, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     output.drop_without_applying_deltas();
     let after = waveform.detail.expect("detail window still exists");

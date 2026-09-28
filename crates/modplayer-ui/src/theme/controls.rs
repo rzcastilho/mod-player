@@ -136,6 +136,25 @@ pub fn tab_underline(roles: &Roles) -> Stroke {
 /// The underline's thickness (FR-034) — never a literal at the call site.
 pub const TAB_UNDERLINE_WIDTH: f32 = 2.0;
 
+/// The nav rail's selected-item leading-edge indicator (020-shell-
+/// navigation-and-gates, US3, FR-006, contracts/shell-chrome.md C6/C7,
+/// research.md R3): a stroke, never a filled background — mirrors
+/// [`focus_ring`]'s and [`tab_underline`]'s "accent colour, width by
+/// contrast mode" selector pattern.
+pub fn nav_indicator(roles: &Roles) -> Stroke {
+    let width = if roles.high_contrast {
+        NAV_INDICATOR_WIDTH_HIGH_CONTRAST
+    } else {
+        NAV_INDICATOR_WIDTH
+    };
+    Stroke::new(width, roles.accent)
+}
+
+/// [`nav_indicator`]'s normal-mode width.
+pub const NAV_INDICATOR_WIDTH: f32 = 3.0;
+/// [`nav_indicator`]'s high-contrast width (mirrors [`FOCUS_RING_WIDTH_HIGH_CONTRAST`]).
+pub const NAV_INDICATOR_WIDTH_HIGH_CONTRAST: f32 = 4.0;
+
 // ---------------------------------------------------------------------
 // §5 — The switch (FR-007)
 // ---------------------------------------------------------------------
@@ -265,7 +284,7 @@ pub fn mark_color(roles: &Roles, filled: bool) -> Color32 {
 mod tests {
     use super::*;
     use crate::theme::style::build_style;
-    use crate::theme::tokens::{DARK, LIGHT};
+    use crate::theme::tokens::{DARK, DARK_HIGH_CONTRAST, LIGHT, LIGHT_HIGH_CONTRAST};
     use egui::Theme as EguiTheme;
 
     // -------------------------------------------------------------
@@ -499,6 +518,27 @@ mod tests {
         for roles in [&LIGHT, &DARK] {
             let stroke = tab_underline(roles);
             assert_eq!(stroke.width, TAB_UNDERLINE_WIDTH);
+            assert_eq!(stroke.color, roles.accent);
+        }
+    }
+
+    // -------------------------------------------------------------
+    // T037 — NAV_INDICATOR_WIDTH{,_HIGH_CONTRAST} / nav_indicator
+    // (020-shell-navigation-and-gates, contracts/shell-chrome.md C6/C7)
+    // -------------------------------------------------------------
+
+    #[test]
+    fn nav_indicator_is_accent_stroke_widened_by_contrast_mode() {
+        for roles in [&LIGHT, &DARK] {
+            let stroke = nav_indicator(roles);
+            assert_eq!(stroke.width, NAV_INDICATOR_WIDTH);
+            assert_eq!(stroke.width, 3.0);
+            assert_eq!(stroke.color, roles.accent);
+        }
+        for roles in [&LIGHT_HIGH_CONTRAST, &DARK_HIGH_CONTRAST] {
+            let stroke = nav_indicator(roles);
+            assert_eq!(stroke.width, NAV_INDICATOR_WIDTH_HIGH_CONTRAST);
+            assert_eq!(stroke.width, 4.0);
             assert_eq!(stroke.color, roles.accent);
         }
     }

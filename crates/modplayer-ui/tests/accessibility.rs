@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use egui::accesskit::{Role, Toggled};
-use egui::{Context, Event, Key, Modifiers, Pos2, RawInput, Rect};
+use egui::{Context, Event, Key, Modifiers, PointerButton, Pos2, RawInput, Rect};
 use modplayer_audio_io::{FakeBackend, FakeDevice};
 use modplayer_audio_source::{
     ArtistId, ArtistRef, Availability, CatalogError, LibraryItem, LibraryPage, LibrarySet, Repeat,
@@ -38,6 +38,7 @@ use modplayer_ui::detail_view::{self, DetailTarget};
 use modplayer_ui::getting_started;
 use modplayer_ui::library_view::{self, LibraryTab, LibraryViewState};
 use modplayer_ui::settings::controls::{self, ControlsScreen};
+use modplayer_ui::shell::{Section, Shell};
 use modplayer_ui::waveform::WaveformState;
 
 /// 014-design-tokens-and-type-scale (US2, T021-T024/T030-T033): a bare
@@ -194,6 +195,9 @@ struct AccessNode {
     selected: Option<bool>,
     disabled: bool,
     labelled_by_something: bool,
+    /// T024 (US4): a node's screen rect, needed to click "Show more"/
+    /// "Details" and re-render to see their toggled-on labels.
+    bounds: Option<Rect>,
 }
 
 impl AccessNode {
@@ -213,7 +217,19 @@ impl AccessNode {
 fn render_nodes(render: impl FnMut(&mut egui::Ui)) -> Vec<AccessNode> {
     let ctx = fresh_ctx();
     ctx.enable_accesskit();
-    let mut output = ctx.run_ui(default_input(), render);
+    render_nodes_on(&ctx, default_input(), render)
+}
+
+/// Same as [`render_nodes`], but on a caller-supplied `Context`/`RawInput`
+/// (T024, US4): reused across frames so a click's press and release land
+/// on the same widget ids and memory — a fresh `Context` each frame, as
+/// `render_nodes` uses, cannot register a click at all.
+fn render_nodes_on(
+    ctx: &Context,
+    input: RawInput,
+    mut render: impl FnMut(&mut egui::Ui),
+) -> Vec<AccessNode> {
+    let mut output = ctx.run_ui(input, |ui| render(ui));
     let update = output
         .platform_output
         .accesskit_update
@@ -233,8 +249,38 @@ fn render_nodes(render: impl FnMut(&mut egui::Ui)) -> Vec<AccessNode> {
             selected: node.is_selected(),
             disabled: node.is_disabled(),
             labelled_by_something: !node.labelled_by().is_empty(),
+            bounds: node.bounds().map(|b| {
+                Rect::from_min_max(
+                    Pos2::new(b.x0 as f32, b.y0 as f32),
+                    Pos2::new(b.x1 as f32, b.y1 as f32),
+                )
+            }),
         })
         .collect()
+}
+
+/// Press then release the primary button at `pos`, on the same `ctx`
+/// (T024; mirrors `tests/notification_stack.rs`'s own `click`).
+fn click_at(ctx: &Context, pos: Pos2, mut render: impl FnMut(&mut egui::Ui)) {
+    let mut press = default_input();
+    press.events.push(Event::PointerButton {
+        pos,
+        button: PointerButton::Primary,
+        pressed: true,
+        modifiers: Modifiers::default(),
+    });
+    let output = ctx.run_ui(press, |ui| render(ui));
+    output.drop_without_applying_deltas();
+
+    let mut release = default_input();
+    release.events.push(Event::PointerButton {
+        pos,
+        button: PointerButton::Primary,
+        pressed: false,
+        modifiers: Modifiers::default(),
+    });
+    let output = ctx.run_ui(release, |ui| render(ui));
+    output.drop_without_applying_deltas();
 }
 
 /// Every node of `role` whose accessible name equals `name`, most recently
@@ -267,7 +313,7 @@ fn transport_controls_expose_accessible_names() {
     let mut waveform = WaveformState::default();
 
     let nodes = render_nodes(|ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
 
     // Play/pause, stop, skip back/forward, and the Queue toggle are plain
@@ -306,7 +352,7 @@ fn transport_controls_are_disabled_when_playback_is_not_permitted() {
     let mut waveform = WaveformState::default();
 
     let nodes = render_nodes(|ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     let play = find_one(&nodes, Role::Button, &tr("transport-play"));
     assert!(
@@ -609,7 +655,7 @@ fn transfer_banner_play_here_button_exposes_its_accessible_name() {
     let mut waveform = WaveformState::default();
 
     let nodes = render_nodes(|ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     let play_here = find_one(&nodes, Role::Button, &tr("banner-play-here"));
     assert!(
@@ -671,13 +717,120 @@ fn notification_action_buttons_expose_accessible_names() {
         ],
     );
 
+    let mut stack_state = modplayer_ui::notifications::StackState::default();
     let nodes = render_nodes(|ui| {
-        let _ = modplayer_ui::notifications::show(ui, &center);
+        let _ = modplayer_ui::notifications::show(ui, &center, &mut stack_state);
     });
 
     find_one(&nodes, Role::Button, &tr("action-status-page"));
     find_one(&nodes, Role::Button, &tr("action-retry"));
     find_one(&nodes, Role::Button, &tr("notification-dismiss"));
+}
+
+/// T014 (US3, contract S8, FR-008): every card's severity is present as
+/// its own accessible text node — `severity-critical`/`-warning`/`-info`
+/// — never conveyed by colour/icon alone. Accent-bar/icon colour and
+/// glyph-distinctness (FR-007) are covered in `tests/notifications.rs`
+/// (SC-003), which a headless AccessKit tree can't assert (no colour on
+/// the tree).
+#[test]
+fn notification_severity_word_is_exposed_as_text_for_every_card() {
+    let mut center = NotificationCenter::new();
+    center.raise(Severity::Critical, "no-output-devices");
+    center.raise(Severity::Warning, "no-output-devices");
+    center.raise(Severity::Info, "no-output-devices");
+
+    let mut stack_state = modplayer_ui::notifications::StackState::default();
+    let nodes = render_nodes(|ui| {
+        let _ = modplayer_ui::notifications::show(ui, &center, &mut stack_state);
+    });
+
+    find_one(&nodes, Role::Label, &tr("severity-critical"));
+    find_one(&nodes, Role::Label, &tr("severity-warning"));
+    find_one(&nodes, Role::Label, &tr("severity-info"));
+}
+
+/// T024 (US4, contract S5/S6/S8, FR-010/FR-013/FR-015): "Show more"/"Show
+/// less" and "Details"/"Hide details" each carry a non-empty accessible
+/// name in both their off and on states, and the message label's
+/// accessible name is always the full, untruncated resolved text — even
+/// while the visible galley is 2-row-elided (a long device name forces
+/// that here).
+#[test]
+fn notification_show_more_and_details_toggles_expose_accessible_names() {
+    let mut center = NotificationCenter::new();
+    let args = vec![
+        (
+            "device",
+            "A remarkably long saved output device name used to force wrapping".to_string(),
+        ),
+        ("fallback", "the system default output".to_string()),
+    ];
+    center.raise_with_detail(
+        Severity::Warning,
+        "device-missing-at-launch",
+        args.clone(),
+        "coreaudio:accessibility-detail-id".to_string(),
+    );
+    let resolved = tr_args("device-missing-at-launch", &args);
+
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut state = modplayer_ui::notifications::StackState::default();
+
+    // Off state: the message's accessible name is already the full
+    // resolved text (never the visibly elided one), and both toggles are
+    // present with non-empty names.
+    let nodes = render_nodes_on(&ctx, default_input(), |ui| {
+        let _ = modplayer_ui::notifications::show(ui, &center, &mut state);
+    });
+    find_one(&nodes, Role::Label, &resolved);
+    let show_more = find_one(&nodes, Role::Button, &tr("notification-show-more"));
+    assert!(
+        show_more.accessible_name().is_some_and(|n| !n.is_empty()),
+        "\"Show more\" must have a non-empty accessible name: {show_more:?}"
+    );
+    let show_more_pos = show_more.bounds.expect("bounds").center();
+    let details = find_one(&nodes, Role::Button, &tr("notification-details"));
+    assert!(
+        details.accessible_name().is_some_and(|n| !n.is_empty()),
+        "\"Details\" must have a non-empty accessible name: {details:?}"
+    );
+
+    // Toggle "Show more" -> "Show less".
+    click_at(&ctx, show_more_pos, |ui| {
+        let _ = modplayer_ui::notifications::show(ui, &center, &mut state);
+    });
+    let nodes = render_nodes_on(&ctx, default_input(), |ui| {
+        let _ = modplayer_ui::notifications::show(ui, &center, &mut state);
+    });
+    let show_less = find_one(&nodes, Role::Button, &tr("notification-show-less"));
+    assert!(
+        show_less.accessible_name().is_some_and(|n| !n.is_empty()),
+        "\"Show less\" must have a non-empty accessible name: {show_less:?}"
+    );
+    // The message's accessible name never changes with expansion state.
+    find_one(&nodes, Role::Label, &resolved);
+
+    // Toggle "Details" -> "Hide details" (bounds refetched: the extra
+    // "Show less" row above may have shifted it).
+    let details_pos = find_one(&nodes, Role::Button, &tr("notification-details"))
+        .bounds
+        .expect("bounds")
+        .center();
+    click_at(&ctx, details_pos, |ui| {
+        let _ = modplayer_ui::notifications::show(ui, &center, &mut state);
+    });
+    let nodes = render_nodes_on(&ctx, default_input(), |ui| {
+        let _ = modplayer_ui::notifications::show(ui, &center, &mut state);
+    });
+    let hide_details = find_one(&nodes, Role::Button, &tr("notification-hide-details"));
+    assert!(
+        hide_details
+            .accessible_name()
+            .is_some_and(|n| !n.is_empty()),
+        "\"Hide details\" must have a non-empty accessible name: {hide_details:?}"
+    );
 }
 
 // -- Search (004-search-and-library-browse, T033) ---------------------------
@@ -914,7 +1067,13 @@ fn library_tabs_expose_role_tab_in_the_fixed_order() {
     let mut state = LibraryViewState::default();
 
     let nodes = render_nodes(|ui| {
-        let _ = library_view::show(ui, &mut controller, &mut artwork, &mut state);
+        let _ = library_view::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut state,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
 
     for key in [
@@ -942,7 +1101,13 @@ fn active_library_tab_exposes_selected_and_toggled_true_others_false() {
     };
 
     let nodes = render_nodes(|ui| {
-        let _ = library_view::show(ui, &mut controller, &mut artwork, &mut state);
+        let _ = library_view::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut state,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
 
     let active = find_one(&nodes, Role::Tab, &tr("library-tab-saved-albums"));
@@ -977,6 +1142,41 @@ fn active_library_tab_exposes_selected_and_toggled_true_others_false() {
     }
 }
 
+/// **T033** (020-shell-navigation-and-gates, US3, contracts/shell-
+/// chrome.md C8): the selected nav rail item reports `is_selected() ==
+/// Some(true)`, every item is `Role::Button`, and every item's accessible
+/// name is the exact, un-uppercased `tr(nav-*)` string (the existing "every
+/// shell/notification widget has a name" sweep, `shell.rs`'s own unit
+/// test, keeps passing unmodified).
+#[test]
+fn selected_nav_rail_item_reports_selected_others_do_not() {
+    let mut shell = Shell {
+        section: Section::Search,
+        ..Shell::default()
+    };
+    let nodes = render_nodes(|ui| shell.nav_rail(ui));
+
+    let expected = [
+        ("nav-library", false),
+        ("nav-search", true),
+        ("nav-now-playing", false),
+        ("nav-plugins", false),
+        ("nav-settings", false),
+    ];
+    for (key, selected) in expected {
+        let name = tr(key);
+        let node = nodes
+            .iter()
+            .find(|n| n.role == Role::Button && n.label.as_deref() == Some(name.as_str()))
+            .unwrap_or_else(|| panic!("expected a Role::Button node named {name:?}"));
+        assert_eq!(
+            node.selected,
+            Some(selected),
+            "{key}: expected is_selected() == Some({selected})"
+        );
+    }
+}
+
 #[test]
 fn library_row_exposes_a_list_item_and_an_actions_button() {
     let (mut controller, handle, _dir) = active_controller("library-row-menu");
@@ -988,7 +1188,13 @@ fn library_row_exposes_a_list_item_and_an_actions_button() {
         ..LibraryViewState::default()
     };
     let nodes = render_nodes(|ui| {
-        let _ = library_view::show(ui, &mut controller, &mut artwork, &mut state);
+        let _ = library_view::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut state,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
 
     let row_name = "Track A — Artist";
@@ -1032,7 +1238,13 @@ fn refreshing_status_label_exposes_role_status_after_a_rate_limited_resync() {
         ..LibraryViewState::default()
     };
     let nodes = render_nodes(|ui| {
-        let _ = library_view::show(ui, &mut controller, &mut artwork, &mut state);
+        let _ = library_view::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut state,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
 
     let status = find_one(&nodes, Role::Status, &tr("refreshing"));
@@ -1092,12 +1304,26 @@ fn detail_back_button_exposes_its_accessible_name() {
     let target = DetailTarget::Artist(id);
     let mut state = detail_view::DetailViewState::default();
     let nodes = render_nodes(|ui| {
-        let _ = detail_view::show(ui, &mut controller, &mut artwork, &target, &mut state);
+        let _ = detail_view::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &target,
+            &mut state,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
     // First frame only issues `FetchTrackList`; settle it before asserting.
     controller.tick();
     let nodes2 = render_nodes(|ui| {
-        let _ = detail_view::show(ui, &mut controller, &mut artwork, &target, &mut state);
+        let _ = detail_view::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &target,
+            &mut state,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
 
     for nodes in [&nodes, &nodes2] {
@@ -1119,7 +1345,7 @@ fn waveform_overview_is_a_named_slider_with_mmss_value_text() {
     let mut waveform = WaveformState::default();
 
     let nodes = render_nodes(|ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
 
     let overview = find_one(&nodes, Role::Slider, &tr("transport-seek"));
@@ -1142,7 +1368,7 @@ fn empty_state_exposes_pick_a_track_and_no_waveform_slider() {
     let mut waveform = WaveformState::default();
 
     let nodes = render_nodes(|ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
 
     assert!(
@@ -1185,7 +1411,7 @@ fn waveform_detail_is_a_named_slider_with_windowed_description() {
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
     let nodes = render_nodes(|ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
 
     let detail = find_one(&nodes, Role::Slider, &tr("waveform-detail"));
@@ -1225,7 +1451,7 @@ fn every_waveform_key_in_the_contract_table_is_reachable() {
             modifiers: Modifiers::default(),
         });
         let mut output = ctx.run_ui(input, |ui| {
-            modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+            modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
         });
         let update = output
             .platform_output
@@ -1258,7 +1484,7 @@ fn every_waveform_key_in_the_contract_table_is_reachable() {
             modifiers,
         });
         let output = ctx.run_ui(input, |ui| {
-            modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+            modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
         });
         output.drop_without_applying_deltas();
     };
@@ -1387,7 +1613,7 @@ fn press_marker_key(
             &mut shell,
             waveform,
         );
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform)
+        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0)
     });
     output.drop_without_applying_deltas();
 }
@@ -1434,7 +1660,7 @@ fn every_marker_kind_glyph_exposes_role_button_named_marker_glyph() {
         .unwrap_or_else(|e| unreachable!("set_cue: {e}"));
 
     let nodes = render_nodes(|ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
 
     // At least one `Role::Button` glyph per marker (one per lane: the
@@ -1474,7 +1700,7 @@ fn panel_row_exposes_role_list_item() {
         .unwrap_or_else(|e| unreachable!("add_point_marker: {e}"));
 
     let nodes = render_nodes(|ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
 
     let rows: Vec<_> = nodes.iter().filter(|n| n.role == Role::ListItem).collect();
@@ -1506,7 +1732,7 @@ fn arm_toggle_exposes_role_checkbox_and_reports_toggled_state() {
         .unwrap_or_else(|| unreachable!("region must exist"));
 
     let off = render_nodes(|ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     let checkbox = find_one(&off, Role::CheckBox, &tr("loop-arm"));
     assert_eq!(
@@ -1519,7 +1745,7 @@ fn arm_toggle_exposes_role_checkbox_and_reports_toggled_state() {
         .arm_loop(region)
         .unwrap_or_else(|e| unreachable!("arm_loop: {e}"));
     let on = render_nodes(|ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     let checkbox = find_one(&on, Role::CheckBox, &tr("loop-disarm"));
     assert_eq!(
@@ -1541,7 +1767,7 @@ fn loop_numeric_fields_and_nudge_step_are_labelled() {
         .unwrap_or_else(|e| unreachable!("set_loop_b: {e}"));
 
     let nodes = render_nodes(|ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     let spin_fields: Vec<_> = nodes
         .iter()
@@ -1582,7 +1808,7 @@ fn markers_panel_and_empty_state_are_exposed() {
     let (mut controller, _dirs, mut artwork, mut waveform) = marker_controller("panel-exposed");
 
     let empty = render_nodes(|ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     assert!(
         empty
@@ -1601,7 +1827,7 @@ fn markers_panel_and_empty_state_are_exposed() {
         .add_point_marker()
         .unwrap_or_else(|e| unreachable!("add_point_marker: {e}"));
     let with_marker = render_nodes(|ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     assert!(
         with_marker

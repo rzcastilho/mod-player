@@ -177,7 +177,7 @@ fn rendered_texts<B: modplayer_audio_io::OutputBackend, H: modplayer_audio_sourc
     let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut output = ctx.run_ui(default_input(), |ui| {
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform);
+        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0);
     });
     let Some(update) = output.platform_output.accesskit_update.take() else {
         panic!("accesskit_update should be populated once enabled");
@@ -209,7 +209,7 @@ fn rendered_painted_texts<
 ) -> Vec<String> {
     let ctx = fresh_ctx();
     let output = ctx.run_ui(default_input(), |ui| {
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform);
+        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0);
     });
     let texts = output
         .shapes
@@ -261,7 +261,7 @@ fn render_nodes<B: modplayer_audio_io::OutputBackend, H: modplayer_audio_source:
     let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut output = ctx.run_ui(input, |ui| {
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform);
+        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0);
     });
     let update = output
         .platform_output
@@ -290,7 +290,7 @@ fn overview_bounds<B: modplayer_audio_io::OutputBackend, H: modplayer_audio_sour
     waveform: &mut WaveformState,
 ) -> Rect {
     let mut output = ctx.run_ui(default_input(), |ui| {
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform);
+        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0);
     });
     let update = output
         .platform_output
@@ -536,7 +536,7 @@ fn click_on_overview_seeks_to_exact_frame() {
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(press, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     output.drop_without_applying_deltas();
 
@@ -548,7 +548,7 @@ fn click_on_overview_seeks_to_exact_frame() {
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(release, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     output.drop_without_applying_deltas();
 
@@ -584,14 +584,14 @@ fn drag_previews_without_seeking_and_esc_cancels() {
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(press, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     output.drop_without_applying_deltas();
 
     let mut drag = default_input();
     drag.events.push(Event::PointerMoved(right));
     let output = ctx.run_ui(drag, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     output.drop_without_applying_deltas();
 
@@ -619,7 +619,7 @@ fn drag_previews_without_seeking_and_esc_cancels() {
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(esc, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     output.drop_without_applying_deltas();
 
@@ -654,7 +654,7 @@ fn seek_slider_commits_once_per_release() {
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(press, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     output.drop_without_applying_deltas();
     assert_eq!(
@@ -666,7 +666,7 @@ fn seek_slider_commits_once_per_release() {
     let mut drag = default_input();
     drag.events.push(Event::PointerMoved(right));
     let output = ctx.run_ui(drag, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     output.drop_without_applying_deltas();
     assert_eq!(
@@ -683,7 +683,7 @@ fn seek_slider_commits_once_per_release() {
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(release, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     output.drop_without_applying_deltas();
     assert_eq!(
@@ -694,7 +694,7 @@ fn seek_slider_commits_once_per_release() {
     let position_after_release = controller.position();
 
     let output = ctx.run_ui(default_input(), |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     output.drop_without_applying_deltas();
     assert_eq!(controller.transport_state().intent, Intent::Paused);
@@ -914,7 +914,7 @@ fn pointer_zoom_on_detail_is_anchored_on_the_pointer_not_the_playhead() {
     // the overview's `transport-seek`).
     let bounds = {
         let mut output = ctx.run_ui(default_input(), |ui| {
-            modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+            modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
         });
         let update = output
             .platform_output
@@ -963,7 +963,7 @@ fn pointer_zoom_on_detail_is_anchored_on_the_pointer_not_the_playhead() {
         .push(Event::PointerMoved(Pos2::new(pointer_x, bounds.center().y)));
     input.events.push(Event::Zoom(2.0));
     let output = ctx.run_ui(input, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform)
+        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
     });
     output.drop_without_applying_deltas();
 
@@ -1053,7 +1053,7 @@ fn run_key_frame<B: modplayer_audio_io::OutputBackend, H: modplayer_audio_source
             &mut shell,
             waveform,
         );
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform)
+        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0)
     });
     let update = output
         .platform_output
@@ -1674,7 +1674,7 @@ fn transport_panel_survives_track_change() {
                  artwork: &mut ArtworkCache,
                  waveform: &mut WaveformState| {
         let mut output = ctx.run_ui(default_input(), |ui| {
-            modplayer_ui::now_playing::show(ui, controller, artwork, waveform);
+            modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0);
         });
         let update = output
             .platform_output
@@ -1757,7 +1757,7 @@ fn render_panel_frame<
 ) -> PanelFrame {
     ctx.enable_accesskit();
     let mut output = ctx.run_ui(input, |ui| {
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform);
+        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0);
     });
     let update = output
         .platform_output
@@ -1832,7 +1832,7 @@ fn warm_up<B: modplayer_audio_io::OutputBackend, H: modplayer_audio_source::Sour
     input: RawInput,
 ) {
     let output = ctx.run_ui(input, |ui| {
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform);
+        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0);
     });
     output.drop_without_applying_deltas();
 }
@@ -1857,7 +1857,7 @@ fn click_now_playing<
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(press_input, |ui| {
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform);
+        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0);
     });
     output.drop_without_applying_deltas();
 
@@ -1869,7 +1869,7 @@ fn click_now_playing<
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(release_input, |ui| {
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform);
+        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0);
     });
     output.drop_without_applying_deltas();
 }

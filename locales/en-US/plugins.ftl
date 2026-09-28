@@ -99,3 +99,10 @@ plugin-panel-header = { $plugin } — { $title }
 plugin-generic-glyph-desc = plugin icon
 plugin-marker-list-empty = No markers yet
 plugin-notification = { $plugin }: { $text }
+
+## 018-window-sizing-and-responsive-dock: the "Panels" transport-row toggle
+## and the dock's resize splitter (data-model.md §7, FR-007/FR-015).
+
+plugin-dock-panels-toggle = Panels
+plugin-dock-resize = Resize plugin dock
+plugin-dock-resize-value = { $width } points

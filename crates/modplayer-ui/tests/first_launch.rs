@@ -25,6 +25,7 @@ use modplayer_account::{
 };
 use modplayer_audio_io::FakeBackend;
 use modplayer_audio_source_synthetic::SyntheticHost;
+use modplayer_core::settings::{DEFAULT_INNER_SIZE, DOCK_WIDTH_DEFAULT, WindowSettings};
 use modplayer_core::{DisclosureAcknowledgement, PlaybackController, SettingsStore};
 use modplayer_secure_store::{MemorySecureStore, SecureStore};
 use modplayer_ui::welcome;
@@ -258,6 +259,68 @@ fn getting_started_dismiss_persists_across_relaunch() {
     assert!(
         reconstructed.getting_started_dismissed(),
         "the dismissal must survive a relaunch on the same settings.toml"
+    );
+}
+
+/// 018-window-sizing-and-responsive-dock (US1, contract W3, FR-001/FR-002):
+/// `main.rs`'s `ViewportBuilder::with_inner_size` reads
+/// `controller.window_settings()` before `run_native` — a fresh config
+/// directory (no saved `[window]` state, the spec's own Independent Test
+/// for this story) must therefore hand back the 1200 × 820 / 280 defaults,
+/// unit-level coverage for what M1 (quickstart.md) confirms visually.
+#[test]
+fn fresh_launch_reports_default_window_settings() {
+    let dir = TempDir::new();
+    let controller = PlaybackController::new(
+        FakeBackend::new(vec![]),
+        SyntheticHost::new(44_100),
+        SettingsStore::with_path(dir.path().join("settings.toml")),
+    );
+
+    assert_eq!(
+        controller.window_settings(),
+        WindowSettings {
+            inner_width: DEFAULT_INNER_SIZE.0,
+            inner_height: DEFAULT_INNER_SIZE.1,
+            dock_width: DOCK_WIDTH_DEFAULT,
+        },
+        "a fresh config directory must report the documented 1200x820/280 defaults"
+    );
+}
+
+/// As above, but for a *restored* size (US1 acceptance scenario 2,
+/// contract W2): a size persisted by a previous session — the same
+/// `set_window_inner_size` call `App`'s `WindowSizeTracker`/`on_exit` make
+/// — is what the next launch's `window_settings()` (and so `main.rs`'s
+/// viewport) reads back, across a whole new `PlaybackController` over the
+/// same `settings.toml` (mirrors `getting_started_dismiss_persists_
+/// across_relaunch` above).
+#[test]
+fn restored_window_size_survives_relaunch() {
+    let dir = TempDir::new();
+    let store_path = dir.path().join("settings.toml");
+
+    let mut controller = PlaybackController::new(
+        FakeBackend::new(vec![]),
+        SyntheticHost::new(44_100),
+        SettingsStore::with_path(&store_path),
+    );
+    controller.set_window_inner_size(1440.0, 900.0);
+    drop(controller);
+
+    let reconstructed = PlaybackController::new(
+        FakeBackend::new(vec![]),
+        SyntheticHost::new(44_100),
+        SettingsStore::with_path(&store_path),
+    );
+    assert_eq!(
+        reconstructed.window_settings(),
+        WindowSettings {
+            inner_width: 1440.0,
+            inner_height: 900.0,
+            dock_width: DOCK_WIDTH_DEFAULT,
+        },
+        "the restored size must survive a relaunch on the same settings.toml"
     );
 }
 
