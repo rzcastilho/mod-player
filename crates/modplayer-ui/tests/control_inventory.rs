@@ -103,7 +103,7 @@ fn every_boolean_control_is_a_switch() {
         ("queue_view.rs", "\"queue-shuffle\"", "Toggle"),
         (
             "markers.rs",
-            "let enabled = row.armed || row.armable;",
+            "let enabled = cells.armed || cells.armable;",
             "Checkbox",
         ),
         ("settings/audio.rs", "\"setting-safe-volume\"", "Checkbox"),

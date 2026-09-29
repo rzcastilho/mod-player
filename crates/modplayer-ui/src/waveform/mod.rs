@@ -22,7 +22,7 @@ pub use coords::{TimeSpace, WaveformResponse};
 pub use hover::{HoverIndicator, hover_indicator};
 pub use input::{MarkerKeyAction, WaveformEvent, focused_marker_key};
 pub use paint::{ColumnPaint, WaveformPaint, waveform_columns};
-pub use state::{DetailWindow, DragOrigin, DragPreview, MarkerDrag, WaveformState};
+pub use state::{DetailWindow, DragOrigin, DragPreview, MarkerDrag, PanelFocus, WaveformState};
 
 /// `"m:ss"` for a frame count at `sample_rate` (no leading-zero minutes,
 /// matching `now_playing.rs`'s existing `format_mmss`).

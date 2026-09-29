@@ -129,4 +129,18 @@ markers-color = Colour { $index }
 
 marker-role-cue = Cue { $slot }
 
+## Markers panel — structure (023)
+
+markers-group-loop = Loop region
+markers-group-points = Points
+markers-group-cues = Cues
+markers-group-heading = { $label }, { $count }
+markers-name-placeholder = Add name
+markers-cue-empty = Cue { $slot } — empty · Shift+{ $slot } to set
+markers-jump = Jump to marker
+markers-nudge-earlier = Nudge earlier
+markers-nudge-later = Nudge later
+markers-remove = Remove marker
+markers-palette = Marker colour
+
 ## Settings > Playback (device name) — Phase 3, US1

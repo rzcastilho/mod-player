@@ -170,6 +170,20 @@ const PLAYBACK_KEYS: &[&str] = &[
     // name.
     "marker-role-point",
     "markers-rename",
+    // 023-markers-panel-structure (contract P10): the three group
+    // headings' bare labels, the name-cell placeholder, and the four
+    // always-visible row-action accessible names/tooltips — en-US's
+    // value for each ignores the `$count` the code always passes (see
+    // `markers-group-heading` below for the templated whole).
+    "markers-group-loop",
+    "markers-group-points",
+    "markers-group-cues",
+    "markers-name-placeholder",
+    "markers-jump",
+    "markers-nudge-earlier",
+    "markers-nudge-later",
+    "markers-remove",
+    "markers-palette",
 ];
 
 /// 021-transport-bar-and-panel-layout (contract Q7, Q11): the Queue row's
@@ -220,8 +234,16 @@ const PLAYBACK_DEFAULT_NAME_ARG_KEYS: &[&str] = &["marker-default-name"];
 const PLAYBACK_INDEX_ARG_KEYS: &[&str] = &["markers-color"];
 
 /// 006 US4's `marker-role-cue`: templated with `$slot` (contracts/
-/// ui-markers.md §3/§4 — the cue glyph/row role label).
-const PLAYBACK_SLOT_ARG_KEYS: &[&str] = &["marker-role-cue"];
+/// ui-markers.md §3/§4 — the cue glyph/row role label). 023-markers-
+/// panel-structure adds `markers-cue-empty`, the empty cue-slot row's
+/// own `$slot`-templated text (contract P8).
+const PLAYBACK_SLOT_ARG_KEYS: &[&str] = &["marker-role-cue", "markers-cue-empty"];
+
+/// 023-markers-panel-structure's `markers-group-heading` (contract P2,
+/// research R4): the group heading's accessible name, templated with
+/// both `$label` and `$count` — the only key this feature adds that is
+/// built from the whole, not the bare per-group label above.
+const PLAYBACK_GROUP_HEADING_ARG_KEYS: &[&str] = &["markers-group-heading"];
 
 /// Settings › Playback (device name) keys added by
 /// 003-streaming-playback-and-queue (T062/T063/T064; contracts/ui-
@@ -1037,6 +1059,24 @@ fn every_shell_nav_and_notification_key_resolves() {
         );
     }
 
+    // 023-markers-panel-structure (contract P2): `markers-group-heading`
+    // resolves and actually names both the group label and its count —
+    // e.g. "Points, 2" for `(label = "Points", count = "2")`.
+    for key in PLAYBACK_GROUP_HEADING_ARG_KEYS {
+        let resolved = tr_args(
+            key,
+            &[("label", "Points".to_string()), ("count", "2".to_string())],
+        );
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/playback.ftl (tr_args() fell back to the raw key)"
+        );
+        assert!(
+            resolved.contains("Points") && resolved.contains('2'),
+            "`{key}` resolved to `{resolved}`, which doesn't name both the label and the count"
+        );
+    }
+
     for key in CONTROLS_KEYS {
         let resolved = tr(key);
         assert_ne!(
@@ -1240,6 +1280,7 @@ fn no_unused_keys_in_playback_and_settings_ftl() {
         .chain(PLAYBACK_DEFAULT_NAME_ARG_KEYS)
         .chain(PLAYBACK_INDEX_ARG_KEYS)
         .chain(PLAYBACK_SLOT_ARG_KEYS)
+        .chain(PLAYBACK_GROUP_HEADING_ARG_KEYS)
         .chain(PLAYBACK_SETTINGS_KEYS)
         .chain(CONTROLS_KEYS)
         .chain(CONTROLS_ARG_KEYS)

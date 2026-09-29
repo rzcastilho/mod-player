@@ -592,6 +592,13 @@ fn welcome_has_exactly_one_primary() {
 /// per-key literal-line check below moves from `queue_view.rs` to
 /// `rows.rs`, and the `Variant::Quiet` site count drops from five to
 /// three (two loops + category_row.rs's "More").
+///
+/// 023-markers-panel-structure (Phase 4, US2, research R6) adds exactly
+/// two more `Variant::Quiet` call sites in `markers.rs`: the row name
+/// cell (`show_name_cell`, or its "Add name" placeholder) and the shared
+/// row-action button (`show_row_action` — jump, nudge earlier, nudge
+/// later, remove all call through this one site) — raising the count
+/// from three to five.
 #[test]
 fn queue_row_actions_are_quiet() {
     let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -602,9 +609,10 @@ fn queue_row_actions_are_quiet() {
         "queue-play-next",
         "queue-remove",
     ];
-    // Two `rows.rs` loops (single-line, wrapped) + category_row.rs's "More".
-    let expected_site_count = 3;
-    let allowed_files = ["rows.rs", "settings/category_row.rs"];
+    // Two `rows.rs` loops (single-line, wrapped) + category_row.rs's
+    // "More" + markers.rs's name cell + markers.rs's shared row action.
+    let expected_site_count = 5;
+    let allowed_files = ["rows.rs", "settings/category_row.rs", "markers.rs"];
 
     let mut quiet_sites = Vec::new();
     for path in walk_src_rs_files() {
