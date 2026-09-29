@@ -316,6 +316,160 @@ fn nav_indicator_clears_the_non_text_floor_against_the_rail_surface() {
     }
 }
 
+// ---------------------------------------------------------------------
+// 022-waveform-legibility (data-model.md §3, W1/W2/W3): the waveform's own
+// per-appearance token table, on top of the shared `Roles` scale above.
+// ---------------------------------------------------------------------
+
+use modplayer_ui::theme::waveform::{
+    DETAIL_HIGHLIGHT_ALPHA, PLACEHOLDER_ALPHA, WaveformRoles, waveform_roles,
+};
+
+/// data-model.md §3.2 values (research R10) — the constants themselves
+/// live in `theme/markers.rs` from Phase 4 (US2) onward; duplicated here,
+/// by value, so this Phase 2 contrast suite does not depend on that
+/// later phase's module.
+const LOOP_ARMED_FILL_ALPHA: f32 = 0.25;
+const LOOP_HATCH_ALPHA: f32 = 0.6;
+const LOOP_IDLE_FILL_ALPHA: f32 = 0.10;
+
+/// The four appearances, paired with their `Roles`/`WaveformRoles` tables,
+/// exactly as `waveform_roles` selects them (single selection site, FR-017
+/// carried over from 017).
+fn appearances() -> [(&'static tokens::Roles, &'static WaveformRoles); 4] {
+    [
+        (&LIGHT, waveform_roles(&LIGHT)),
+        (&DARK, waveform_roles(&DARK)),
+        (&LIGHT_HIGH_CONTRAST, waveform_roles(&LIGHT_HIGH_CONTRAST)),
+        (&DARK_HIGH_CONTRAST, waveform_roles(&DARK_HIGH_CONTRAST)),
+    ]
+}
+
+/// W1 (FR-002, SC-005): the four fill tokens (played/unplayed x
+/// peak/average) are pairwise distinct, in each appearance.
+#[test]
+fn fill_tokens_are_pairwise_distinct() {
+    for (name, roles) in [("light", &LIGHT), ("dark", &DARK)] {
+        let w = waveform_roles(roles);
+        let fills = [
+            ("played_peak", w.played_peak),
+            ("played_average", w.played_average),
+            ("unplayed_peak", w.unplayed_peak),
+            ("unplayed_average", w.unplayed_average),
+        ];
+        for i in 0..fills.len() {
+            for j in (i + 1)..fills.len() {
+                assert_ne!(
+                    fills[i].1, fills[j].1,
+                    "{name}: {} == {} ({:?})",
+                    fills[i].0, fills[j].0, fills[i].1
+                );
+            }
+        }
+    }
+    for (name, roles) in [
+        ("light-hc", &LIGHT_HIGH_CONTRAST),
+        ("dark-hc", &DARK_HIGH_CONTRAST),
+    ] {
+        let w = waveform_roles(roles);
+        let fills = [
+            ("played_peak", w.played_peak),
+            ("played_average", w.played_average),
+            ("unplayed_peak", w.unplayed_peak),
+            ("unplayed_average", w.unplayed_average),
+        ];
+        for i in 0..fills.len() {
+            for j in (i + 1)..fills.len() {
+                assert_ne!(
+                    fills[i].1, fills[j].1,
+                    "{name}: {} == {} ({:?})",
+                    fills[i].0, fills[j].0, fills[i].1
+                );
+            }
+        }
+    }
+}
+
+/// The R9 backdrop set's `base'` half (data-model.md §6): `surface_base`,
+/// the four fill tokens, the placeholder composite, and the overview
+/// highlight composited over every one of those.
+fn base_prime(roles: &tokens::Roles, w: &WaveformRoles) -> Vec<Color32> {
+    let base = vec![
+        roles.surface_base,
+        w.played_peak,
+        w.played_average,
+        w.unplayed_peak,
+        w.unplayed_average,
+        composite(roles.text_secondary, PLACEHOLDER_ALPHA, roles.surface_base),
+    ];
+    let mut base_prime = base.clone();
+    for b in &base {
+        base_prime.push(composite(roles.accent, DETAIL_HIGHLIGHT_ALPHA, *b));
+    }
+    base_prime
+}
+
+/// W2 (FR-003, SC-001): `max(ratio(core, b), ratio(casing, b)) >= 3.0` for
+/// every backdrop `b` in the R9 set, in every appearance.
+#[test]
+fn playhead_clears_three_to_one_against_every_backdrop() {
+    for (roles, w) in appearances() {
+        let base_prime = base_prime(roles, w);
+        let mut backdrops: Vec<Color32> = base_prime.clone();
+        backdrops.extend(MARKER_PALETTE);
+        for &p in &MARKER_PALETTE {
+            for alpha in [
+                LOOP_ARMED_FILL_ALPHA,
+                LOOP_HATCH_ALPHA,
+                LOOP_IDLE_FILL_ALPHA,
+            ] {
+                for &b in &base_prime {
+                    backdrops.push(composite(p, alpha, b));
+                }
+            }
+        }
+        // One level of overlapping-region compositing: an idle region
+        // (p1, LOOP_IDLE_FILL_ALPHA) under a second region (p2, any of the
+        // three alphas).
+        for &p1 in &MARKER_PALETTE {
+            for &p2 in &MARKER_PALETTE {
+                for alpha2 in [
+                    LOOP_ARMED_FILL_ALPHA,
+                    LOOP_HATCH_ALPHA,
+                    LOOP_IDLE_FILL_ALPHA,
+                ] {
+                    for &b in &base_prime {
+                        let under = composite(p1, LOOP_IDLE_FILL_ALPHA, b);
+                        backdrops.push(composite(p2, alpha2, under));
+                    }
+                }
+            }
+        }
+
+        for backdrop in backdrops {
+            let core_ratio = ratio(w.playhead_core, backdrop);
+            let casing_ratio = ratio(w.playhead_casing, backdrop);
+            let best = core_ratio.max(casing_ratio);
+            assert!(
+                best >= NON_TEXT_FLOOR,
+                "playhead vs {backdrop:?} = core {core_ratio:.2} / casing {casing_ratio:.2}, \
+                 floor {NON_TEXT_FLOOR}"
+            );
+        }
+    }
+}
+
+/// W3 (FR-019): `hover_line` is a distinct field from `playhead_core` —
+/// same value is allowed only in high contrast (where both collapse to
+/// `text_primary`), distinguished there by width/casing/z-order instead.
+#[test]
+fn hover_line_is_a_distinct_field_from_playhead_core() {
+    let w_light = waveform_roles(&LIGHT);
+    assert_ne!(w_light.hover_line, w_light.playhead_core);
+    let w_dark = waveform_roles(&DARK);
+    assert_ne!(w_dark.hover_line, w_dark.playhead_core);
+}
+
 #[test]
 fn ratio_matches_the_wcag_reference() {
     assert!((ratio(Color32::WHITE, Color32::WHITE) - 1.0).abs() < 1e-3);

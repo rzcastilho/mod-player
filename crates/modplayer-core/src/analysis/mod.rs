@@ -20,8 +20,11 @@ use modplayer_audio_source::{DecodedStore, PeakBucket, TrackId};
 pub use cache::{ANALYSIS_DIR_ENV, AnalysisPaths, CacheError};
 
 /// Bumped by hand on any peak/format change (FR-007); written to and
-/// compared against every `.mpwf` entry.
-pub const ANALYZER_VERSION: u32 = 1;
+/// compared against every `.mpwf` entry. `2`: adds the per-bucket `rms`
+/// field and the cache's `RMS8` section (022-waveform-legibility,
+/// contracts/analysis-rms.md AR3) — every v1 entry is rejected as
+/// `VersionMismatch` and recomputed, no migration code.
+pub const ANALYZER_VERSION: u32 = 2;
 
 /// `AnalysisService::shutdown`'s join budget (mirrors the receiver
 /// worker's `Shutdown` pattern).

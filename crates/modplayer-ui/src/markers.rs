@@ -216,7 +216,7 @@ fn glyph_accessible_name(marker: &Marker, sample_rate: u32) -> String {
             ("name", marker.name.clone()),
             (
                 "time",
-                format_mmss_millis_frames(marker.position, sample_rate),
+                waveform::format_mmss_millis(marker.position, sample_rate),
             ),
         ],
     )
@@ -433,13 +433,64 @@ pub fn handle_focused_marker_keys<B: OutputBackend, H: SourceHost>(
     }
 }
 
-/// Paint every marker's line plus the current loop region's `[A, B)` span
-/// through the `overlays` hook (006, research R16, contracts/ui-markers.md
-/// §1): a 1px (2px while `focused`) vertical line per marker in its
-/// palette colour, then the current region's span — outline when
-/// disarmed, hatched when armed-inactive, solid (translucent) when
-/// armed-active (data-model.md §3's table). A no-op with no markers/no
-/// current region. `roles` is the applied style's role table
+/// A loop region's shading treatment (022-waveform-legibility, FR-004/
+/// FR-005, data-model.md §7), driven only by the region's own `armed`
+/// flag and the engine's `loop_state` — never by whether the region is
+/// [`TrackMarkers::current_region`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopShade {
+    /// Armed and the playhead is inside `[A, B)` (`loop_state == 2`):
+    /// solid translucent fill.
+    ArmedActive,
+    /// Armed but the playhead has not (yet) entered the region
+    /// (`loop_state` 0 or 1): diagonal hatch. Also covers a fresh arm
+    /// before the engine's ack lands, avoiding a one-frame flicker to
+    /// [`LoopShade::Idle`] (plan.md Complexity Tracking).
+    ArmedInactive,
+    /// Not armed, regardless of `loop_state`: 1px outline + low-alpha
+    /// fill.
+    Idle,
+}
+
+/// The shading [`LoopShade`] a region with `armed` gets, given the
+/// engine's current `loop_state` (022-waveform-legibility, data-model.md
+/// §7's truth table):
+///
+/// | `armed` | `loop_state` | Result |
+/// |---|---|---|
+/// | `true` | `2` | [`LoopShade::ArmedActive`] |
+/// | `true` | `0`, `1` | [`LoopShade::ArmedInactive`] |
+/// | `false` | any | [`LoopShade::Idle`] |
+///
+/// ```
+/// use modplayer_ui::markers::{LoopShade, loop_shade};
+///
+/// assert_eq!(loop_shade(true, 2), LoopShade::ArmedActive);
+/// assert_eq!(loop_shade(true, 0), LoopShade::ArmedInactive);
+/// assert_eq!(loop_shade(true, 1), LoopShade::ArmedInactive);
+/// assert_eq!(loop_shade(false, 2), LoopShade::Idle);
+/// ```
+#[must_use]
+pub fn loop_shade(armed: bool, loop_state: u8) -> LoopShade {
+    if !armed {
+        return LoopShade::Idle;
+    }
+    if loop_state == 2 {
+        LoopShade::ArmedActive
+    } else {
+        LoopShade::ArmedInactive
+    }
+}
+
+/// Paint every marker's line plus every complete loop region's `[A, B)`
+/// span through the `overlays` hook (006, research R16,
+/// 022-waveform-legibility WL4, contracts/ui-markers.md §1): a 1px (2px
+/// while `focused`) vertical line per marker in its palette colour, then
+/// every region with a complete span — idle (1px outline + low-alpha
+/// fill), hatched (armed-inactive), or solid translucent (armed-active)
+/// per its own `armed` flag via [`loop_shade`] (data-model.md §7);
+/// `current_region()` is never consulted for shading. A no-op with no
+/// markers. `roles` is the applied style's role table
 /// (017-high-contrast-appearance, FR-011/FR-012): `theme::markers::
 /// marker_outline(roles)` is `Some` only in high contrast, and every
 /// palette fill/translucent-fill colour above stays byte-identical
@@ -482,38 +533,77 @@ pub fn paint_overlay(
         }
     }
 
-    let Some(region) = markers.current_region().and_then(|id| markers.region(id)) else {
-        return;
-    };
-    let Some((a, b)) = region.span(markers) else {
-        return;
-    };
-    let x0 = space.x_of(a);
-    let x1 = space.x_of(b).max(x0 + 1.0);
-    let span_rect = Rect::from_min_max(pos2(x0, rect.top()), pos2(x1, rect.bottom()));
-    let color = region
-        .a
-        .and_then(|id| markers.marker(id))
-        .map(|marker| theme::marker_color(marker.color))
-        .unwrap_or_else(|| theme::marker_color(PaletteIndex::new(0)));
+    // Every complete-span region, shaded by its own `armed` flag via
+    // `loop_shade` — `current_region()` is never read for shading
+    // (FR-004/FR-005/FR-018, data-model.md §7). Idle regions paint first,
+    // in `regions()` order; the armed region (at most one, 006 I6), if
+    // any, paints last so it always sits on top of an idle region it
+    // overlaps.
+    let mut armed_entry = None;
+    for region in markers.regions() {
+        let Some((a, b)) = region.span(markers) else {
+            continue;
+        };
+        let x0 = space.x_of(a);
+        let x1 = space.x_of(b).max(x0 + 1.0);
+        let span_rect = Rect::from_min_max(pos2(x0, rect.top()), pos2(x1, rect.bottom()));
+        let color = region
+            .a
+            .and_then(|id| markers.marker(id))
+            .map(|marker| theme::marker_color(marker.color))
+            .unwrap_or_else(|| theme::marker_color(PaletteIndex::new(0)));
+        match loop_shade(region.armed, loop_state) {
+            LoopShade::Idle => {
+                paint_region_shade(painter, span_rect, color, LoopShade::Idle, outline);
+            }
+            shade => armed_entry = Some((span_rect, color, shade)),
+        }
+    }
+    if let Some((span_rect, color, shade)) = armed_entry {
+        paint_region_shade(painter, span_rect, color, shade, outline);
+    }
+}
 
-    match loop_state {
-        2 => {
-            painter.rect_filled(span_rect, 0.0, color.gamma_multiply(0.25));
-            // O5: the armed-active span's translucent fill is unchanged
-            // (M8); high contrast only adds this outline.
+/// One loop region's span rect, painted per its [`LoopShade`] (WL4):
+/// `ArmedActive` — solid translucent fill; `ArmedInactive` — diagonal
+/// hatch (006, unchanged); `Idle` — low-alpha fill + 1px outline (FR-005).
+/// `outline` (`Some` only in high contrast) adds an extra `marker_outline`
+/// stroke to `ArmedActive` and `Idle` (O5) — the palette fill/hatch stroke
+/// itself never changes (M8).
+fn paint_region_shade(
+    painter: &Painter,
+    span_rect: Rect,
+    color: Color32,
+    shade: LoopShade,
+    outline: Option<Stroke>,
+) {
+    match shade {
+        LoopShade::ArmedActive => {
+            painter.rect_filled(
+                span_rect,
+                0.0,
+                color.gamma_multiply(theme::markers::LOOP_ARMED_FILL_ALPHA),
+            );
             if let Some(outline) = outline {
                 painter.rect_stroke(span_rect, 0.0, outline, egui::StrokeKind::Inside);
             }
         }
-        1 => paint_hatched(painter, span_rect, color),
-        _ => {
+        LoopShade::ArmedInactive => paint_hatched(painter, span_rect, color),
+        LoopShade::Idle => {
+            painter.rect_filled(
+                span_rect,
+                0.0,
+                color.gamma_multiply(theme::markers::LOOP_IDLE_FILL_ALPHA),
+            );
             painter.rect_stroke(
                 span_rect,
                 0.0,
-                Stroke::new(1.0, color),
+                Stroke::new(theme::markers::LOOP_OUTLINE_WIDTH, color),
                 egui::StrokeKind::Inside,
             );
+            if let Some(outline) = outline {
+                painter.rect_stroke(span_rect, 0.0, outline, egui::StrokeKind::Inside);
+            }
         }
     }
 }
@@ -545,10 +635,10 @@ fn paint_clamped_warning(
 }
 
 /// A simple diagonal-line hatch (armed-inactive, data-model.md §3) —
-/// spaced 8px apart, clipped to `rect`.
+/// spaced [`theme::markers::LOOP_HATCH_SPACING`] apart, clipped to `rect`.
 fn paint_hatched(painter: &Painter, rect: Rect, color: egui::Color32) {
-    let stroke = Stroke::new(1.0, color.gamma_multiply(0.6));
-    let step = 8.0;
+    let stroke = Stroke::new(1.0, color.gamma_multiply(theme::markers::LOOP_HATCH_ALPHA));
+    let step = theme::markers::LOOP_HATCH_SPACING;
     let width = rect.width();
     let height = rect.height();
     let mut offset = -height;
@@ -744,7 +834,7 @@ fn show_marker_row<B: OutputBackend, H: SourceHost>(
             .filter(|drag| drag.marker == row.id)
             .map_or(row.position, |drag| drag.live);
         let rate = controller.source_sample_rate().max(1);
-        ui.label(format_mmss_millis_frames(live_position, rate));
+        ui.label(waveform::format_mmss_millis(live_position, rate));
 
         if row.clamped {
             ui.label(RichText::new("⚠").color(ui.visuals().warn_fg_color))
@@ -798,7 +888,10 @@ fn row_accessible_name(row: &MarkerRowData, sample_rate: u32) -> String {
         &[
             ("role", role_label(row.kind)),
             ("name", row.name.clone()),
-            ("time", format_mmss_millis_frames(row.position, sample_rate)),
+            (
+                "time",
+                waveform::format_mmss_millis(row.position, sample_rate),
+            ),
         ],
     )
 }
@@ -812,27 +905,6 @@ fn role_label(kind: MarkerKind) -> String {
         MarkerKind::Point => tr("marker-role-point"),
         MarkerKind::Cue { slot } => tr_args("marker-role-cue", &[("slot", slot.get().to_string())]),
     }
-}
-
-/// `"m:ss.mmm"` for a frame count at `sample_rate` (contracts/ui-markers.md
-/// §4's row position cell; no leading-zero minutes, matching
-/// `now_playing.rs`'s `format_mmss_frames`).
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)]
-fn format_mmss_millis_frames(frame: u64, sample_rate: u32) -> String {
-    let rate = f64::from(sample_rate.max(1));
-    let total_ms = (frame as f64 / rate * 1000.0).round() as u64;
-    let millis = total_ms % 1_000;
-    let total_seconds = total_ms / 1_000;
-    format!(
-        "{}:{:02}.{:03}",
-        total_seconds / 60,
-        total_seconds % 60,
-        millis
-    )
 }
 
 /// `region`'s loop cells (arm toggle, repeat, crossfade, wraps-remaining/
@@ -1020,16 +1092,6 @@ mod tests {
         assert_eq!(
             refusal_key(MarkerError::RegionTooShort),
             "loop-region-too-short"
-        );
-    }
-
-    #[test]
-    fn format_mmss_millis_frames_matches_seconds_and_millis() {
-        assert_eq!(format_mmss_millis_frames(0, 44_100), "0:00.000");
-        assert_eq!(format_mmss_millis_frames(44_100, 44_100), "0:01.000");
-        assert_eq!(
-            format_mmss_millis_frames(44_100 * 65 + 4_410, 44_100),
-            "1:05.100"
         );
     }
 }

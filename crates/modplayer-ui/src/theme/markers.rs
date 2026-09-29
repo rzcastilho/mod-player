@@ -63,6 +63,28 @@ pub fn overlay_color(token: OverlayColor, visuals: &Visuals) -> Color32 {
 /// difference (2.0 vs 1.5 px, research R8) is not swamped.
 pub const MARKER_OUTLINE_WIDTH: f32 = 1.0;
 
+/// Loop-region shading constants (022-waveform-legibility, FR-004/FR-005,
+/// data-model.md §3.2, WL4): the only place these literals appear (005's
+/// "no colour/paint literal outside `theme/**`" rule extended to alpha/
+/// spacing/width values a region-shading test pins).
+///
+/// `LOOP_ARMED_FILL_ALPHA`/`LOOP_HATCH_ALPHA`/`LOOP_HATCH_SPACING` are the
+/// 006 values, unchanged — only moved here from inline literals in
+/// `markers::paint_overlay`.
+pub const LOOP_ARMED_FILL_ALPHA: f32 = 0.25;
+/// See [`LOOP_ARMED_FILL_ALPHA`].
+pub const LOOP_HATCH_ALPHA: f32 = 0.6;
+/// See [`LOOP_ARMED_FILL_ALPHA`].
+pub const LOOP_HATCH_SPACING: f32 = 8.0;
+/// The idle (unarmed) region's fill alpha (FR-005: at most half of
+/// [`LOOP_ARMED_FILL_ALPHA`], pinned below at compile time so the two
+/// constants can never drift apart into violating FR-005).
+pub const LOOP_IDLE_FILL_ALPHA: f32 = 0.10;
+/// The idle region's outline stroke width (FR-005).
+pub const LOOP_OUTLINE_WIDTH: f32 = 1.0;
+
+const _: () = assert!(LOOP_IDLE_FILL_ALPHA <= LOOP_ARMED_FILL_ALPHA / 2.0);
+
 /// FR-011/FR-012 (017-high-contrast-appearance): `Some` only in high
 /// contrast. The colour is the active theme's `text_primary` — its
 /// extreme luminance end, so it holds >= 7:1 against both waveform

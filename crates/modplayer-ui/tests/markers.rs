@@ -13,7 +13,7 @@ use modplayer_audio_io::{FakeBackend, FakeDevice};
 use modplayer_audio_source::{Availability, TrackId, TrackRef};
 use modplayer_audio_source_synthetic::{ScriptedHost, ScriptedHostHandle};
 use modplayer_core::actions::ScopeState;
-use modplayer_core::markers::{CueSlot, MarkerId, RepeatCount, TrackMarkers};
+use modplayer_core::markers::{CueSlot, MarkerId, Owner, RepeatCount, TrackMarkers};
 use modplayer_core::plugins::PluginId;
 use modplayer_core::settings::SettingsStore;
 use modplayer_core::{Intent, LoopState, PlaybackController, tr, tr_args};
@@ -674,11 +674,11 @@ fn painted_shapes(
     shapes
 }
 
-/// `markers::paint_overlay` (006, contracts/ui-markers.md §1, §5,
-/// data-model.md §3): one line per marker regardless of `loop_state`, plus
-/// the current region's span rendered per its style — outline-only
-/// (disarmed), hatched with no rect (armed-inactive), or filled
-/// (armed-active).
+/// `markers::paint_overlay` (006, 022-waveform-legibility WL4,
+/// contracts/ui-markers.md §1, §5, data-model.md §7): one line per marker
+/// regardless of `loop_state`, plus the (armed) region's span rendered per
+/// `loop_shade(region.armed, loop_state)` — idle-outline while disarmed,
+/// hatched with no rect while armed-inactive, filled while armed-active.
 #[test]
 fn overlay_paints_lines_and_span_states() {
     let id = TrackId::new("spotify:track:overlay").unwrap_or_else(|_| unreachable!());
@@ -689,8 +689,21 @@ fn overlay_paints_lines_and_span_states() {
     markers
         .set_loop_b(5_000)
         .unwrap_or_else(|e| unreachable!("set_loop_b: {e}"));
+    let region = markers
+        .current_region()
+        .unwrap_or_else(|| unreachable!("region must exist"));
 
     for loop_state in [0u8, 1, 2] {
+        // WL4: shading now follows the region's own `armed` flag, not
+        // `loop_state` alone — arm it for the armed-inactive/armed-active
+        // cases, disarm it for the idle case.
+        if loop_state == 0 {
+            markers.disarm();
+        } else {
+            markers
+                .arm(region)
+                .unwrap_or_else(|e| unreachable!("arm: {e}"));
+        }
         let shapes = painted_shapes(0..(44_100 * 200), 44_100, |painter, space| {
             modplayer_ui::markers::paint_overlay(
                 painter,
@@ -734,16 +747,163 @@ fn overlay_paints_lines_and_span_states() {
             }
             _ => {
                 assert_eq!(line_count, 2, "only the 2 marker lines while disarmed");
-                assert_eq!(rects.len(), 1);
-                assert_eq!(
-                    rects[0].fill,
-                    egui::Color32::TRANSPARENT,
-                    "disarmed span must be outline-only"
+                // WL4/FR-005: idle is a separate low-alpha fill rect plus
+                // a 1px outline-stroke rect (two `Shape::Rect`s).
+                assert_eq!(rects.len(), 2);
+                assert!(
+                    rects[0].fill.a() > 0,
+                    "idle span's fill rect must have a low-alpha fill"
                 );
-                assert!(rects[0].stroke.width > 0.0);
+                assert!(
+                    rects[1].stroke.width > 0.0,
+                    "idle span's outline rect must be stroked"
+                );
             }
         }
     }
+}
+
+/// `markers::loop_shade` (022-waveform-legibility, data-model.md §7): the
+/// full truth table — armed reads `ArmedActive` only at `loop_state == 2`
+/// and `ArmedInactive` at 0/1; unarmed is always `Idle`, regardless of
+/// `loop_state`.
+#[test]
+fn loop_shade_truth_table() {
+    use modplayer_ui::markers::{LoopShade, loop_shade};
+
+    assert_eq!(loop_shade(true, 2), LoopShade::ArmedActive);
+    assert_eq!(loop_shade(true, 0), LoopShade::ArmedInactive);
+    assert_eq!(loop_shade(true, 1), LoopShade::ArmedInactive);
+    for loop_state in [0u8, 1, 2, 3, 255] {
+        assert_eq!(
+            loop_shade(false, loop_state),
+            LoopShade::Idle,
+            "unarmed must always be Idle regardless of loop_state={loop_state}"
+        );
+    }
+}
+
+/// WL4: an incomplete region (one endpoint only) draws no span rect at
+/// all; a complete region alongside it still shades normally.
+#[test]
+fn incomplete_region_draws_nothing_complete_region_still_shades() {
+    let id = TrackId::new("spotify:track:incomplete-region").unwrap_or_else(|_| unreachable!());
+    let mut markers = TrackMarkers::new(id, 44_100, 44_100 * 200);
+    // A complete region.
+    markers
+        .set_loop_a(1_000)
+        .unwrap_or_else(|e| unreachable!("set_loop_a: {e}"));
+    markers
+        .set_loop_b(5_000)
+        .unwrap_or_else(|e| unreachable!("set_loop_b: {e}"));
+    // A second, incomplete region (`A` only) — must draw nothing.
+    markers
+        .set_loop_endpoint_owned(None, true, 10_000, Owner::Host)
+        .unwrap_or_else(|e| unreachable!("set_loop_endpoint_owned: {e}"));
+
+    let shapes = painted_shapes(0..(44_100 * 200), 44_100, |painter, space| {
+        modplayer_ui::markers::paint_overlay(
+            painter,
+            space,
+            Some(&markers),
+            0,
+            None,
+            &modplayer_ui::theme::tokens::LIGHT,
+        );
+    });
+    let rect_count = shapes
+        .iter()
+        .filter(|shape| matches!(shape, Shape::Rect(_)))
+        .count();
+    assert_eq!(
+        rect_count, 2,
+        "only the complete region shades (idle: fill rect + outline rect); \
+         the incomplete region draws no rect at all"
+    );
+}
+
+/// WL4/data-model.md §7: an armed region that is *not* `current_region`
+/// still gets the armed treatment, drawn last; the disarmed current
+/// region gets the idle treatment, drawn first — `current_region()` plays
+/// no role in shading selection or order.
+#[test]
+fn armed_non_current_region_shades_armed_and_paints_last() {
+    let id = TrackId::new("spotify:track:armed-non-current").unwrap_or_else(|_| unreachable!());
+    let mut markers = TrackMarkers::new(id, 44_100, 44_100 * 200);
+
+    // Region A: created and armed first.
+    markers
+        .set_loop_a(1_000)
+        .unwrap_or_else(|e| unreachable!("set_loop_a: {e}"));
+    markers
+        .set_loop_b(5_000)
+        .unwrap_or_else(|e| unreachable!("set_loop_b: {e}"));
+    let region_a = markers
+        .current_region()
+        .unwrap_or_else(|| unreachable!("region A must exist"));
+    markers
+        .arm(region_a)
+        .unwrap_or_else(|e| unreachable!("arm: {e}"));
+
+    // Region B: created after A, becomes `current_region` — but stays
+    // disarmed, so it must shade idle even though it is current.
+    let (region_b, _) = markers
+        .set_loop_endpoint_owned(None, true, 10_000, Owner::Host)
+        .unwrap_or_else(|e| unreachable!("set_loop_endpoint_owned: {e}"));
+    markers
+        .set_loop_endpoint_owned(Some(region_b), false, 15_000, Owner::Host)
+        .unwrap_or_else(|e| unreachable!("set_loop_endpoint_owned: {e}"));
+    assert_eq!(
+        markers.current_region(),
+        Some(region_b),
+        "sanity: region B must be current"
+    );
+    assert_eq!(
+        markers.region(region_a).map(|r| r.armed),
+        Some(true),
+        "sanity: region A must still be armed"
+    );
+
+    let shapes = painted_shapes(0..(44_100 * 200), 44_100, |painter, space| {
+        modplayer_ui::markers::paint_overlay(
+            painter,
+            space,
+            Some(&markers),
+            2, // engine says armed-active for whichever region is armed
+            None,
+            &modplayer_ui::theme::tokens::LIGHT,
+        );
+    });
+    let rects: Vec<_> = shapes
+        .iter()
+        .filter_map(|shape| match shape {
+            Shape::Rect(r) => Some(r),
+            _ => None,
+        })
+        .collect();
+    // Idle region B: fill rect then outline-stroke rect, painted first.
+    // Armed-active region A: one filled rect (no stroke in normal mode),
+    // painted last.
+    assert_eq!(rects.len(), 3, "idle (2 rects) + armed-active (1 rect)");
+    assert!(
+        rects[0].fill.a() > 0 && rects[0].stroke.width == 0.0,
+        "region B (idle, current, disarmed) paints its fill first"
+    );
+    assert!(
+        rects[1].fill.a() == 0 && rects[1].stroke.width > 0.0,
+        "region B's outline stroke follows its fill"
+    );
+    assert!(
+        rects[2].fill.a() > 0 && rects[2].stroke.width == 0.0,
+        "region A (armed, non-current) paints last, as a filled rect"
+    );
+    // FR-005: idle fill alpha is at most half the armed-active fill alpha.
+    assert!(
+        rects[0].fill.a() <= rects[2].fill.a() / 2,
+        "idle fill alpha {} must be <= half the armed-active fill alpha {}",
+        rects[0].fill.a(),
+        rects[2].fill.a()
+    );
 }
 
 /// The Markers panel's empty state (contracts/ui-markers.md §4, FR-020):
@@ -1989,6 +2149,14 @@ fn loop_region_span_gains_an_outline() {
     markers
         .set_loop_b(5_000)
         .unwrap_or_else(|e| unreachable!("set_loop_b: {e}"));
+    // WL4: shading now follows the region's own `armed` flag — arm it so
+    // `loop_state == 2` actually reads as `LoopShade::ArmedActive`.
+    let region = markers
+        .current_region()
+        .unwrap_or_else(|| unreachable!("region must exist"));
+    markers
+        .arm(region)
+        .unwrap_or_else(|e| unreachable!("arm: {e}"));
 
     let span_rect_shapes = |roles: &modplayer_ui::theme::Roles| -> Vec<Shape> {
         painted_shapes(0..(44_100 * 200), 44_100, |painter, space| {

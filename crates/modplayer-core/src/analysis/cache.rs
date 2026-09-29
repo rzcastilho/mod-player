@@ -24,6 +24,9 @@ pub const ANALYSIS_DIR_ENV: &str = "MODPLAYER_ANALYSIS_DIR";
 const MAGIC: &[u8; 4] = b"MPWF";
 const FORMAT_VERSION: u32 = 1;
 const WAVE_TAG: &[u8; 4] = b"WAVE";
+/// Per-bucket average-energy (RMS) section, added alongside `WAVE` at
+/// `ANALYZER_VERSION` 2 (022-waveform-legibility, data-model.md §2.1).
+const RMS8_TAG: &[u8; 4] = b"RMS8";
 /// A `len_frames` this far from the track's known duration is treated as a
 /// different/stale entry (research R7).
 const LEN_TOLERANCE_SECONDS: u64 = 2;
@@ -137,6 +140,10 @@ impl<'a> Reader<'a> {
     fn i8(&mut self) -> Result<i8, CacheError> {
         Ok(self.take(1)?[0] as i8)
     }
+
+    fn u8(&mut self) -> Result<u8, CacheError> {
+        Ok(self.take(1)?[0])
+    }
 }
 
 /// Encode `peaks` into the sectioned `.mpwf` byte layout (research R7,
@@ -165,10 +172,26 @@ pub fn encode(peaks: &WaveformPeaks, track: &TrackId) -> Vec<u8> {
         }
     }
 
-    out.extend_from_slice(&1u32.to_le_bytes()); // section_count
+    // `RMS8` (022-waveform-legibility, AR4): same per-level shape as
+    // `WAVE` (`fpb`, `n`), one `rms` byte per bucket instead of a
+    // (min, max) pair.
+    let mut rms8_payload = Vec::new();
+    rms8_payload.extend_from_slice(&(peaks.levels.len() as u32).to_le_bytes());
+    for level in &peaks.levels {
+        rms8_payload.extend_from_slice(&level.frames_per_bucket.to_le_bytes());
+        rms8_payload.extend_from_slice(&(level.buckets.len() as u32).to_le_bytes());
+        for bucket in &level.buckets {
+            rms8_payload.push(bucket.rms);
+        }
+    }
+
+    out.extend_from_slice(&2u32.to_le_bytes()); // section_count
     out.extend_from_slice(WAVE_TAG);
     out.extend_from_slice(&(wave_payload.len() as u64).to_le_bytes());
     out.extend_from_slice(&wave_payload);
+    out.extend_from_slice(RMS8_TAG);
+    out.extend_from_slice(&(rms8_payload.len() as u64).to_le_bytes());
+    out.extend_from_slice(&rms8_payload);
     out
 }
 
@@ -204,18 +227,43 @@ pub fn decode(
 
     let section_count = reader.u32()?;
     let mut levels: Option<Vec<PeakLevel>> = None;
+    let mut rms8: Option<Vec<(u32, Vec<u8>)>> = None;
     for _ in 0..section_count {
         let tag = reader.take(4)?;
         let byte_len = reader.u64()? as usize;
         let payload = reader.take(byte_len)?;
         if tag == WAVE_TAG {
             levels = Some(decode_wave_section(payload, len_frames)?);
+        } else if tag == RMS8_TAG {
+            rms8 = Some(decode_rms8_section(payload)?);
         }
         // Unknown sections are skipped: already consumed by `take` above,
         // so future DM-5 sections (beat grid, key, loudness) can be added
         // without a format bump.
     }
-    let levels = levels.ok_or(CacheError::MissingWave)?;
+    let mut levels = levels.ok_or(CacheError::MissingWave)?;
+    // V2 (data-model.md §2.1): `RMS8` is required at `ANALYZER_VERSION` 2.
+    let rms8 = rms8.ok_or(CacheError::Malformed)?;
+    // V3: level shape must match `WAVE`'s exactly (level count first — a
+    // mismatched last level's `fpb`/`n` inside `decode_rms8_section`
+    // itself is caught by this same check, since the two are compared
+    // level-by-level, bucket-by-bucket below).
+    if rms8.len() != levels.len() {
+        return Err(CacheError::Malformed);
+    }
+    for (level, (rms_fpb, rms_buckets)) in levels.iter_mut().zip(rms8) {
+        // V3: level's `fpb`/`n` must agree with `WAVE`'s.
+        if rms_fpb != level.frames_per_bucket || rms_buckets.len() != level.buckets.len() {
+            return Err(CacheError::Malformed);
+        }
+        for (bucket, rms) in level.buckets.iter_mut().zip(rms_buckets) {
+            // V4: `rms` is only ever valid in `0..=127` (data-model.md §1).
+            if rms > 127 {
+                return Err(CacheError::Malformed);
+            }
+            bucket.rms = rms;
+        }
+    }
 
     Ok(WaveformPeaks {
         sample_rate,
@@ -238,9 +286,29 @@ fn decode_wave_section(payload: &[u8], len_frames: u64) -> Result<Vec<PeakLevel>
         for _ in 0..bucket_count {
             let min = reader.i8()?;
             let max = reader.i8()?;
-            buckets.push(PeakBucket { min, max });
+            buckets.push(PeakBucket { min, max, rms: 0 });
         }
         levels.push(PeakLevel::full(frames_per_bucket, buckets));
+    }
+    Ok(levels)
+}
+
+/// Decode the `RMS8` section's per-level `(frames_per_bucket, rms values)`
+/// (022-waveform-legibility, data-model.md §2.1). Callers cross-check each
+/// level's shape against `WAVE`'s (V3) and every value's range (V4) — this
+/// function only parses the section's own declared shape.
+fn decode_rms8_section(payload: &[u8]) -> Result<Vec<(u32, Vec<u8>)>, CacheError> {
+    let mut reader = Reader::new(payload);
+    let level_count = reader.u32()?;
+    let mut levels = Vec::with_capacity(level_count as usize);
+    for _ in 0..level_count {
+        let frames_per_bucket = reader.u32()?;
+        let bucket_count = reader.u32()? as usize;
+        let mut rms_values = Vec::with_capacity(bucket_count);
+        for _ in 0..bucket_count {
+            rms_values.push(reader.u8()?);
+        }
+        levels.push((frames_per_bucket, rms_values));
     }
     Ok(levels)
 }
@@ -309,13 +377,18 @@ mod tests {
                         .map(|i| PeakBucket {
                             min: -(i as i8 % 127),
                             max: (i as i8 % 127),
+                            rms: (i % 128) as u8,
                         })
                         .collect(),
                 ),
                 PeakLevel::full(
                     1_024,
                     (0..peaks::bucket_count(len_frames, 1_024))
-                        .map(|_| PeakBucket { min: -10, max: 10 })
+                        .map(|_| PeakBucket {
+                            min: -10,
+                            max: 10,
+                            rms: 8,
+                        })
                         .collect(),
                 ),
             ],

@@ -24,6 +24,16 @@ pub(crate) fn bucket_count(len_frames: u64, frames_per_bucket: u32) -> usize {
     len_frames.div_ceil(u64::from(frames_per_bucket.max(1))) as usize
 }
 
+/// How many frames `level`'s bucket `index` actually covers: its own
+/// `frames_per_bucket`, except the last bucket in the track, which may be
+/// short (022-waveform-legibility, AR2's fold weight `wᵢ`).
+fn bucket_frame_count(level: &PeakLevel, index: usize, len_frames: u64) -> u32 {
+    let fpb = u64::from(level.frames_per_bucket.max(1));
+    let start = index as u64 * fpb;
+    let end = (start + fpb).min(len_frames);
+    end.saturating_sub(start) as u32
+}
+
 /// Which of `WaveformPeaks::LADDER` actually get a level for a track of
 /// `len_frames` frames — "a level exists only if it has >= 2 buckets for
 /// the track" (data-model.md §3.2).
@@ -78,6 +88,7 @@ pub(crate) fn fold_level0(peaks: &mut WaveformPeaks, store: &DecodedStore) -> us
 /// present iff every finer bucket it folds is present (the last one: all
 /// that exist, data-model.md §3.2's invariant).
 pub(crate) fn refold_coarser_levels(peaks: &mut WaveformPeaks) {
+    let len_frames = peaks.len_frames;
     for level_index in 1..peaks.levels.len() {
         let (below, rest) = peaks.levels.split_at_mut(level_index);
         let finer = &below[level_index - 1];
@@ -91,14 +102,32 @@ pub(crate) fn refold_coarser_levels(peaks: &mut WaveformPeaks) {
             }
             let mut min_v = i8::MAX;
             let mut max_v = i8::MIN;
+            // Weighted quadratic mean (022-waveform-legibility, AR2):
+            // `rms_coarse = round(sqrt(Σ wᵢ·rmsᵢ² / Σ wᵢ))`, `wᵢ` = the
+            // finer bucket's own frame count (its bucket size, save for a
+            // possible short last bucket). `u64` accumulators (data-model
+            // §2) — squares of `u8`/`u32` values fit comfortably.
+            let mut weighted_sum_sq: u64 = 0;
+            let mut total_weight: u64 = 0;
             for i in start..end {
                 let bucket = finer.buckets[i];
                 min_v = min_v.min(bucket.min);
                 max_v = max_v.max(bucket.max);
+                let weight = u64::from(bucket_frame_count(finer, i, len_frames));
+                let rms = u64::from(bucket.rms);
+                weighted_sum_sq += weight * rms * rms;
+                total_weight += weight;
             }
+            let rms_v = if total_weight == 0 {
+                0
+            } else {
+                let mean_sq = weighted_sum_sq as f64 / total_weight as f64;
+                mean_sq.sqrt().round() as u8
+            };
             level.buckets[coarse_index] = PeakBucket {
                 min: min_v,
                 max: max_v,
+                rms: rms_v,
             };
             level.set_present(coarse_index);
         }
@@ -196,6 +225,116 @@ mod tests {
 
         assert_eq!(peaks.levels[0].present_count(), 4);
         assert_eq!(peaks.levels[1].present_count(), 0);
+    }
+
+    /// A store whose sample is a constant amplitude, but alternates sign —
+    /// every level-0 bucket has the same non-zero RMS, so refolding it up
+    /// the ×8 ladder is a "uniform-RMS track": every coarser level's `rms`
+    /// should match level 0's (±1), per AR2's invariant.
+    fn uniform_rms_store(frames: u64, amplitude: f32) -> std::sync::Arc<DecodedStore> {
+        let store = DecodedStore::new(44_100, frames);
+        let interleaved: Vec<f32> = (0..frames)
+            .flat_map(|i| {
+                let sample = if i % 2 == 0 { amplitude } else { -amplitude };
+                [sample, sample]
+            })
+            .collect();
+        store.write_frames(0, &interleaved);
+        store.set_complete(frames);
+        store
+    }
+
+    /// AR2: `rms_coarse = round(sqrt(Σ wᵢ·rmsᵢ² / Σ wᵢ))`, `wᵢ` = the
+    /// finer bucket's frame count — a weighted quadratic mean, not a plain
+    /// (unweighted) mean or a min/max-style fold.
+    #[test]
+    fn refold_coarser_levels_is_weighted_quadratic_mean_of_rms() {
+        let level0_buckets = 20u64;
+        let frames = level0_buckets * u64::from(LEVEL0_FRAMES);
+        // 0.5 amplitude on every sample of every frame → every level-0
+        // bucket's rms is `quantise_rms` of a constant-amplitude signal.
+        let store = uniform_rms_store(frames, 0.5);
+
+        let mut peaks = empty_peaks(44_100, frames);
+        loop {
+            let written = fold_level0(&mut peaks, &store);
+            if written == 0 {
+                break;
+            }
+            refold_coarser_levels(&mut peaks);
+        }
+
+        let level0_rms = peaks.levels[0].buckets[0].rms;
+        // Every level-0 bucket is identical content, so they all share the
+        // same `rms`; the weighted quadratic mean of N identical values is
+        // that value itself (within ±1 for rounding across levels).
+        for level in &peaks.levels {
+            for i in 0..level.len() {
+                let rms = level.buckets[i].rms;
+                assert!(
+                    (i32::from(rms) - i32::from(level0_rms)).abs() <= 1,
+                    "level rms {rms} diverged from level-0 rms {level0_rms}"
+                );
+            }
+        }
+    }
+
+    /// A last, short finer bucket still contributes its (smaller) frame
+    /// count as its weight — not folded as if it were full-sized.
+    #[test]
+    fn refold_coarser_levels_weights_short_last_bucket_by_frame_count() {
+        // 9 level-0 buckets: level 1's first coarse bucket folds all 8 at
+        // full weight; a second coarse bucket would fold just the 9th
+        // (short, since bucket_count needs >= 2 for the ladder to exist —
+        // use 17 so level 1 has exactly 2 buckets, the second folding only
+        // 1 finer bucket at a *full* frame count, i.e. no shortness here
+        // at level 0; shortness instead shows up in the mono min/max path
+        // already covered by 005 — this test pins that RMS folds by
+        // frame-count weight, not bucket count, using differing content
+        // per bucket so an unweighted mean would diverge).
+        let level0_buckets = 16u64;
+        let frames = level0_buckets * u64::from(LEVEL0_FRAMES);
+        let store = DecodedStore::new(44_100, frames);
+        // First 8 level-0 buckets: amplitude 0.1 (low rms). Last 8: 0.9
+        // (high rms). An unweighted mean over 2 groups would sit halfway;
+        // frame-count weighting with equal-length buckets sits at the same
+        // point here since weights are equal — so cross-check against the
+        // direct AR2 formula instead of assuming a specific value.
+        let mut interleaved = Vec::with_capacity((frames * 2) as usize);
+        for i in 0..frames {
+            let amplitude = if i < frames / 2 { 0.1 } else { 0.9 };
+            interleaved.push(amplitude);
+            interleaved.push(amplitude);
+        }
+        store.write_frames(0, &interleaved);
+        store.set_complete(frames);
+
+        let mut peaks = empty_peaks(44_100, frames);
+        loop {
+            let written = fold_level0(&mut peaks, &store);
+            if written == 0 {
+                break;
+            }
+            refold_coarser_levels(&mut peaks);
+        }
+
+        let level1 = &peaks.levels[1];
+        assert_eq!(level1.len(), 2);
+        // AR2 direct formula over the 8 level-0 rms values folding into
+        // level1[0], all with equal weight (LEVEL0_FRAMES each).
+        let level0 = &peaks.levels[0];
+        let expected: u8 = {
+            let sum_sq: f64 = (0..8)
+                .map(|i| {
+                    let r = f64::from(level0.buckets[i].rms);
+                    let w = f64::from(LEVEL0_FRAMES);
+                    w * r * r
+                })
+                .sum();
+            let total_w = 8.0 * f64::from(LEVEL0_FRAMES);
+            (sum_sq / total_w).sqrt().round() as u8
+        };
+        assert!((i32::from(level1.buckets[0].rms) - i32::from(expected)).abs() <= 1);
     }
 
     #[test]

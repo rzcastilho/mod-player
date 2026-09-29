@@ -939,12 +939,17 @@ fn show_waveform<B: OutputBackend, H: SourceHost>(
         waveform,
         &mut detail,
     );
+    // 022-waveform-legibility (WL5, FR-009): either kind of drag in
+    // progress suppresses the hover scrub indicator on both views, every
+    // frame — never driven by which view the drag itself started on.
+    let hover_suppressed = waveform.drag.is_some() || waveform.marker_drag.is_some();
     let overview_paint = WaveformPaint {
         status,
         peaks,
         playhead: Some(playhead_frame),
         unavailable_text: &unavailable_text,
         highlight: Some(detail.start_frame..(detail.start_frame + detail.width_frames)),
+        hover_suppressed,
     };
     // US3 T089 (O7): reserve the 16px glyph/label lane directly above the
     // overview's own rect — `plugin_overlays::paint` (below) paints into
@@ -1019,6 +1024,7 @@ fn show_waveform<B: OutputBackend, H: SourceHost>(
         playhead: Some(playhead_frame),
         unavailable_text: &unavailable_text,
         highlight: None,
+        hover_suppressed,
     };
     // US3 T089: the detail view's own lane (O7 applies to both views).
     ui.add_space(plugin_overlays::LANE_HEIGHT);
