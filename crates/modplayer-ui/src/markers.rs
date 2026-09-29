@@ -31,7 +31,9 @@ use crate::theme;
 use crate::theme::controls::Variant;
 use crate::waveform::state::DETAIL_MIN_WINDOW_MS;
 use crate::waveform::{self, DetailWindow, MarkerDrag, TimeSpace, WaveformState};
-use crate::widgets::controls::{SwitchKind, button, destructive_gap, panel_card, switch};
+use crate::widgets::controls::{
+    CardResponse, SwitchKind, button, collapsible_panel_card, destructive_gap, switch,
+};
 
 /// The marker lane's fixed height (006, contracts/ui-markers.md §1).
 pub const LANE_HEIGHT: f32 = 14.0;
@@ -607,27 +609,32 @@ struct RegionRow {
     clamped: bool,
 }
 
-/// The Markers panel (006, contracts/ui-markers.md §4): the header
-/// ("Markers", "New loop region", "Clear all markers"/its two-step
+/// The Markers panel (006, contracts/ui-markers.md §4; 021-transport-bar-
+/// and-panel-layout, contracts/ui-now-playing-layout.md C1-C2, C4): the
+/// header ("Markers", "New loop region", "Clear all markers"/its two-step
 /// confirm), the empty state, or one row per marker — colour swatch,
 /// role/kind label, inline-editable name, `m:ss.mmm` position, a clamped
 /// warning — with a `RegionStart` row additionally showing its region's
 /// loop cells (arm toggle, repeat, crossfade, wraps-remaining/infinite,
 /// armed-inactive badge). Every `DragValue`/`TextEdit` registers a
 /// `Claim::TextLike` (007, contracts/ui-actions.md §2) so the dispatcher
-/// leaves it alone while it has focus.
+/// leaves it alone while it has focus. Rendered only while a track is
+/// loaded (021 contract C4); the card is collapsible through `*open`, but
+/// — unlike Effect Chain/Transport/Queue — Markers has no bar toggle
+/// (spec Clarification 5), so the caller only ever reads `response.
+/// toggled` off the header disclosure.
 pub fn panel<B: OutputBackend, H: SourceHost>(
     ui: &mut Ui,
     controller: &mut PlaybackController<B, H>,
     waveform: &mut WaveformState,
-) {
+    open: &mut bool,
+) -> CardResponse {
     // 016-list-row-and-panel-components (FR-017/FR-018/FR-021, research
-    // R7): the shared card now draws the `markers-panel` header — the
-    // in-row `section_label` this panel used to draw itself is deleted, so
-    // it is never rendered twice. The "New loop"/clear-all controls keep
-    // their own row inside the card; Markers has no open/closed toggle
-    // (FR-021).
-    panel_card(ui, &tr("markers-panel"), |ui| {
+    // R7), superseded by 021 contract C1/C2 (research R7): the shared
+    // collapsible card now draws the `markers-panel` header plus a header
+    // disclosure — the in-row `section_label` this panel used to draw
+    // itself stays deleted, so it is never rendered twice.
+    collapsible_panel_card(ui, &tr("markers-panel"), open, |ui| {
         ui.horizontal(|ui| {
             if ui.button(tr("markers-new-loop")).clicked() {
                 let _ = controller.new_loop_region();
@@ -661,7 +668,7 @@ pub fn panel<B: OutputBackend, H: SourceHost>(
                 show_region_cells(ui, controller, region);
             }
         }
-    });
+    })
 }
 
 /// One marker's row (contracts/ui-markers.md §4): colour swatch (click

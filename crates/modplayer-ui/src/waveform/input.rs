@@ -14,7 +14,7 @@
 //! `DetailWindow` via `zoom_about`/`zoom_step`/`pan`/`reset`, which is
 //! where that clamping context already lives.
 
-use egui::{Key, Modifiers, Response, Ui};
+use egui::{Key, Modifiers, Response, Ui, Vec2};
 
 use super::coords::TimeSpace;
 use crate::actions::{self, Claim};
@@ -169,12 +169,12 @@ fn pointer_zoom_or_pan(
     if !is_detail {
         return None;
     }
-    let scroll = ui.input(|input| {
+    let (scroll, shift_vertical) = ui.input(|input| {
         let raw = input.smooth_scroll_delta();
         if input.modifiers.shift && raw.x == 0.0 {
-            raw.y
+            (raw.y, true)
         } else {
-            raw.x
+            (raw.x, false)
         }
     });
     if scroll == 0.0 {
@@ -185,10 +185,20 @@ fn pointer_zoom_or_pan(
     // `frames_per_pixel` converts it directly.
     let delta_frames = (f64::from(-scroll) * space.frames_per_pixel()).round() as i64;
     if delta_frames == 0 {
-        None
-    } else {
-        Some(WaveformEvent::Pan { delta_frames })
+        return None;
     }
+    if shift_vertical {
+        // 021-transport-bar-and-panel-layout (contract S5, research R11):
+        // this Shift+vertical wheel delta is now consumed as a detail pan
+        // — zero it so the `ScrollArea` now enclosing the waveform (a
+        // vertical scroll region, introduced by this feature) doesn't
+        // also scroll the page from the same wheel event. A plain
+        // vertical wheel (no Shift) is untouched and still scrolls the
+        // page; a horizontal scroll/pinch isn't affected either.
+        ui.ctx()
+            .input_mut(|input| input.smooth_scroll_delta = Vec2::ZERO);
+    }
+    Some(WaveformEvent::Pan { delta_frames })
 }
 
 /// The keyboard rows of contracts/ui-waveform.md §3: plain/`Shift` arrows

@@ -15,32 +15,40 @@ use modplayer_audio_source::SourceHost;
 use modplayer_core::{FocusPolicy, FocusRow, NowPlayingPanel, PlaybackController, tr, tr_args};
 
 use crate::theme;
-use crate::widgets::controls::panel_card;
+use crate::widgets::controls::{CardResponse, collapsible_panel_card};
 
 /// `T` (`HostAction::ToggleTransportPanel`, contracts/ui-transport-panel.md
 /// §1): flips the persisted `[now_playing_panels] transport_open` flag
 /// through the controller, so a keyboard toggle and the header switch stay
 /// in sync and the state survives a restart
-/// (016-list-row-and-panel-components, FR-019).
+/// (016-list-row-and-panel-components, FR-019). Returns the panel's new
+/// open state (021-transport-bar-and-panel-layout, contract R5, research
+/// R6): `true` tells the caller to also request a reveal.
 pub fn toggle_transport_panel<B: OutputBackend, H: SourceHost>(
     controller: &mut PlaybackController<B, H>,
-) {
+) -> bool {
     let open = controller.now_playing_panel_open(NowPlayingPanel::Transport);
-    controller.set_now_playing_panel_open(NowPlayingPanel::Transport, !open);
+    let new_open = !open;
+    controller.set_now_playing_panel_open(NowPlayingPanel::Transport, new_open);
+    new_open
 }
 
-/// Draw the Transport panel: the shared card (016-list-row-and-panel-
-/// components, FR-017/FR-018) with the holder/policy/take-back header row,
-/// then one row per eligible plugin (or the empty state). Rendered
-/// regardless of whether a track is loaded — holder reads "host" and rows
-/// may be empty (contracts/ui-transport-panel.md §1).
+/// Draw the Transport panel: the shared collapsible card (016-list-row-
+/// and-panel-components, FR-017/FR-018; 021-transport-bar-and-panel-
+/// layout contracts/ui-now-playing-layout.md C1-C2, C4) with the holder/
+/// policy/take-back header row, then one row per eligible plugin (or the
+/// empty state). Rendered regardless of whether a track is loaded —
+/// holder reads "host" and rows may be empty (contracts/ui-transport-
+/// panel.md §1) — and, per 021 contract C4, always present, either open
+/// or as a header-only collapsed card.
 pub fn show<B: OutputBackend, H: SourceHost>(
     ui: &mut Ui,
     controller: &mut PlaybackController<B, H>,
-) {
+    open: &mut bool,
+) -> CardResponse {
     let view = controller.transport_focus_view();
 
-    panel_card(ui, &tr("transport-panel-title"), |ui| {
+    collapsible_panel_card(ui, &tr("transport-panel-title"), open, |ui| {
         ui.horizontal(|ui| {
             let holder_name = view
                 .holder
@@ -73,7 +81,7 @@ pub fn show<B: OutputBackend, H: SourceHost>(
         for row in &view.rows {
             show_row(ui, controller, row);
         }
-    });
+    })
 }
 
 /// The Focus policy `ComboBox` (contracts/ui-transport-panel.md §2, U1):

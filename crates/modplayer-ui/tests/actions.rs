@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use egui::accesskit::{Role, Toggled};
 use egui::{Context, Event, Id, Key as EguiKey, Modifiers, Pos2, RawInput, Rect};
 use modplayer_audio_io::{FakeBackend, FakeDevice};
 use modplayer_audio_source::{Availability, TrackId, TrackRef};
@@ -33,10 +34,12 @@ use modplayer_core::markers::{CueSlot, TrackMarkers};
 use modplayer_core::notifications::KEY_EFFECTS_NO_TIME_STRETCH;
 use modplayer_core::plugins::{Lifecycle, PluginId};
 use modplayer_core::settings::SettingsStore;
-use modplayer_core::{Intent, LoopState, NowPlayingPanel, PlaybackController};
+use modplayer_core::{Intent, LoopState, NowPlayingPanel, PlaybackController, tr};
 use modplayer_effects::catalog::NodeKind;
 use modplayer_engine::{BufferPreset, DeviceId, FrameCount, SampleRate};
 use modplayer_ui::actions::{Claim, FocusClaims, Invocation};
+use modplayer_ui::artwork::ArtworkCache;
+use modplayer_ui::section_memory::{SectionMemory, ViewKey};
 use modplayer_ui::waveform::WaveformState;
 use modplayer_ui::{Section, Shell, actions};
 
@@ -2302,4 +2305,369 @@ fn call_probe(
         Ok(Ok(Response::Probe(value))) => value.as_i64().unwrap_or(-1),
         _ => -1,
     }
+}
+
+// -- 021-transport-bar-and-panel-layout, Phase 4 (US2), T-R5: a keyboard
+// shortcut opens-and-reveals or collapses a panel exactly like the bar
+// toggle (contract R5) — driven through `actions::dispatch_and_invoke`
+// with the catalog's own current bindings, not a hand-picked chord.
+// -----------------------------------------------------------------------
+
+/// As `now_playing.rs`'s own `fresh_ctx`: a bare `Context::default()` is
+/// missing the token `Style` `now_playing::show` needs to lay out text
+/// (the `Name("display")` text style and friends).
+fn fresh_now_playing_ctx() -> Context {
+    let ctx = Context::default();
+    modplayer_ui::theme::apply_tokens(&ctx);
+    ctx
+}
+
+/// One key press *and* its matching release, in one frame, dispatched and
+/// invoked through `actions::dispatch_and_invoke` (rather than this file's
+/// own `frame`/`press`, which call `dispatch`/`invoke` by hand) — T-R5
+/// asks for the catalog's own combined entry point specifically.
+fn press_and_invoke(
+    ctx: &Context,
+    ev: Event,
+    claims: &FocusClaims,
+    scope: &ScopeState,
+    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+    shell: &mut Shell,
+    waveform: &mut WaveformState,
+) {
+    let Event::Key { key: k, .. } = ev else {
+        unreachable!("press_and_invoke only takes Event::Key");
+    };
+    let mut input = default_input();
+    input.events = vec![ev, key_release(k)];
+    let output = ctx.run_ui(input, |ui| {
+        let frame_ctx = ui.ctx().clone();
+        actions::dispatch_and_invoke(&frame_ctx, claims, scope, controller, shell, waveform);
+    });
+    output.drop_without_applying_deltas();
+}
+
+/// One `now_playing::show` pass over an explicit, caller-owned
+/// `SectionMemory`, returning every AccessKit node's role/label/bounds/
+/// toggled state — the same shape `tests/now_playing.rs`'s own
+/// `PanelNode`/`render_panel_frame_with_memory` capture, needed here to
+/// read back the bar toggle and a card's heading after a keyboard-driven
+/// reveal.
+struct KeyboardPanelNode {
+    role: Role,
+    label: Option<String>,
+    value: Option<String>,
+    bounds: Option<Rect>,
+    toggled: Option<Toggled>,
+}
+
+impl KeyboardPanelNode {
+    fn accessible_name(&self) -> Option<&str> {
+        self.label.as_deref().or(self.value.as_deref())
+    }
+}
+
+fn render_now_playing(
+    ctx: &Context,
+    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+    artwork: &mut ArtworkCache,
+    waveform: &mut WaveformState,
+    memory: &mut SectionMemory,
+) -> Vec<KeyboardPanelNode> {
+    ctx.enable_accesskit();
+    let mut output = ctx.run_ui(default_input(), |ui| {
+        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, memory);
+    });
+    let update = output
+        .platform_output
+        .accesskit_update
+        .take()
+        .expect("accesskit_update should be populated once enabled");
+    output.drop_without_applying_deltas();
+    update
+        .nodes
+        .iter()
+        .map(|(_, node)| KeyboardPanelNode {
+            role: node.role(),
+            label: node.label().map(str::to_string),
+            value: node.value().map(str::to_string),
+            bounds: node.bounds().map(|b| {
+                Rect::from_min_max(
+                    Pos2::new(b.x0 as f32, b.y0 as f32),
+                    Pos2::new(b.x1 as f32, b.y1 as f32),
+                )
+            }),
+            toggled: node.toggled(),
+        })
+        .collect()
+}
+
+fn find_keyboard_node<'a>(
+    nodes: &'a [KeyboardPanelNode],
+    role: Role,
+    name: &str,
+) -> Option<&'a KeyboardPanelNode> {
+    nodes
+        .iter()
+        .find(|node| node.role == role && node.accessible_name() == Some(name))
+}
+
+/// The pinned bar's own outer rect's bottom edge (mirrors `tests/
+/// now_playing.rs`'s own `bar_panel_bottom`) — the scroll region's own
+/// viewport top.
+fn bar_panel_bottom(ctx: &Context) -> f32 {
+    let bar_id = Id::new("now-playing-transport-bar");
+    egui::PanelState::load(ctx, bar_id)
+        .expect("the transport bar must register its PanelState after a frame")
+        .outer_rect
+        .bottom()
+}
+
+/// T-R5 (contract R5, FR-009, NFR-6.1): `Q`/`E`/`T` — the catalog's own
+/// current bindings for `ToggleQueue`/`ToggleEffectChain`/
+/// `ToggleTransportPanel` (catalog.rs) — open-and-reveal a closed panel in
+/// the same way the bar toggle does (T-R1's own assertion, retargeted at
+/// the keyboard path), and collapse it again on a second press.
+#[test]
+fn keyboard_toggle_opens_reveals_and_collapses_like_the_bar_toggle() {
+    for (toggle_key, panel, toggle_label, heading_label) in [
+        (
+            EguiKey::Q,
+            NowPlayingPanel::Queue,
+            "queue-toggle",
+            "queue-panel-title",
+        ),
+        (
+            EguiKey::E,
+            NowPlayingPanel::EffectChain,
+            "effects-toggle",
+            "effects-panel-title",
+        ),
+        (
+            EguiKey::T,
+            NowPlayingPanel::Transport,
+            "transport-toggle",
+            "transport-panel-title",
+        ),
+    ] {
+        let (mut controller, _handle, _dirs) = active_controller(&format!("r5-{toggle_label}"));
+        controller.queue_replace(vec![track("a", 200_000)]);
+        assert!(
+            !controller.now_playing_panel_open(panel),
+            "sanity: {toggle_label}'s panel must start closed"
+        );
+
+        let mut shell = Shell::default();
+        let mut waveform = WaveformState::default();
+        let mut artwork = ArtworkCache::new();
+        let mut memory = SectionMemory::default();
+        let ctx = fresh_now_playing_ctx();
+        let claims = FocusClaims::default();
+        let scope = now_playing_scope();
+
+        // Warm-up: Now Playing is already shown before the key is pressed
+        // (mirrors `tests/now_playing.rs`'s own warm-up convention).
+        render_now_playing(
+            &ctx,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut memory,
+        );
+
+        press_and_invoke(
+            &ctx,
+            key(toggle_key, Modifiers::NONE),
+            &claims,
+            &scope,
+            &mut controller,
+            &mut shell,
+            &mut waveform,
+        );
+        assert!(
+            controller.now_playing_panel_open(panel),
+            "{toggle_key:?} must open the panel"
+        );
+
+        // Consume the reveal request, then settle: `Ui::scroll_to_rect`'s
+        // own offset adjustment lands in *this* pass's returned offset but
+        // only feeds the *next* pass's content layout (mirrors `tests/
+        // now_playing.rs`'s own `click_and_settle_now_playing_with_memory`
+        // doc comment) — two passes, no further input either time.
+        render_now_playing(
+            &ctx,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut memory,
+        );
+        let settled = render_now_playing(
+            &ctx,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut memory,
+        );
+
+        let bar_toggle = find_keyboard_node(&settled, Role::Button, &tr(toggle_label))
+            .expect("the bar toggle must still render");
+        assert_eq!(
+            bar_toggle.toggled,
+            Some(Toggled::True),
+            "{toggle_label} must report Toggled::True after the keyboard reveal"
+        );
+        let heading = find_keyboard_node(&settled, Role::Heading, &tr(heading_label))
+            .and_then(|node| node.bounds)
+            .unwrap_or_else(|| panic!("the {heading_label} heading must render once open"));
+        let viewport_top = bar_panel_bottom(&ctx);
+        assert!(
+            heading.min.y + 0.5 >= viewport_top && heading.max.y <= 600.0 + 0.5,
+            "{toggle_key:?} must reveal {heading_label} inside the 800x600 content rect \
+             (viewport_top={viewport_top}): {heading:?}"
+        );
+
+        // A second press collapses it again (contract R4's "collapse"
+        // half, exercised here through the keyboard path too).
+        press_and_invoke(
+            &ctx,
+            key(toggle_key, Modifiers::NONE),
+            &claims,
+            &scope,
+            &mut controller,
+            &mut shell,
+            &mut waveform,
+        );
+        assert!(
+            !controller.now_playing_panel_open(panel),
+            "a second {toggle_key:?} must collapse the panel"
+        );
+        let after_collapse = render_now_playing(
+            &ctx,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut memory,
+        );
+        let bar_toggle = find_keyboard_node(&after_collapse, Role::Button, &tr(toggle_label))
+            .expect("the bar toggle must still render");
+        assert_eq!(
+            bar_toggle.toggled,
+            Some(Toggled::False),
+            "{toggle_label} must report Toggled::False after the collapse"
+        );
+    }
+}
+
+/// T-R5's "not shown" case (contract R5, spec Clarification 10, research
+/// R6): `ToggleEffectChain` is `Scope::NowPlaying` (catalog.rs), so a real
+/// keypress never even reaches `invoke` while a different section is
+/// shown — `dispatch` itself gates it. This exercises `invoke`'s own
+/// contract directly instead (mirroring how research R6 frames it: "if
+/// the action *fires*..."), the same defensive path a non-keyboard
+/// invoker (a future action palette, a plugin-triggered host action)
+/// could still take: the persisted flag still flips (existing
+/// behaviour, unchanged), but no reveal is deferred to whenever the
+/// section is later shown — proven by comparison against a twin
+/// controller whose chain was opened directly (never through `invoke`,
+/// so no reveal request ever existed): both must land at the same,
+/// un-revealed starting offset the first time Now Playing renders.
+#[test]
+fn keyboard_toggle_flag_flips_without_a_deferred_reveal_when_now_playing_isnt_shown() {
+    fn sixteen_node_controller(
+        label: &str,
+    ) -> (
+        PlaybackController<FakeBackend, ScriptedHost>,
+        ScriptedHostHandle,
+        TestDirs,
+    ) {
+        // Bundled plugins stay un-launched (mirrors this file's own
+        // `active_controller_without_bundled_plugins` doc comment): Key &
+        // Tempo (013) would otherwise add its own pitch/stretch pair
+        // asynchronously, eating into the 16-node capacity this test fills
+        // by hand.
+        let (mut controller, handle, dirs) = active_controller_without_bundled_plugins(label);
+        for _ in 0..16 {
+            controller
+                .chain_add_node(NodeKind::Gain)
+                .expect("add gain node");
+        }
+        (controller, handle, dirs)
+    }
+
+    // -- Baseline: the chain is opened directly (no dispatcher involved at
+    // all), then rendered for the first time — its offset is purely
+    // whatever a fresh, never-revealed render produces.
+    let (mut baseline_controller, _baseline_handle, _baseline_dirs) =
+        sixteen_node_controller("r5-not-shown-baseline");
+    baseline_controller.set_now_playing_panel_open(NowPlayingPanel::EffectChain, true);
+    let baseline_ctx = fresh_now_playing_ctx();
+    let mut baseline_artwork = ArtworkCache::new();
+    let mut baseline_waveform = WaveformState::default();
+    let mut baseline_memory = SectionMemory::default();
+    render_now_playing(
+        &baseline_ctx,
+        &mut baseline_controller,
+        &mut baseline_artwork,
+        &mut baseline_waveform,
+        &mut baseline_memory,
+    );
+    let baseline_offset = baseline_memory
+        .offset(&ViewKey::NowPlaying)
+        .expect("the baseline's first render must record an offset");
+
+    // -- Subject: `ToggleEffectChain` is invoked directly (bypassing
+    // `dispatch`'s `Scope::NowPlaying` gate, which a real `E` keypress
+    // could never get past here) — the flag flips (existing behaviour),
+    // and a reveal request is written, but only ever consumed if Now
+    // Playing renders within its two-pass window. A few frames elapse
+    // first, well past that window, before Now Playing is shown for the
+    // very first time.
+    let (mut controller, _handle, _dirs) = sixteen_node_controller("r5-not-shown-subject");
+    assert!(!controller.now_playing_panel_open(NowPlayingPanel::EffectChain));
+    let mut shell = Shell::default();
+    let mut waveform = WaveformState::default();
+    let ctx = fresh_now_playing_ctx();
+
+    let output = ctx.run_ui(default_input(), |ui| {
+        let frame_ctx = ui.ctx().clone();
+        actions::invoke(
+            Invocation {
+                action: ActionId::Host(HostAction::ToggleEffectChain),
+                repeat: false,
+            },
+            &mut controller,
+            &mut shell,
+            &mut waveform,
+            &frame_ctx,
+        );
+    });
+    output.drop_without_applying_deltas();
+    assert!(
+        controller.now_playing_panel_open(NowPlayingPanel::EffectChain),
+        "the flag must still flip even while Now Playing isn't shown"
+    );
+
+    for _ in 0..2 {
+        let output = ctx.run_ui(default_input(), |_ui| {});
+        output.drop_without_applying_deltas();
+    }
+
+    let mut artwork = ArtworkCache::new();
+    let mut memory = SectionMemory::default();
+    render_now_playing(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        &mut memory,
+    );
+    let subject_offset = memory
+        .offset(&ViewKey::NowPlaying)
+        .expect("the subject's first Now Playing render must record an offset");
+
+    assert!(
+        (subject_offset - baseline_offset).abs() < 0.5,
+        "a reveal requested while Now Playing wasn't shown must never apply later, even once \
+         Now Playing is finally rendered: baseline={baseline_offset} subject={subject_offset}"
+    );
 }

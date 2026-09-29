@@ -576,16 +576,22 @@ fn welcome_has_exactly_one_primary() {
 
 /// **B7** (contract control-variants.md): `Variant::Quiet` is applied to
 /// exactly the four Queue row actions (`queue-move-up`, `queue-move-down`,
-/// `queue-play-next`, `queue-remove`) in `queue_view.rs`, and
-/// `queue-remove` is never paired with `Variant::Destructive` (FR-004) —
-/// a queue removal stays trivially reversible, not destructive.
+/// `queue-play-next`, `queue-remove`), and `queue-remove` is never paired
+/// with `Variant::Destructive` (FR-004) — a queue removal stays trivially
+/// reversible, not destructive.
 ///
 /// 020-shell-navigation-and-gates (US2, T025, contracts/settings-category-
 /// row.md R7-R9) adds exactly one more `Variant::Quiet` call site: the
 /// Settings category row's "More" overflow button in
-/// `settings/category_row.rs`. B7 itself (queue_view.rs's four sites) is
-/// unchanged; this test's allow-list is widened to name both files rather
-/// than pin `queue_view.rs` as the only one.
+/// `settings/category_row.rs`.
+///
+/// 021-transport-bar-and-panel-layout (contract Q8, research R8) moves the
+/// four actions from four literal `queue_view.rs` call sites into
+/// `rows::queue_row`'s shared `queue_row_actions` table plus two loops (the
+/// single-line and wrapped-to-a-second-line layouts, contract Q3) — so the
+/// per-key literal-line check below moves from `queue_view.rs` to
+/// `rows.rs`, and the `Variant::Quiet` site count drops from five to
+/// three (two loops + category_row.rs's "More").
 #[test]
 fn queue_row_actions_are_quiet() {
     let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -596,8 +602,9 @@ fn queue_row_actions_are_quiet() {
         "queue-play-next",
         "queue-remove",
     ];
-    let expected_site_count = expected_keys.len() + 1; // + settings/category_row.rs's "More".
-    let allowed_files = ["queue_view.rs", "settings/category_row.rs"];
+    // Two `rows.rs` loops (single-line, wrapped) + category_row.rs's "More".
+    let expected_site_count = 3;
+    let allowed_files = ["rows.rs", "settings/category_row.rs"];
 
     let mut quiet_sites = Vec::new();
     for path in walk_src_rs_files() {
@@ -629,21 +636,13 @@ fn queue_row_actions_are_quiet() {
         );
     }
 
-    let contents = fs::read_to_string(src_root.join("queue_view.rs"))
-        .unwrap_or_else(|e| panic!("failed to read queue_view.rs: {e}"));
+    let contents = fs::read_to_string(src_root.join("rows.rs"))
+        .unwrap_or_else(|e| panic!("failed to read rows.rs: {e}"));
     for key in expected_keys {
         let tr_key = format!("\"{key}\"");
-        let key_lines = lines_containing(&contents, &tr_key);
         assert!(
-            !key_lines.is_empty(),
-            "queue_view.rs: expected a call site for tr(\"{key}\")"
-        );
-        let on_a_quiet_line = key_lines
-            .iter()
-            .any(|(_, line)| line.contains("Variant::Quiet"));
-        assert!(
-            on_a_quiet_line,
-            "queue_view.rs: \"{key}\" is never paired with Variant::Quiet on the same line"
+            !lines_containing(&contents, &tr_key).is_empty(),
+            "rows.rs: expected a `queue_row_actions` entry for \"{key}\""
         );
     }
 

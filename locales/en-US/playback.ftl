@@ -15,6 +15,10 @@ now-playing-artist = { $artist }
 now-playing-empty = No track is playing.
 now-playing-pick-a-track = Pick a track to start playing.
 now-playing-album = { $album }
+# 021-transport-bar-and-panel-layout (contract B4): the pinned transport
+# bar's identity group AccessKit label — the full title/artist, even while
+# the painted labels truncate.
+now-playing-bar-identity = { $title }, { $artist }
 waveform-unavailable = Waveform unavailable
 waveform-detail = Waveform detail
 waveform-detail-window = { $start } to { $end }
@@ -42,7 +46,6 @@ queue-repeat-off = Repeat off
 queue-repeat-one = Repeat one
 queue-repeat-all = Repeat all
 queue-row = { $title }
-queue-current = Now playing:
 queue-badge-play-next = In play next
 queue-badge-unavailable = Unavailable
 queue-move-up = Move up
@@ -50,6 +53,22 @@ queue-move-down = Move down
 queue-play-next = Play next
 queue-remove = Remove
 queue-empty = The queue is empty.
+
+# 021-transport-bar-and-panel-layout (contract Q11): the Queue row's own
+# `Role::ListItem` accessible name. A Fluent select on `$has_artist` so an
+# artist-less row's name doesn't carry a bare trailing comma. Replaces the
+# visible "Now playing:" prefix (`queue-current`, removed — contract Q7).
+queue-row-name = { $has_artist ->
+    [yes] { $title }, { $artist }
+   *[no] { $title }
+}
+queue-row-name-current = { $has_artist ->
+    [yes] Now playing, { $title }, { $artist }
+   *[no] Now playing, { $title }
+}
+# The currently-playing row's leading glyph (contract Q5, FR-013/FR-014):
+# a shape, not colour alone.
+queue-playing-glyph = ▶
 
 ## Transfer banner ("Playing on <device>" / Play here — Phase 5, US3)
 

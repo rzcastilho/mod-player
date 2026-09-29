@@ -353,6 +353,13 @@ pub struct QueueRow {
     pub origin: Origin,
     pub unavailable: bool,
     pub is_current: bool,
+    /// The track's artwork, when the source provided one
+    /// (021 data-model.md §3, FR-012).
+    pub artwork_url: Option<String>,
+    /// The initials-placeholder source: the album, or else the title
+    /// (021 data-model.md §3, FR-3.2.2). Same rule as `rows.rs` and
+    /// `now_playing.rs`.
+    pub artwork_name: String,
 }
 
 /// The Queue panel's projection of `Queue` (T066): the effective order,
@@ -728,13 +735,28 @@ pub struct PlaybackController<B: OutputBackend, H: SourceHost> {
 }
 
 /// Which Now Playing block a persisted open/closed flag addresses
-/// (016-list-row-and-panel-components, FR-019, data-model.md §11). Markers
-/// has no toggle (FR-021) and is not a variant here.
+/// (016-list-row-and-panel-components, FR-019, data-model.md §11;
+/// 021-transport-bar-and-panel-layout, data-model.md §1). Markers has no
+/// **bar** toggle (spec Clarification 5), but it does have a persisted
+/// open flag and a header disclosure, like the other three.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NowPlayingPanel {
+    Markers,
     EffectChain,
     Transport,
     Queue,
+}
+
+impl NowPlayingPanel {
+    /// Render order for the four panel cards below the waveform
+    /// (021-transport-bar-and-panel-layout, data-model.md §1, FR-004,
+    /// FR-006).
+    pub const RENDER_ORDER: [NowPlayingPanel; 4] = [
+        NowPlayingPanel::Markers,
+        NowPlayingPanel::EffectChain,
+        NowPlayingPanel::Transport,
+        NowPlayingPanel::Queue,
+    ];
 }
 
 /// `transport.seek_forward_step`/`seek_backward_step`'s step size
@@ -1995,6 +2017,12 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
                 origin: item.origin,
                 unavailable: item.unavailable,
                 is_current: Some(item.uid) == current_uid,
+                artwork_url: item.track.artwork_url.clone(),
+                artwork_name: item
+                    .track
+                    .album
+                    .clone()
+                    .unwrap_or_else(|| item.track.title.clone()),
             })
             .collect();
         QueueView {
@@ -2535,6 +2563,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
     #[must_use]
     pub fn now_playing_panel_open(&self, panel: NowPlayingPanel) -> bool {
         match panel {
+            NowPlayingPanel::Markers => self.now_playing_panels.markers_open,
             NowPlayingPanel::EffectChain => self.now_playing_panels.effect_chain_open,
             NowPlayingPanel::Transport => self.now_playing_panels.transport_open,
             NowPlayingPanel::Queue => self.now_playing_panels.queue_open,
@@ -2548,6 +2577,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
     /// mirror is kept anywhere else (FR-019, P1).
     pub fn set_now_playing_panel_open(&mut self, panel: NowPlayingPanel, open: bool) {
         match panel {
+            NowPlayingPanel::Markers => self.now_playing_panels.markers_open = open,
             NowPlayingPanel::EffectChain => self.now_playing_panels.effect_chain_open = open,
             NowPlayingPanel::Transport => self.now_playing_panels.transport_open = open,
             NowPlayingPanel::Queue => self.now_playing_panels.queue_open = open,
@@ -5153,9 +5183,13 @@ mod tests {
         assert_eq!(controller.shared().clock_frames(), 42);
     }
 
-    /// P2 (016-list-row-and-panel-components, FR-019): `set_now_playing_
-    /// panel_open` then a settings-store reload reads back the same value,
-    /// for all three `NowPlayingPanel` variants, independently.
+    /// P2 (016-list-row-and-panel-components, FR-019), extended by T-N3
+    /// (021-transport-bar-and-panel-layout, contracts/settings-now-
+    /// playing-panels.md N3): `set_now_playing_panel_open` then a
+    /// settings-store reload reads back the same value, for all four
+    /// `NowPlayingPanel` variants, independently. `Markers` defaults open
+    /// (the other three default closed), so each panel is toggled to its
+    /// *opposite* default and that opposite is what must survive reload.
     #[test]
     fn now_playing_panel_open_persists_and_reloads() {
         let store = fresh_store();
@@ -5163,14 +5197,19 @@ mod tests {
         let mut controller =
             PlaybackController::new(FakeBackend::new(vec![]), SyntheticHost::new(44_100), store);
         let panels = [
-            NowPlayingPanel::EffectChain,
-            NowPlayingPanel::Transport,
-            NowPlayingPanel::Queue,
+            (NowPlayingPanel::EffectChain, false),
+            (NowPlayingPanel::Transport, false),
+            (NowPlayingPanel::Queue, false),
+            (NowPlayingPanel::Markers, true),
         ];
-        for panel in panels {
-            assert!(!controller.now_playing_panel_open(panel));
-            controller.set_now_playing_panel_open(panel, true);
-            assert!(controller.now_playing_panel_open(panel));
+        for (panel, default_open) in panels {
+            assert_eq!(
+                controller.now_playing_panel_open(panel),
+                default_open,
+                "{panel:?} must start at its documented default"
+            );
+            controller.set_now_playing_panel_open(panel, !default_open);
+            assert_eq!(controller.now_playing_panel_open(panel), !default_open);
         }
 
         let reloaded = PlaybackController::new(
@@ -5178,9 +5217,10 @@ mod tests {
             SyntheticHost::new(44_100),
             SettingsStore::with_path(path),
         );
-        for panel in panels {
-            assert!(
+        for (panel, default_open) in panels {
+            assert_eq!(
                 reloaded.now_playing_panel_open(panel),
+                !default_open,
                 "{panel:?} must survive a reload"
             );
         }
@@ -5198,6 +5238,59 @@ mod tests {
         assert_eq!(
             notification.map(|n| n.message_key),
             Some("settings-unreadable")
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // 021-transport-bar-and-panel-layout: T040 — T-QC (contracts/
+    // queue-row.md): `queue_view()` fills `artwork_url`/`artwork_name`
+    // per the album-else-title rule (data-model.md §3).
+    // -----------------------------------------------------------------
+
+    /// `queue_view()` fills `artwork_url` from the track, and
+    /// `artwork_name` from the album when there is one, else the title.
+    #[test]
+    fn queue_view_fills_artwork_url_and_name() {
+        use modplayer_audio_source::Availability;
+
+        let with_album = TrackRef::new(
+            TrackId::new("spotify:track:a").unwrap_or_else(|_| unreachable!()),
+            "Song A",
+            vec!["Artist A".to_string()],
+            Some("Album A".to_string()),
+            Some("https://example.test/a.jpg".to_string()),
+            180_000,
+            Availability::Available,
+        );
+        let without_album = TrackRef::new(
+            TrackId::new("spotify:track:b").unwrap_or_else(|_| unreachable!()),
+            "Song B",
+            vec!["Artist B".to_string()],
+            None,
+            None,
+            180_000,
+            Availability::Available,
+        );
+
+        let mut controller = PlaybackController::new(
+            FakeBackend::new(vec![]),
+            SyntheticHost::new(44_100),
+            fresh_store(),
+        );
+        controller.queue_replace(vec![with_album, without_album]);
+
+        let view = controller.queue_view();
+        assert_eq!(view.items.len(), 2);
+
+        let a = &view.items[0];
+        assert_eq!(a.artwork_url.as_deref(), Some("https://example.test/a.jpg"));
+        assert_eq!(a.artwork_name, "Album A", "album, when there is one");
+
+        let b = &view.items[1];
+        assert_eq!(b.artwork_url, None, "no URL when the track has none");
+        assert_eq!(
+            b.artwork_name, "Song B",
+            "falls back to the title when there is no album"
         );
     }
 }

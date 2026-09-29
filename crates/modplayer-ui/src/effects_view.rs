@@ -25,7 +25,9 @@ use modplayer_effects::catalog::{NodeKind, NodeOwner, ParamId, QualityMode};
 use crate::actions::{self, Claim};
 use crate::theme::controls::Variant;
 use crate::widgets::chain_meters;
-use crate::widgets::controls::{SwitchKind, button, destructive_gap, panel_card, switch};
+use crate::widgets::controls::{
+    CardResponse, SwitchKind, button, collapsible_panel_card, destructive_gap, switch,
+};
 
 /// The kinds the "Add node…" control offers (contracts/ui-effect-
 /// chain.md §2: "a `ComboBox` of the six kinds").
@@ -35,12 +37,16 @@ const ADDABLE_KINDS: [NodeKind; 6] = NodeKind::ALL;
 /// §1): flips the persisted `[now_playing_panels] effect_chain_open` flag
 /// through the controller, so a keyboard toggle and the header switch stay
 /// in sync and the state survives a restart
-/// (016-list-row-and-panel-components, FR-019).
+/// (016-list-row-and-panel-components, FR-019). Returns the panel's new
+/// open state (021-transport-bar-and-panel-layout, contract R5, research
+/// R6): `true` tells the caller to also request a reveal.
 pub fn toggle_effect_chain_panel<B: OutputBackend, H: SourceHost>(
     controller: &mut PlaybackController<B, H>,
-) {
+) -> bool {
     let open = controller.now_playing_panel_open(NowPlayingPanel::EffectChain);
-    controller.set_now_playing_panel_open(NowPlayingPanel::EffectChain, !open);
+    let new_open = !open;
+    controller.set_now_playing_panel_open(NowPlayingPanel::EffectChain, new_open);
+    new_open
 }
 
 /// The egui memory id the "Add node…" combo's own selection persists
@@ -63,20 +69,23 @@ pub fn handle_id(node: NodeId) -> Id {
 /// Draw the Effect Chain panel: header, one row per node in processing
 /// order, then the "Add node…" control. Rendered regardless of whether a
 /// track is loaded (contracts/ui-effect-chain.md §1 — an empty chain with
-/// 0 % figures is valid).
+/// 0 % figures is valid; 021-transport-bar-and-panel-layout contract C4:
+/// always present, either open or as a header-only collapsed card).
 pub fn show<B: OutputBackend, H: SourceHost>(
     ui: &mut Ui,
     controller: &mut PlaybackController<B, H>,
-) {
+    open: &mut bool,
+) -> CardResponse {
     let view = controller.chain_view();
     let meters = controller.chain_meters();
 
-    // 016-list-row-and-panel-components (FR-017/FR-018, research R7): the
-    // shared card now draws the `effects-panel-title` header — the in-row
-    // `section_label` this panel used to draw itself is deleted, so it is
-    // never rendered twice. The CPU/overload/over-budget controls keep
-    // their own row inside the card.
-    panel_card(ui, &tr("effects-panel-title"), |ui| {
+    // 016-list-row-and-panel-components (FR-017/FR-018, research R7),
+    // superseded by 021 contract C1/C2 (research R7): the shared
+    // collapsible card now draws the `effects-panel-title` header plus a
+    // header disclosure — the in-row `section_label` this panel used to
+    // draw itself stays deleted, so it is never rendered twice. The CPU/
+    // overload/over-budget controls keep their own row inside the card.
+    collapsible_panel_card(ui, &tr("effects-panel-title"), open, |ui| {
         show_header(ui, &view, &meters);
 
         for row in &view.nodes {
@@ -84,7 +93,7 @@ pub fn show<B: OutputBackend, H: SourceHost>(
         }
 
         show_add_row(ui, controller, view.nodes.len(), view.capacity);
-    });
+    })
 }
 
 /// The panel header's chrome-under-the-title row (contracts/ui-effect-
@@ -107,10 +116,12 @@ fn show_header(ui: &mut Ui, view: &ChainView, meters: &MeterSnapshot) {
             ui.label(tr("effects-over-budget-badge"));
         }
     });
-    ui.horizontal(|ui| {
-        chain_meters::level_pair(ui, "effects-pre", meters.pre);
-        chain_meters::level_pair(ui, "effects-post", meters.post);
-    });
+    // One pair per line: each `level_pair` is an atomic `horizontal` a
+    // wrapping row can't break, and side by side they overflowed the
+    // centre column, widening every row below them (2026-09-28 manual
+    // walk, research R15).
+    chain_meters::level_pair(ui, "effects-pre", meters.pre);
+    chain_meters::level_pair(ui, "effects-post", meters.post);
     chain_meters::spectrum(ui, &meters.spectrum);
 }
 
@@ -126,7 +137,10 @@ fn show_row<B: OutputBackend, H: SourceHost>(
     row: &NodeRow,
 ) {
     let (_frame, payload) = ui.dnd_drop_zone::<NodeId, _>(egui::Frame::group(ui.style()), |ui| {
-        ui.horizontal(|ui| {
+        // Wrapped, not a plain `horizontal`: inside 021's single vertical
+        // scroll region a row wider than the centre column painted over
+        // the plugin dock (2026-09-28 manual walk, research R15).
+        ui.horizontal_wrapped(|ui| {
             show_handle(ui, row);
 
             ui.label(format!("{}. {}", row.index + 1, tr(row.kind.label_key())));
@@ -148,6 +162,10 @@ fn show_row<B: OutputBackend, H: SourceHost>(
                 &[("pct", format!("{:.0}", row.cost_pct))],
             ));
 
+            // Parameters start their own line: switches and mode combos
+            // are atomic `horizontal`s the wrap can't pre-measure, so on
+            // one line with the identity group they overshot the column.
+            ui.end_row();
             show_params(ui, controller, row);
 
             if row.mode_note {

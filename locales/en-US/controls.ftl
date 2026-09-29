@@ -87,3 +87,9 @@ controls-reject-modifier-only = Press a key, not just a modifier
 controls-reject-duplicate = Already bound to this action
 
 keybindings-invalid-entries = Some saved keyboard shortcuts couldn't be read and were reset to their defaults.
+
+## 021-transport-bar-and-panel-layout, contracts/ui-now-playing-layout.md C1:
+## `collapsible_panel_card`'s header disclosure button's accessible name.
+
+panel-collapse = Collapse { $panel }
+panel-expand = Expand { $panel }

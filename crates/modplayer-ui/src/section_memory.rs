@@ -33,14 +33,17 @@ pub enum LibraryViewKey {
 }
 
 /// Identifies one scrollable view across the whole app (data-model.md §4,
-/// contracts/section-memory.md "Attachment points"). Now Playing has no
-/// entry (research.md R5): it has no section-level scroll area.
+/// contracts/section-memory.md "Attachment points"; 021-transport-bar-
+/// and-panel-layout, data-model.md §5). Now Playing's own entry has no
+/// payload, like `Search`/`Plugins`: its single scroll region has no
+/// further sub-view to key on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViewKey {
     Library(LibraryViewKey),
     Search,
     Settings(SettingsCategory),
     Plugins,
+    NowPlaying,
 }
 
 impl Hash for ViewKey {
@@ -48,7 +51,7 @@ impl Hash for ViewKey {
         core::mem::discriminant(self).hash(state);
         match self {
             ViewKey::Library(key) => key.hash(state),
-            ViewKey::Search | ViewKey::Plugins => {}
+            ViewKey::Search | ViewKey::Plugins | ViewKey::NowPlaying => {}
             ViewKey::Settings(category) => category.label_key().hash(state),
         }
     }

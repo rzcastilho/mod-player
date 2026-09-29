@@ -1,0 +1,905 @@
+   Compiling modplayer-ui v0.1.0 (/Users/castilho/.autonomous/worktrees/mod-player-906276/021-transport-bar-and-panel-layout/crates/modplayer-ui)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 32.83s
+     Running unittests src/lib.rs (target/debug/deps/modplayer_ui-3d4ff093f99a781c)
+
+running 181 tests
+test app::permission_tests::definitive_free_blocks_with_premium_required ... ok
+test app::permission_tests::not_yet_attemptable_states_block_as_not_verified ... ok
+test app::permission_tests::signed_in_premium_permits_registration ... ok
+test app::permission_tests::signed_in_unknown_tier_permits_registration ... ok
+test app::permission_tests::signed_out_blocks_with_signed_out_reason ... ok
+test layout::tests::dock_presentation_truth_table ... ok
+test artwork::tests::cache_starts_with_no_textures ... ok
+test layout::tests::fills_monitor_detects_zoom_but_not_restored_sizes ... ok
+test layout::tests::identity_width_examples ... ok
+test artwork::tests::repeated_get_for_the_same_url_does_not_queue_duplicate_jobs ... ok
+test artwork::tests::unknown_url_starts_loading_and_never_blocks ... ok
+test layout::tests::reveal_align_is_translation_invariant ... ok
+test layout::tests::identity_width_stays_in_bounds ... ok
+test layout::tests::reveal_align_truth_table_examples ... ok
+test layout::tests::effective_dock_width_is_monotone_in_stored_width ... ok
+test layout::tests::tracker_debounces_until_settled ... ok
+test layout::tests::tracker_discards_zoom_animation_frames_once_maximized ... ok
+test layout::tests::tracker_flush_is_unconditional ... ok
+test layout::tests::tracker_ignores_maximized_or_fullscreen ... ok
+test layout::tests::tracker_ignores_sub_pixel_noise ... ok
+test layout::tests::identity_width_is_monotone ... ok
+test markers::tests::format_mmss_millis_frames_matches_seconds_and_millis ... ok
+test markers::tests::refusal_key_maps_every_variant ... ok
+test notifications::tests::action_label_key_resolves_a_fluent_key_for_every_action ... ok
+test notifications::tests::default_interaction_is_empty ... ok
+test layout::tests::reveal_align_none_implies_fully_visible ... ok
+test layout::tests::effective_dock_width_stays_in_bounds ... ok
+test notifications::tests::severity_color_maps_to_the_right_role ... ok
+test notifications::tests::severity_glyph_differs_for_every_severity ... ok
+test notifications::tests::message_falls_back_to_the_plain_key_with_no_args ... ok
+test notifications::tests::severity_key_resolves_to_non_empty_text_for_every_severity ... ok
+test now_playing::tests::duration_to_frames_round_trips_whole_seconds ... ok
+test now_playing::tests::format_mmss_pads_seconds_to_two_digits ... ok
+test now_playing::tests::format_mmss_frames_matches_duration_based_formatting ... ok
+test layout::tests::reveal_align_never_aligns_when_card_fits ... ok
+test layout::tests::waveform_heights_matches_formula ... ok
+test rows::tests::acting_list_for_a_track_cursors_its_position_in_the_loaded_list ... ok
+test rows::tests::accessible_name_appends_availability_reason ... ok
+test rows::tests::acting_list_for_a_track_not_in_loaded_rows_falls_back_to_a_singleton ... ok
+test rows::tests::acting_list_for_an_album_reports_loading_and_failed ... ok
+test rows::tests::acting_list_for_an_album_uses_the_full_track_list_at_cursor_zero ... ok
+test rows::tests::album_accessible_name_is_name_and_artists ... ok
+test notifications::tests::partition_overflow_matches_the_formula ... ok
+test rows::tests::artwork_failure_or_missing_url_resolves_to_the_initials_placeholder ... ok
+test rows::tests::artwork_loading_resolves_to_a_neutral_square_not_initials ... ok
+test rows::tests::artwork_ready_resolves_to_the_decoded_texture_not_initials ... ok
+test notifications::tests::partition_collapsed_shows_at_most_the_cap ... ok
+test rows::tests::duration_label_is_built_through_mono_text ... ok
+test layout::tests::waveform_heights_is_monotone ... ok
+test notifications::tests::partition_shown_never_exceeds_visible_len ... ok
+test rows::tests::format_duration_rolls_over_at_exactly_sixty_minutes ... ok
+test rows::tests::initials_source_for_a_track_is_its_album_title ... ok
+test rows::tests::initials_source_for_a_track_without_an_album_falls_back_to_its_own_title ... ok
+test rows::tests::initials_source_for_album_artist_playlist_is_their_own_name ... ok
+test rows::tests::is_selected_distinguishes_the_same_key_at_two_indices ... ok
+test rows::tests::non_track_rows_use_the_wide_constant ... ok
+test rows::tests::only_the_three_named_actions_are_placeholders ... ok
+test rows::tests::open_hint_key_is_track_specific_else_the_shared_entity_hint ... ok
+test rows::tests::playlist_and_artist_accessible_names_are_just_the_name ... ok
+test rows::tests::reconcile_calls_key_at_at_most_once_and_only_on_a_matching_salt ... ok
+test rows::tests::reconcile_clears_on_a_different_key_at_the_stored_index ... ok
+test rows::tests::reconcile_clears_on_none_removal_or_a_shrunk_list ... ok
+test rows::tests::reconcile_keeps_the_selection_when_the_stored_index_still_matches ... ok
+test rows::tests::row_action_order_is_the_contract_fixed_order ... ok
+test rows::tests::row_selection_has_no_settings_sourced_construction_path ... ok
+test rows::tests::selecting_twice_leaves_exactly_one_row_selected_even_across_lists ... ok
+test rows::tests::track_detail_excludes_the_duration_suffix ... ok
+test rows::tests::track_row_height_is_the_narrow_constant ... ok
+test section_memory::tests::end_frame_with_none_clears_shown_last_frame ... ok
+test section_memory::tests::end_frame_with_some_leaves_shown_last_frame ... ok
+test section_memory::tests::fresh_memory_has_no_offsets_and_epoch_zero ... ok
+test section_memory::tests::record_then_offset_round_trips ... ok
+test section_memory::tests::reset_clears_offsets_and_bumps_epoch ... ok
+test rows::tests::content_column_width_follows_the_l1_formula ... ok
+test rows::tests::content_column_width_is_identical_for_every_row_kind ... ok
+test section_memory::tests::settings_view_key_equal_categories_hash_equal ... ok
+test settings::category_row::tests::all_fit_is_one_partition_with_no_more ... ok
+test settings::category_row::tests::selected_outside_the_fitting_prefix_is_pinned_before_more ... ok
+test shell::tests::chrome_for_frame_matches_the_table_exhaustively ... ok
+test shell::tests::default_section_is_library ... ok
+test now_playing::tests::wrap_group_before_wraps_only_when_the_group_would_cross_the_boundary ... ok
+test rows::tests::track_row_reports_list_item_role_and_accessible_name ... ok
+test shell::tests::gate_step_from_launch_step_is_one_to_one ... ok
+test shell::tests::gate_step_position_and_label_key ... ok
+test shell::tests::state_relative_to_is_a_pure_position_comparison ... ok
+test theme::controls::tests::band_boundaries ... ok
+test theme::controls::tests::band_colours_come_from_roles ... ok
+test theme::controls::tests::band_selects_in_the_fixed_order ... ok
+test theme::controls::tests::boundary_belongs_to_the_higher_band ... ok
+test theme::controls::tests::destructive_gap_is_twice_item_spacing ... ok
+test theme::controls::tests::focus_ring_is_offset ... ok
+test theme::controls::tests::focus_ring_is_two_px_accent ... ok
+test theme::controls::tests::hover_fill_is_four_percent_foreground ... ok
+test theme::controls::tests::low_ceiling_empties_the_warning_band ... ok
+test theme::controls::tests::mark_colour_follows_the_fill ... ok
+test theme::controls::tests::nav_indicator_is_accent_stroke_widened_by_contrast_mode ... ok
+test theme::controls::tests::pressed_fill_is_double_hover ... ok
+test theme::controls::tests::switch_metrics_come_from_the_scale ... ok
+test theme::controls::tests::switch_states_match_the_table ... ok
+test theme::controls::tests::switch_thumb_position_carries_state ... ok
+test theme::controls::tests::tab_underline_is_accent_stroke_both_themes ... ok
+test theme::controls::tests::tab_underline_width_is_a_named_constant ... ok
+test theme::controls::tests::variant_paint_matches_the_table ... ok
+test theme::controls::tests::variant_set_is_exactly_four ... ok
+test theme::markers::tests::marker_color_indexes_the_fixed_palette ... ok
+test theme::markers::tests::marker_palette_has_eight_distinct_colours ... ok
+test theme::markers::tests::overlay_color_maps_every_token ... ok
+test theme::style::tests::apply_tokens_installs_both_themes ... ok
+test theme::style::tests::apply_tokens_is_idempotent ... ok
+test theme::style::tests::disabled_alpha_matches_the_disabled_token ... ok
+test theme::style::tests::every_visuals_colour_comes_from_a_role ... ok
+test theme::style::tests::no_geometry_or_interaction_field_changes ... ok
+test theme::style::tests::radii_come_from_the_scale ... ok
+test rows::tests::actions_menu_forced_open_lists_all_six_items_as_menu_items ... ok
+test theme::style::tests::spacing_uses_only_scale_steps ... ok
+test theme::style::tests::weak_text_is_the_secondary_role_not_an_alpha ... ok
+test theme::style::tests::widget_slots_are_re_differentiated ... ok
+test theme::tests::maps_every_theme_to_its_preference ... ok
+test theme::tokens::tests::body_and_secondary_are_visibly_different ... ok
+test theme::tokens::tests::divider_is_primary_text_at_eight_percent ... ok
+test theme::tokens::tests::duration_measure_is_duration_figures_times_mono_zero_advance ... ok
+test theme::tokens::tests::mono_digits_are_tabular ... ok
+test theme::tokens::tests::radius_full_is_a_pill_at_any_height ... ok
+test theme::tokens::tests::role_sizes_are_base_times_scale ... ok
+test theme::tokens::tests::roles_selects_by_dark_mode ... ok
+test theme::tokens::tests::roles_table_matches_the_contract ... ok
+test theme::tokens::tests::section_label_uppercases_at_draw_time ... ok
+test theme::tokens::tests::spacing_scale_is_the_four_pixel_scale ... ok
+test theme::tokens::tests::text_styles_cover_every_role ... ok
+test ticker::tests::drop_stops_the_thread_promptly ... ok
+test ticker::tests::set_playing_updates_the_flag_the_thread_reads ... ok
+test waveform::coords::tests::frame_at_clamps_x_outside_the_rect ... ok
+test waveform::coords::tests::frame_at_start_and_end_land_on_the_window_edges ... ok
+test waveform::coords::tests::frames_per_pixel_never_zero_or_nan_for_a_degenerate_rect ... ok
+test waveform::coords::tests::round_trip_is_within_one_pixel ... ok
+test waveform::coords::tests::x_of_clamps_frames_outside_the_window ... ok
+test waveform::coords::tests::x_of_start_and_end_land_on_the_rect_edges ... ok
+test waveform::paint::tests::empty_width_yields_no_columns ... ok
+test waveform::paint::tests::present_buckets_yield_present_columns_absent_yield_placeholder ... ok
+test waveform::state::tests::detail_window_clamps_at_track_ends ... ok
+test waveform::state::tests::detail_window_follow_pages_forward ... ok
+test waveform::state::tests::detail_window_initial_is_30s_centered ... ok
+test waveform::state::tests::detail_window_recenters_on_outside_seek ... ok
+test waveform::state::tests::detail_window_reset_reenables_follow ... ok
+test waveform::state::tests::detail_window_suspends_follow_on_pan_or_zoom ... ok
+test waveform::state::tests::detail_window_zoom_assist_converges_to_target ... ok
+test waveform::state::tests::detail_window_zoom_assist_respects_floor_and_ceiling ... ok
+test waveform::state::tests::detail_window_zoom_ceiling_whole_track ... ok
+test waveform::state::tests::detail_window_zoom_floor_200ms ... ok
+test waveform::state::tests::fresh_state_has_no_drag_preview ... ok
+test waveform::state::tests::preview_frame_reflects_the_active_drag ... ok
+test widgets::chain_meters::tests::band_center_hz_spans_20_to_20000 ... ok
+test settings::tests::reset_category_returns_to_the_first_fixed_order_category ... ok
+test widgets::chain_meters::tests::format_hz_switches_to_khz_at_one_thousand ... ok
+test widgets::chain_meters::tests::fraction_of_maps_scale_bounds_to_unit_interval ... ok
+test widgets::chain_meters::tests::spectrum_bar_height_is_a_60_db_log_scale ... ok
+test widgets::controls::tests::button_hover_and_press_track_across_passes ... ok
+test widgets::controls::tests::nav_item_paints_indicator_only_when_selected_no_fill_when_selected ... ok
+test widgets::controls::tests::nav_item_accesskit_reports_selected_state_and_exact_label ... ok
+test widgets::controls::tests::panel_card_header_is_uppercase_section_role_with_exact_accessible_name ... ok
+test widgets::controls::tests::switch_checkbox_kind_reports_checkbox_role_and_toggled ... ok
+test widgets::initials::tests::digits_count_as_initials ... ok
+test widgets::initials::tests::glyph_text_is_the_music_glyph ... ok
+test widgets::initials::tests::more_than_two_words_only_uses_the_first_two ... ok
+test widgets::initials::tests::no_letters_or_digits_falls_back_to_the_glyph ... ok
+test widgets::initials::tests::single_word_yields_one_letter ... ok
+test widgets::initials::tests::skips_leading_punctuation_within_a_word ... ok
+test widgets::initials::tests::two_words_yield_two_uppercase_initials ... ok
+test widgets::knob::tests::sweep_covers_three_quarter_turn ... ok
+test widgets::peak_meter::tests::format_db_handles_infinity ... ok
+test widgets::peak_meter::tests::fraction_of_maps_scale_bounds_to_unit_interval ... ok
+test widgets::peak_meter::tests::to_db_of_silence_is_negative_infinity ... ok
+test widgets::skeleton::tests::skeleton_row_reports_status_role_and_loading_label ... ok
+test widgets::volume::tests::readout_formats_percent_and_db ... ok
+test widgets::controls::tests::switch_toggle_kind_reports_button_role_and_toggled ... ok
+test shell::tests::every_shell_and_notification_widget_has_an_accessible_name ... ok
+test widgets::controls::tests::panel_card_uses_surface_raised_lg_padding_md_radius_no_stroke ... ok
+test settings::developer::tests::readout_shows_requested_and_zero_negotiated_before_any_stream ... ok
+test settings::playback::tests::new_seeds_the_draft_from_the_current_effective_name ... ok
+test settings::playback::tests::nudge_step_drag_value_commits ... ok
+test shell::tests::every_account_widget_has_an_accessible_name ... ok
+
+test result: ok. 181 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s
+
+     Running tests/accessibility.rs (target/debug/deps/accessibility-e71cd1399b3b5fae)
+
+running 46 tests
+test active_library_tab_exposes_selected_and_toggled_true_others_false ... ok
+test detail_back_button_exposes_its_accessible_name ... ok
+test device_name_field_is_labelled_and_shows_the_current_name ... ok
+test controls_reset_all_and_row_controls_expose_accessible_names_and_stay_enabled ... ok
+test controls_disabled_row_shows_inactive_suffix_and_keeps_controls_enabled ... ok
+test controls_binding_chip_and_remove_button_expose_accessible_names ... ok
+test controls_filter_box_is_labelled ... ok
+test controls_capture_control_exposes_accessible_name_and_role ... ok
+test controls_tab_order_is_filter_then_reset_all ... ok
+test arm_toggle_exposes_role_checkbox_and_reports_toggled_state ... ok
+test each_row_exposes_a_list_item_and_an_actions_button ... ok
+test empty_state_exposes_pick_a_track_and_no_waveform_slider ... ok
+test every_marker_kind_glyph_exposes_role_button_named_marker_glyph ... ok
+test every_focused_marker_key_is_reachable ... ok
+test getting_started_controls_accessible ... ok
+test effect_chain_controls_expose_accessible_names_and_states ... ok
+test every_view_level_marker_shortcut_key_is_reachable ... ok
+test group_headers_expose_role_header_and_the_fixed_names ... ok
+test library_row_exposes_a_list_item_and_an_actions_button ... ok
+test library_tabs_expose_role_tab_in_the_fixed_order ... ok
+test notification_action_buttons_expose_accessible_names ... ok
+test effect_chain_meters_spectrum_and_overload_controls_expose_accessible_names ... ok
+test notification_severity_word_is_exposed_as_text_for_every_card ... ok
+test every_waveform_key_in_the_contract_table_is_reachable ... ok
+test eq_filter_stereo_controls_expose_accessible_names_and_states ... ok
+test notification_show_more_and_details_toggles_expose_accessible_names ... ok
+test panel_row_exposes_role_list_item ... ok
+test plugin_panel_widgets_expose_accessible_names ... ok
+test queue_row_actions_expose_accessible_names ... ok
+test loop_numeric_fields_and_nudge_step_are_labelled ... ok
+test selected_nav_rail_item_reports_selected_others_do_not ... ok
+test queue_panel_header_exposes_its_exact_accessible_name ... ok
+test search_box_exposes_a_text_input_labelled_search ... ok
+test markers_panel_and_empty_state_are_exposed ... ok
+test queue_shuffle_toggle_reports_its_toggled_state ... ok
+test refreshing_status_label_exposes_role_status_after_a_rate_limited_resync ... ok
+test transport_position_key_no_longer_resolves_or_exists ... ok
+test plugins_section_controls_named ... ok
+test show_more_button_exposes_its_accessible_name_when_a_further_page_exists ... ok
+test transport_controls_are_disabled_when_playback_is_not_permitted ... ok
+test transport_panel_empty_state_exposes_its_accessible_name ... ok
+test transfer_banner_play_here_button_exposes_its_accessible_name ... ok
+test transport_controls_expose_accessible_names ... ok
+test waveform_detail_is_a_named_slider_with_windowed_description ... ok
+test waveform_overview_is_a_named_slider_with_mmss_value_text ... ok
+test transport_panel_controls_expose_accessible_names_and_states ... ok
+
+test result: ok. 46 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.26s
+
+     Running tests/actions.rs (target/debug/deps/actions-ee28ac0584bb131c)
+
+running 26 tests
+test dispatch_returns_plugin_action_id ... ok
+test focused_volume_slider_keeps_arrows ... ok
+test focused_waveform_lets_space_toggle ... ok
+test disabled_tempo_binding_does_not_block_and_flags_on_enable ... ok
+test focused_stop_button_wins_space_exactly_one_effect ... ok
+test key_name_table_matches_egui_key_all ... ok
+test held_space_toggles_once_held_volume_repeats ... ok
+test every_enabled_default_binding_dispatches ... ok
+test conflicting_chord_fires_neither_until_resolved ... ok
+test i_o_l_arms_loop_with_no_pointer ... ok
+test i_outside_now_playing_falls_through ... ok
+test invocation_lands_in_the_same_frame_as_the_key_event ... ok
+test nudge_requires_focused_marker ... ok
+test plus_minus_step_tempo_unless_waveform_focused ... ok
+test plus_without_time_stretch_notifies_once_while_held ... ok
+test shift_equals_plus_on_focused_waveform_never_steps_tempo ... ok
+test slash_in_focused_text_field_types_and_does_not_focus_search ... ok
+test q_toggles_queue_panel_in_now_playing_only ... ok
+test t_ignored_outside_now_playing ... ok
+test t_ignored_while_text_field_focused ... ok
+test tempo_actions_enabled_and_repeat ... ok
+test text_field_focus_silences_every_action ... ok
+test t_toggles_transport_panel_in_now_playing_scope ... ok
+test toggle_effect_chain_dispatches_in_now_playing_only ... ok
+test transport_shortcuts_from_now_playing_and_library ... ok
+test inherited_bindings_produce_identical_controller_calls ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.58s
+
+     Running tests/control_inventory.rs (target/debug/deps/control_inventory-2bd118db497ee706)
+
+running 4 tests
+test no_library_tab_became_a_switch ... ok
+test no_nav_rail_item_became_a_switch ... ok
+test no_selection_control_became_a_switch ... ok
+test every_boolean_control_is_a_switch ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/control_variants.rs (target/debug/deps/control_variants-b03beb1ad0ffd781)
+
+running 9 tests
+test a_switch_is_not_any_button_variant ... ok
+test variant_colours_come_from_roles ... ok
+test four_variants_are_four_distinct_triples ... ok
+test widget_module_uses_only_token_values ... ok
+test disabled_controls_show_no_feedback ... ok
+test welcome_has_exactly_one_primary ... ok
+test queue_row_actions_are_quiet ... ok
+test destructive_gap_at_named_instances ... ok
+test destructive_sites_are_exactly_fr003 ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/controls.rs (target/debug/deps/controls-0b979f753c46637a)
+
+running 17 tests
+test capture_accepts_space_enter_arrows_function_keys ... ok
+test capture_rejects_duplicate_tab_and_mac_control_inline ... ok
+test chips_display_platform_glyphs ... ok
+test every_action_listed_grouped_by_category ... ok
+test disabled_rows_greyed_rebindable_and_never_fire ... ok
+test conflict_flag_shows_on_both_rows ... ok
+test capture_accepts_chord_and_adds_chip ... ok
+test capture_of_conflicting_chord_flags_both_and_names_partner ... ok
+test filter_matches_label_and_category_case_insensitively ... ok
+test filter_no_match_shows_line ... ok
+test greyed_when_suspended ... ok
+test remove_chip_immediately_allows_zero_bindings ... ok
+test reset_action_restores_default_without_confirm ... ok
+test plugin_group_rendered ... ok
+test capture_esc_and_focus_loss_cancel ... ok
+test tier_conflict_text ... ok
+test reset_all_two_step_confirm_cancel_esc_focus_loss ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.83s
+
+     Running tests/credential_leak.rs (target/debug/deps/credential_leak-86a76116f3c5965d)
+
+running 2 tests
+test credential_never_appears_outside_secure_store ... ok
+test catalog_seam_never_carries_session_token ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running tests/design_token_contrast.rs (target/debug/deps/design_token_contrast-a354a82ae6cf749d)
+
+running 13 tests
+test disabled_composite_clears_the_non_text_floor ... ok
+test every_text_role_clears_its_floor ... ok
+test high_contrast_divider_clears_the_non_text_floor ... ok
+test high_contrast_roles_clear_the_enhanced_floor ... ok
+test high_contrast_text_clears_the_enhanced_floor ... ok
+test marker_palette_clears_three_to_one ... ok
+test nav_indicator_clears_the_non_text_floor_against_the_rail_surface ... ok
+test on_accent_is_readable ... ok
+test raised_surface_is_separated ... ok
+test ratio_matches_the_wcag_reference ... ok
+test status_roles_clear_the_text_floor ... ok
+test text_on_accent_still_pairs_with_the_high_contrast_accent ... ok
+test selected_row_text_clears_the_floor_against_accent ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running tests/design_token_literals.rs (target/debug/deps/design_token_literals-66b492bd344ef911)
+
+running 4 tests
+test notifications_module_is_covered_by_the_literal_scan ... ok
+test scan_actually_reaches_both_crates ... ok
+test no_separator_between_panels ... ok
+test no_colour_or_font_literals_outside_theme ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests/design_token_roles.rs (target/debug/deps/design_token_roles-76a3b6f039ea2d52)
+
+running 7 tests
+test type_roles::health_dot_colours_come_from_roles ... ok
+test type_roles::marker_labels_use_a_role_colour ... ok
+test type_roles::numeric_fields_use_the_mono_role ... ok
+test app_tokens::update_reapplies_tokens_every_frame ... ok
+test app_tokens::theme_switch_changes_every_slot_with_no_view_change ... ok
+test measure::body_measure_is_seventy_two_zero_widths ... ok
+test measure::a_long_paragraph_wraps_within_the_measure ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/developer_removed.rs (target/debug/deps/developer_removed-a9f58503c0047488)
+
+running 2 tests
+test no_play_from_account_control_renders ... ok
+test only_the_three_sample_notification_buttons_render ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+
+     Running tests/effects_view.rs (target/debug/deps/effects_view-8ba704e794886f74)
+
+running 15 tests
+test meters_and_spectrum_render_from_snapshot ... ok
+test auto_bypassed_label_shown_from_view_flag ... ok
+test bypass_toggle_updates_state_immediately ... ok
+test drag_drop_reorders_and_calls_move_to ... ok
+test arrow_up_on_focused_handle_moves_node_and_keeps_focus ... ok
+test click_on_waveform_takes_focus_so_plus_zooms ... ok
+test add_each_kind_appends_at_defaults_and_shows_zero_cost ... ok
+test over_budget_badge_and_counter_follow_view ... ok
+test e_and_header_toggle_panel_and_it_survives_track_change ... ok
+test phase_invert_disabled_unless_mono_sum ... ok
+test out_of_range_entry_displays_clamped_value ... ok
+test quality_note_appears_at_25_percent_and_clears_at_100 ... ok
+test remove_row_disappears_order_preserved ... ok
+test rows_list_nodes_in_processing_order_with_type_owner_bypass_handle_cost ... ok
+test seventeenth_add_is_refused_inline ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+
+     Running tests/first_launch.rs (target/debug/deps/first_launch-10c3cb65b57c8c1c)
+
+running 5 tests
+test decline_writes_nothing ... ok
+test acknowledgement_survives_sign_out_and_revocation ... ok
+test fresh_launch_reports_default_window_settings ... ok
+test getting_started_dismiss_persists_across_relaunch ... ok
+test restored_window_size_survives_relaunch ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+
+     Running tests/fluent_keys.rs (target/debug/deps/fluent_keys-b308c93172427b26)
+
+running 9 tests
+test no_unused_keys_in_playback_and_settings_ftl ... ok
+test us4_notification_chrome_keys_resolve_non_empty ... ok
+test gate_step_keys_resolve ... ok
+test getting_started_strings_exist ... ok
+test device_lost_and_missing_wording_names_both_devices ... ok
+test markers_heading_key_was_intentionally_consolidated ... ok
+test plugins_ftl_keys_used_exist ... ok
+test scaffold_keys_no_longer_resolve_or_exist ... ok
+test every_shell_nav_and_notification_key_resolves ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/high_contrast.rs (target/debug/deps/high_contrast-92e8b796deac0ee8)
+
+running 22 tests
+test divider_is_the_primary_text_colour_scaled ... ok
+test focus_ring_thickens_only_in_high_contrast ... ok
+test for_dark_mode_is_the_normal_mode_selector ... ok
+test for_theme_selects_all_four_tables ... ok
+test every_border_follows_the_divider ... ok
+test high_contrast_is_recoverable_from_the_applied_visuals ... ok
+test high_contrast_promotes_secondary_text ... ok
+test normal_tables_are_unchanged ... ok
+test normal_tables_keep_secondary_distinct ... ok
+test roles_selects_the_table_the_style_was_built_from ... ok
+test the_axis_field_marks_exactly_the_two_high_contrast_tables ... ok
+test apply_tokens_for_is_allocation_free_after_the_first_call ... ok
+test apply_tokens_defaults_to_normal_mode ... ok
+test unaffected_roles_are_identical_across_the_axis ... ok
+test weak_text_follows_the_promotion ... ok
+test high_contrast_is_named_only_at_its_selection_and_control_sites ... ok
+test rapid_toggling_never_produces_a_mixed_palette ... ok
+test both_axes_survive_a_restart ... ok
+test appearance_screen_shows_a_high_contrast_checkbox ... ok
+test high_contrast_is_searchable_and_focusable ... ok
+test toggling_the_checkbox_persists_and_updates_the_controller ... ok
+test the_next_frame_uses_the_new_tables ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests/interaction_states.rs (target/debug/deps/interaction_states-3813b1328de36326)
+
+running 6 tests
+test three_states_are_three_increasing_fills ... ok
+test host_controls_do_not_use_widget_state ... ok
+test no_ring_without_a_visible_focus ... ok
+test focus_ring_is_painted_once_app_wide ... ok
+test row_frame_adds_no_layout ... ok
+test ring_and_selection_do_not_overlap ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/library_view.rs (target/debug/deps/library_view-6cbe47588e67fb25)
+
+running 30 tests
+test back_button_returns_the_back_outcome ... ok
+test every_tab_shows_a_count_once_loaded_including_zero ... ok
+test first_sync_failed_with_no_snapshot_shows_retry_fr021 ... ok
+test followed_artists_empty_state_shows_its_own_copy ... ok
+test artist_detail_shows_up_to_ten_top_tracks ... ok
+test album_detail_shows_header_and_tracks_in_album_order ... ok
+test getting_started_not_shown_in_detail_view ... ok
+test followed_playlist_shows_owner_label ... ok
+test a_tabs_count_is_its_own_list_length_and_updates_as_it_grows ... ok
+test getting_started_tutorial_opens_url ... ok
+test active_tab_paints_a_stroke_not_a_filled_accent_rect ... ok
+test no_edit_control_renders_on_any_playlist_row ... ok
+test offline_with_a_snapshot_renders_normally_not_as_an_error ... ok
+test owned_playlist_shows_no_owner_label ... ok
+test opens_on_saved_tracks_by_default ... ok
+test getting_started_card_shown_until_dismissed ... ok
+test playlist_detail_shows_owner_label_and_no_tracks_message_when_empty ... ok
+test playlists_empty_state_shows_create_action_and_its_placeholder_is_inert ... ok
+test recently_played_empty_state_shows_its_own_copy ... ok
+test saved_albums_count_updates_from_zero_after_a_sync_page ... ok
+test saved_albums_empty_state_shows_its_own_copy ... ok
+test no_tab_shows_a_count_while_loading ... ok
+test loading_state_shows_skeleton_rows ... ok
+test tab_counts_render_in_the_mono_role ... ok
+test selecting_a_row_then_switching_tabs_clears_the_selection ... ok
+test tabs_render_in_the_fixed_order ... ok
+test whole_library_empty_shows_search_action ... ok
+test wide_row_action_is_deferred_until_its_track_list_lands ... ok
+test skeleton_rows_expose_no_list_item_and_never_select ... ok
+test large_fixture_frame_budget ... ok
+
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.83s
+
+     Running tests/markers.rs (target/debug/deps/markers-89b754201dbf05cf)
+
+running 31 tests
+test clamped_marker_shows_warning_glyph ... ok
+test detail_lane_glyphs_gain_an_outline ... ok
+test armed_inactive_badge_when_state_1 ... ok
+test delete_focused_endpoint_makes_region_incomplete ... ok
+test armed_region_shows_wraps_remaining ... ok
+test digit_on_empty_slot_is_noop ... ok
+test focus_width_difference_survives_the_outline ... ok
+test c_cycles_palette_and_row_matches_glyph ... ok
+test clear_all_two_step_confirm_and_cancel ... ok
+test loop_region_span_gains_an_outline ... ok
+test drag_esc_restores_position_and_window ... ok
+test marker_outline_clears_the_enhanced_floor_against_every_palette_entry ... ok
+test marker_outline_exists_only_in_high_contrast ... ok
+test marker_outline_width_is_one_pixel ... ok
+test drag_from_overview_zooms_detail_and_lands_within_5ms ... ok
+test overlay_paints_lines_and_span_states ... ok
+test empty_state_shows_press_i_hint ... ok
+test overview_lane_markers_gain_an_outline ... ok
+test palette_fills_are_never_recoloured ... ok
+test f2_rename_commits_on_enter_cancels_on_esc ... ok
+test glyph_focus_arrow_nudges_by_setting_and_shift_ten_x ... ok
+test i_then_o_creates_region_at_playhead_positions ... ok
+test panel_swatch_inherits_the_divider_outline ... ok
+test m_creates_point_marker_with_default_name_sorted ... ok
+test markers_panel_renders_as_a_card_with_no_added_interactive_controls ... FAILED
+test l_toggles_current_region_and_refuses_with_reason ... ok
+test shift_digit_sets_cue_and_digit_jumps_keeping_state ... ok
+test shortcuts_inactive_while_rename_open ... ok
+test shift_digit_on_occupied_slot_moves_at_limit ... ok
+test tab_focus_on_a_glyph_enables_the_marker_key_table ... ok
+test sixty_fifth_marker_refused_inline ... ok
+
+failures:
+
+---- markers_panel_renders_as_a_card_with_no_added_interactive_controls stdout ----
+
+thread 'markers_panel_renders_as_a_card_with_no_added_interactive_controls' (12598040) panicked at crates/modplayer-ui/tests/markers.rs:1707:5:
+assertion `left == right` failed: expected exactly one collapse/expand control on the Markers card header: ["Play", "Skip forward", "Transport", "Collapse \u{2068}Markers\u{2069}", "\u{2068}Marker\u{2069} \u{2068}Marker \u{2068}1\u{2069}\u{2069} \u{2068}0:00.000\u{2069}", "Skip back", "Queue", "Expand \u{2068}Transport focus\u{2069}", "New loop region", "\u{2068}Marker\u{2069} \u{2068}Marker \u{2068}1\u{2069}\u{2069} \u{2068}0:00.000\u{2069}", "Expand \u{2068}Effect chain\u{2069}", "Clear all markers", "", "Stop", "Expand \u{2068}Queue\u{2069}", "Effects"]
+  left: 4
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    markers_panel_renders_as_a_card_with_no_added_interactive_controls
+
+test result: FAILED. 30 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.61s
+
+error: test failed, to rerun pass `-p modplayer-ui --test markers`
+     Running tests/meter_bands.rs (target/debug/deps/meter_bands-18f148181a78d77b)
+
+running 9 tests
+test ceiling_tick_is_not_warn_fg ... ok
+test rightmost_column_is_danger_over_the_boundary ... ok
+test ceiling_tick_is_two_px ... ok
+test fill_is_segmented_by_db_position ... ok
+test rms_bands_and_is_not_dimmed ... ok
+test zero_db_mark_is_inset ... ok
+test each_meter_uses_its_own_boundary ... ok
+test mark_positions ... ok
+test both_meters_draw_both_marks ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/notification_stack.rs (target/debug/deps/notification_stack-a406d98912e8e424)
+
+running 5 tests
+test three_notifications_render_with_no_overflow_control ... ok
+test fourth_notification_is_capped_and_the_overflow_control_expands_and_collapses ... ok
+test expanded_stack_stays_within_the_sixty_percent_scroll_cap ... ok
+test notification_area_anchors_bottom_right_eight_px_offset ... ok
+test collapsed_stack_never_covers_protected_regions ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.79s
+
+     Running tests/notifications.rs (target/debug/deps/notifications-11f1375030ce4dd0)
+
+running 8 tests
+test short_plain_message_has_no_truncation_or_details_controls ... ok
+test plugin_notification_attributed ... ok
+test host_notification_has_no_attribution_split ... ok
+test never_modal ... ok
+test message_truncates_with_show_more_and_details_stay_hidden_until_opened ... ok
+test severity_icon_glyphs_differ_between_severities ... ok
+test every_existing_action_still_dispatches_from_the_new_layout ... ok
+test severity_accent_and_icon_colours_match_the_role_in_every_theme ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+
+     Running tests/now_playing.rs (target/debug/deps/now_playing-fa03a1bf1c27d5b9)
+
+running 26 tests
+test a_closed_panel_contributes_a_header_only_card ... ok
+test empty_state_shows_pick_a_track ... ok
+test drag_previews_without_seeking_and_esc_cancels ... ok
+test analysis_unavailable_label_when_failed_without_peaks ... ok
+test click_on_overview_seeks_to_exact_frame ... ok
+test each_open_panel_has_exactly_one_heading_node ... ok
+test artwork_falls_back_to_initials ... ok
+test healthy_active_state_shows_no_disabled_reason ... ok
+test no_device_disables_transport_and_shows_status_no_device ... ok
+test every_card_has_exactly_one_header_disclosure ... ok
+test preview_frame_drives_the_drag_shown_in_a_live_test_helper ... ok
+test four_panels_render_as_cards_when_all_open ... ok
+test pointer_zoom_on_detail_is_anchored_on_the_pointer_not_the_playhead ... ok
+test partial_peaks_stay_when_failed_with_peaks ... ok
+test seek_while_paused_stays_paused ... ok
+test seek_while_stopped_enters_paused ... ok
+test reserved_height_keeps_volume_meter_and_queue_card_in_a_960x640_viewport ... ok
+test seek_slider_commits_once_per_release ... ok
+test source_unavailable_disables_transport_and_shows_its_status_line ... ok
+test placeholder_columns_for_uncovered_buckets ... ok
+test switch_click_and_host_action_toggles_persist_through_a_settings_reload ... ok
+test transport_panel_survives_track_change ... ok
+test transport_toggle_beside_queue_and_effects ... ok
+test not_registered_reasons_render_their_matching_status_line ... ok
+test keyboard_table_matches_pointer_results ... ok
+test position_readout_updates_as_playback_advances ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.95s
+
+     Running tests/plugin_assets.rs (target/debug/deps/plugin_assets-e51f38ad214512ba)
+
+running 2 tests
+test missing_glyph_falls_back_without_uploading ... ok
+test first_paint_of_an_icon_and_glyph_uploads_without_deadlocking ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/plugin_overlays.rs (target/debug/deps/plugin_overlays-d5c038a29ccca05e)
+
+running 10 tests
+test overlay_outline_covers_exactly_the_palette_tokens ... ok
+test docked_plugin_panel_matches_host_chrome ... ok
+test host_glyph_paints_without_an_asset ... ok
+test beyond_duration_not_drawn ... ok
+test above_markers_below_playhead_order ... ok
+test toggling_high_contrast_calls_no_plugin ... ok
+test label_only_on_detail ... ok
+test primitives_reproject_under_zoom_and_scroll ... ok
+test plugin_role_primitives_do_not ... ok
+test plugin_palette_primitives_gain_an_outline ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/plugin_panels.rs (target/debug/deps/plugin_panels-973832f607fdc23e)
+
+running 13 tests
+test dock_order_by_name_then_seq ... ok
+test header_attribution ... ok
+test every_kind_has_role_and_name ... ok
+test float_clamped_into_window ... ok
+test list_selection_follows_focus ... ok
+test long_title_truncates_without_eliding_buttons ... ok
+test drag_emits_once ... ok
+test placeholder_on_suspend ... ok
+test arrows_step_and_emit ... ok
+test tempo_slider_announces ... ok
+test section_loop_panel_keyboard_and_names ... ok
+test unclaimed_key_falls_through ... ok
+test theme_switch_no_events ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+
+     Running tests/plugins_view.rs (target/debug/deps/plugins_view-a471d1573c40d87a)
+
+running 9 tests
+test notification_actions_call_facade ... ok
+test empty_state_with_explicit_empty_host ... ok
+test section_loop_row_without_fixtures ... ok
+test rows_show_every_column_sorted_by_name ... ok
+test no_uninstall_control ... ok
+test invalid_row_shows_reason_and_inert_toggle ... ok
+test suspended_row_shows_dash_gauges ... ok
+test toggle_disables_in_one_action ... ok
+test panel_controls_listed ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+
+     Running tests/queue_view.rs (target/debug/deps/queue_view-2cee174fff219339)
+
+running 6 tests
+test panel_body_draws_no_heading_of_its_own ... ok
+test empty_queue_shows_the_empty_state ... ok
+test shuffle_and_repeat_header_controls_mutate_the_controllers_queue ... ok
+test rows_render_in_effective_order_with_badges_and_current_marker ... ok
+test remove_button_on_the_current_row_advances_the_controllers_queue ... ok
+test move_down_button_reorders_the_controllers_queue ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests/responsive_dock.rs (target/debug/deps/responsive_dock-f0813fa9de90d5a5)
+
+running 10 tests
+test drag_tracks_pointer_and_commits_once_on_release ... ok
+test keyboard_left_right_steps_and_commits ... ok
+test drag_clamps_at_min_and_effective_max ... ok
+test keyboard_home_end_jump_and_clamp ... ok
+test overlay_toggle_escape_and_widen ... ok
+test docked_header_buttons_present_and_title_tooltip_on_focus ... ok
+test pseudo_localization_no_elision_or_overlap ... ok
+test keyboard_sequence_keeps_focus_on_full_screen ... ok
+test header_buttons_stay_inside_dock_at_every_width ... ok
+test transport_row_never_crosses_docked_edge ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.65s
+
+     Running tests/rows.rs (target/debug/deps/rows-7238672fcaabfa4f)
+
+running 14 tests
+test all_six_actions_are_represented_in_the_fixed_menu_order ... ok
+test l7_actions_button_rect_is_contained_by_the_row_rect ... ok
+test l6_a_long_title_truncates_without_growing_the_row_height ... ok
+test l5b_no_secondary_line_node_ends_with_the_duration ... ok
+test placeholders_raise_coming_soon_and_record_no_new_command ... ok
+test add_to_queue_on_a_track_row_appends_only_that_track ... ok
+test click_then_enter_activates_but_not_once_focus_moves_away ... ok
+test play_next_on_a_track_row_queues_only_that_track ... ok
+test clicking_the_actions_button_never_reports_select ... ok
+test play_now_on_a_track_row_uses_the_whole_loaded_list_cursored_at_it ... ok
+test selected_row_exposes_accesskit_selected_state ... ok
+test primary_click_reports_select_and_nothing_else ... ok
+test selected_row_fills_accent_and_hover_pressed_blend_over_it ... ok
+test selected_row_every_text_run_is_text_on_accent_never_weak ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests/search.rs (target/debug/deps/search-373ad0a4057546bb)
+
+running 4 tests
+test unmatched_query_returns_nothing ... ok
+test ceiling_query_finds_the_limiter_setting ... ok
+test ceiling_query_is_case_insensitive ... ok
+test search_completes_well_under_the_fifty_millisecond_budget ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/search_view.rs (target/debug/deps/search_view-fd1d19bbf8362a42)
+
+running 8 tests
+test offline_shows_the_offline_state_not_the_search_box_results ... ok
+test skeleton_rows_render_while_a_group_is_pending ... ok
+test no_results_state_shows_when_every_group_is_empty ... ok
+test first_group_paints_within_budget ... ok
+test loaded_group_renders_real_rows_and_omits_empty_groups ... ok
+test refreshing_keeps_stale_rows_visible ... ok
+test selecting_a_row_in_a_different_group_replaces_the_selection ... ok
+test a_new_query_clears_the_selection ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+     Running tests/section_memory.rs (target/debug/deps/section_memory-7ef13ab65fd1420f)
+
+running 5 tests
+test m3_restored_offset_clamps_when_content_shrank ... ok
+test m5_switching_library_tabs_keeps_independent_offsets_per_tab ... ok
+test m2_library_tab_detail_and_settings_categories_keep_independent_offsets ... ok
+test m4_reset_session_ui_clears_memory_and_every_listed_sub_view ... ok
+test m1_restores_each_views_offset_across_two_round_trips ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/settings_category_row.rs (target/debug/deps/settings_category_row-7cd70e4b18adf715)
+
+running 8 tests
+test partition_invariants::partition_is_a_disjoint_canonical_cover_that_never_overflows_the_selection ... ok
+test narrow_screen_never_elides_a_drawn_category_label ... ok
+test wide_screen_shows_all_eleven_categories_inline_with_no_more_control ... ok
+test more_control_and_menu_items_report_the_expected_accesskit_surface ... ok
+test resizing_while_the_menu_is_open_closes_it_and_moves_focus_to_the_selected_category ... ok
+test escape_closes_the_menu_and_returns_focus_to_more ... ok
+test tab_reaches_every_overflowed_category_and_arrow_keys_navigate_the_menu ... ok
+test every_drawn_row_item_shares_one_baseline_and_height_at_960px ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.96s
+
+     Running tests/settings_plugins.rs (target/debug/deps/settings_plugins-93811430ae9c67d7)
+
+running 5 tests
+test page_listed_by_name ... ok
+test field_roles_and_names ... ok
+test boolean_applies_on_change ... ok
+test search_finds_field_with_path ... ok
+test number_applies_on_commit ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests/shell_navigation.rs (target/debug/deps/shell_navigation-011fb14767a2551b)
+
+running 6 tests
+test dispatcher_gate_never_defers_a_shortcut_across_the_gate_boundary ... ok
+test selected_rail_item_shows_indicator_not_fill_others_show_neither ... ok
+test rail_shows_exactly_the_five_sections_in_order_no_badges ... ok
+test device_check_preview_hides_and_then_restores_the_rail ... ok
+test rail_is_absent_during_every_launch_gate_step ... ok
+test step_indicator_is_one_correctly_valued_progress_node ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running tests/trademark.rs (target/debug/deps/trademark-0255750821164173)
+
+running 1 test
+test no_service_trademark_in_branding_keys ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/transport_view.rs (target/debug/deps/transport_view-70ff001665d681d1)
+
+running 8 tests
+test empty_state_when_no_eligible_plugin ... ok
+test policy_combo_persists_selection ... ok
+test panel_lists_only_transport_control_plugins ... ok
+test holder_and_requesting_badges_render ... ok
+test header_is_section_role_not_title_role ... ok
+test suspended_holder_row_disappears_and_holder_reads_host ... ok
+test take_back_click_returns_host ... ok
+test give_focus_click_changes_holder ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+
+     Running tests/waveform.rs (target/debug/deps/waveform-dbe69104acee6225)
+
+running 2 tests
+test time_space_round_trips_within_one_pixel ... ok
+test overview_and_detail_heights_track_content_height ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+   Doc-tests modplayer_ui
+
+running 38 tests
+test crates/modplayer-ui/src/layout.rs - layout::AUTO_HIDE_THRESHOLD (line 21) ... ok
+test crates/modplayer-ui/src/layout.rs - layout::WAVEFORM_DETAIL_MIN (line 82) ... ok
+test crates/modplayer-ui/src/layout.rs - layout::DOCK_KEY_STEP (line 42) ... ok
+test crates/modplayer-ui/src/layout.rs - layout::SAVE_DEBOUNCE (line 93) ... ok
+test crates/modplayer-ui/src/layout.rs - layout::DockPresentation (line 106) ... ok
+test crates/modplayer-ui/src/artwork.rs - artwork::ArtworkCache::get (line 96) ... ok
+test crates/modplayer-ui/src/layout.rs - layout::WAVEFORM_DETAIL_PROPORTION (line 73) ... ok
+test crates/modplayer-ui/src/layout.rs - layout::HOST_CONTENT_FLOOR (line 32) ... ok
+test crates/modplayer-ui/src/layout.rs - layout::WindowSizeTracker::flush (line 395) ... ok
+test crates/modplayer-ui/src/layout.rs - layout::WindowSizeTracker::observe (line 297) ... ok
+test crates/modplayer-ui/src/layout.rs - layout::WindowSizeTracker::new (line 261) ... ok
+test crates/modplayer-ui/src/layout.rs - layout::WindowSizeTracker::next_deadline (line 370) ... ok
+test crates/modplayer-ui/src/layout.rs - layout::WAVEFORM_OVERVIEW_MIN (line 62) ... ok
+test crates/modplayer-ui/src/layout.rs - layout::effective_dock_width (line 162) ... ok
+test crates/modplayer-ui/src/layout.rs - layout::WAVEFORM_OVERVIEW_PROPORTION (line 53) ... ok
+test crates/modplayer-ui/src/layout.rs - layout::WindowSizeTracker::poll (line 333) ... ok
+test crates/modplayer-ui/src/layout.rs - layout::reveal_align (line 464) ... ok
+test crates/modplayer-ui/src/layout.rs - layout::fills_monitor (line 217) ... ok
+test crates/modplayer-ui/src/layout.rs - layout::identity_width (line 427) ... ok
+test crates/modplayer-ui/src/layout.rs - layout::waveform_heights (line 186) ... ok
+test crates/modplayer-ui/src/notifications.rs - notifications::partition (line 46) ... ok
+test crates/modplayer-ui/src/notifications.rs - notifications::StackState (line 100) ... ok
+test crates/modplayer-ui/src/notifications.rs - notifications::card_width (line 80) ... ok
+test crates/modplayer-ui/src/rows.rs - rows::RowSelection (line 353) ... ok
+test crates/modplayer-ui/src/shell.rs - shell::Chrome::for_frame (line 247) ... ok
+test crates/modplayer-ui/src/theme/contrast.rs - theme::contrast::ratio (line 27) ... ok
+test crates/modplayer-ui/src/shell.rs - shell::GateStep::position (line 159) ... ok
+test crates/modplayer-ui/src/shell.rs - shell::GateStep::from_launch_step (line 184) ... ok
+test crates/modplayer-ui/src/settings/category_row.rs - settings::category_row::partition (line 38) ... ok
+test crates/modplayer-ui/src/shell.rs - shell::GateStep::state_relative_to (line 206) ... ok
+test crates/modplayer-ui/src/rows.rs - rows::format_duration (line 326) ... ok
+test crates/modplayer-ui/src/rows.rs - rows::acting_list (line 175) ... ok
+test crates/modplayer-ui/src/widgets/initials.rs - widgets::initials::initials (line 41) ... ok
+test crates/modplayer-ui/src/theme/controls.rs - theme::controls::band (line 241) ... ok
+test crates/modplayer-ui/src/theme/controls.rs - theme::controls::focus_ring_width (line 112) ... ok
+test crates/modplayer-ui/src/theme/tokens.rs - theme::tokens::for_theme (line 126) ... ok
+test crates/modplayer-ui/src/theme/tokens.rs - theme::tokens::is_high_contrast (line 149) ... ok
+test crates/modplayer-ui/src/widgets/controls.rs - widgets::controls::collapsible_panel_card (line 358) ... FAILED
+
+failures:
+
+---- crates/modplayer-ui/src/widgets/controls.rs - widgets::controls::collapsible_panel_card (line 358) stdout ----
+Test executable failed (exit status: 101).
+
+stderr:
+
+thread 'main' (12602211) panicked at /Users/castilho/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/style.rs:114:13:
+Failed to find Name("section") in Style::text_styles. Available styles:
+[
+    Small,
+    Body,
+    Monospace,
+    Button,
+    Heading,
+]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+
+failures:
+    crates/modplayer-ui/src/widgets/controls.rs - widgets::controls::collapsible_panel_card (line 358)
+
+test result: FAILED. 37 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+all doctests ran in 5.16s; merged doctests compilation took 3.88s
+error: doctest failed, to rerun pass `-p modplayer-ui --doc`
+error: 2 targets failed:
+    `-p modplayer-ui --test markers`
+    `-p modplayer-ui --doc`

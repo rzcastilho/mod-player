@@ -260,7 +260,13 @@ fn settle_frame(
 ) {
     let output = ctx.run_ui(default_input(), |ui| {
         dispatch_for_test(&ui.ctx().clone(), controller, waveform);
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            controller,
+            artwork,
+            waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     output.drop_without_applying_deltas();
 }
@@ -281,7 +287,13 @@ fn press_key(
     input.events.push(key_release(key));
     let output = ctx.run_ui(input, |ui| {
         dispatch_for_test(&ui.ctx().clone(), controller, waveform);
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            controller,
+            artwork,
+            waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     output.drop_without_applying_deltas();
 }
@@ -307,7 +319,13 @@ fn press_key_with(
     input.events.push(key_release(key));
     let output = ctx.run_ui(input, |ui| {
         dispatch_for_test(&ui.ctx().clone(), controller, waveform);
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            controller,
+            artwork,
+            waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     output.drop_without_applying_deltas();
 }
@@ -323,7 +341,13 @@ fn find_node_bounds(
     matches: impl Fn(&egui::accesskit::Node) -> bool,
 ) -> Rect {
     let mut output = ctx.run_ui(default_input(), |ui| {
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            controller,
+            artwork,
+            waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     let update = output
         .platform_output
@@ -367,7 +391,10 @@ fn glyph_bounds(
     })
 }
 
-/// The overview waveform's own bounds (the topmost `Role::Slider` node).
+/// The overview waveform's own bounds: the `Role::Slider` node named
+/// `transport-seek` (021-transport-bar-and-panel-layout, contract B2.4:
+/// the bar's own master-volume `Slider` now sits above it on screen, so
+/// "the topmost `Role::Slider`" no longer picks it out).
 fn overview_bounds(
     ctx: &Context,
     controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
@@ -375,7 +402,7 @@ fn overview_bounds(
     waveform: &mut WaveformState,
 ) -> Rect {
     find_node_bounds(ctx, controller, artwork, waveform, |node| {
-        node.role() == Role::Slider
+        node.role() == Role::Slider && node.label() == Some(tr("transport-seek").as_str())
     })
 }
 
@@ -388,7 +415,13 @@ fn rendered_texts(
     waveform: &mut WaveformState,
 ) -> Vec<String> {
     let mut output = ctx.run_ui(default_input(), |ui| {
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            controller,
+            artwork,
+            waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     let update = output
         .platform_output
@@ -1236,7 +1269,13 @@ fn drag_from_overview_zooms_detail_and_lands_within_5ms() {
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(press, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     output.drop_without_applying_deltas();
 
@@ -1244,7 +1283,13 @@ fn drag_from_overview_zooms_detail_and_lands_within_5ms() {
     drag.events
         .push(Event::PointerMoved(Pos2::new(target_x, press_pos.y)));
     let output = ctx.run_ui(drag, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     output.drop_without_applying_deltas();
     assert!(
@@ -1260,7 +1305,13 @@ fn drag_from_overview_zooms_detail_and_lands_within_5ms() {
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(release, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     output.drop_without_applying_deltas();
 
@@ -1315,7 +1366,13 @@ fn drag_esc_restores_position_and_window() {
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(press, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     output.drop_without_applying_deltas();
 
@@ -1323,7 +1380,13 @@ fn drag_esc_restores_position_and_window() {
     drag.events
         .push(Event::PointerMoved(Pos2::new(target_x, press_pos.y)));
     let output = ctx.run_ui(drag, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     output.drop_without_applying_deltas();
     assert!(
@@ -1345,7 +1408,13 @@ fn drag_esc_restores_position_and_window() {
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(esc, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     output.drop_without_applying_deltas();
 
@@ -1598,13 +1667,25 @@ fn tab_focus_on_a_glyph_enables_the_marker_key_table() {
 
     let glyph_id = egui::Id::new(("marker-glyph", "overview", id));
     let output = ctx.run_ui(default_input(), |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     output.drop_without_applying_deltas();
     ctx.memory_mut(|memory| memory.request_focus(glyph_id));
 
     let output = ctx.run_ui(default_input(), |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     output.drop_without_applying_deltas();
     assert_eq!(
@@ -1652,7 +1733,13 @@ fn markers_panel_renders_as_a_card_with_no_added_interactive_controls() {
     let mut waveform = WaveformState::default();
 
     let mut output = ctx.run_ui(default_input(), |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     let update = output
         .platform_output
@@ -1690,12 +1777,23 @@ fn markers_panel_renders_as_a_card_with_no_added_interactive_controls() {
         button_names.iter().any(|n| n == &tr("markers-clear-all")),
         "expected the clear-all button, got {button_names:?}"
     );
-    assert!(
-        !button_names.iter().any(|n| {
-            let lower = n.to_lowercase();
-            lower.contains("collaps") || lower.contains("expand")
-        }),
-        "no collapse/expand control may be added to the Markers card: {button_names:?}"
+    // 021-transport-bar-and-panel-layout (contract C1, superseding 016
+    // C11): Markers now has a header disclosure like every other card —
+    // still no *bar* toggle (spec Clarification 5) — so exactly one of
+    // Markers' own two disclosure names (`panel-collapse`/`panel-expand`
+    // for the Markers panel specifically, not a substring match: the other
+    // three cards on this same screen have their own "Expand"/"Collapse"
+    // disclosures too) is expected here.
+    let markers_title = tr("markers-panel");
+    let collapse_name = tr_args("panel-collapse", &[("panel", markers_title.clone())]);
+    let expand_name = tr_args("panel-expand", &[("panel", markers_title)]);
+    let disclosure_count = button_names
+        .iter()
+        .filter(|n| *n == &collapse_name || *n == &expand_name)
+        .count();
+    assert_eq!(
+        disclosure_count, 1,
+        "expected exactly one collapse/expand control on the Markers card header: {button_names:?}"
     );
 }
 
@@ -2051,7 +2149,7 @@ fn panel_swatch_inherits_the_divider_outline() {
                          waveform: &mut WaveformState|
      -> Stroke {
         let output = ctx.run_ui(default_input(), |ui| {
-            modplayer_ui::markers::panel(ui, controller, waveform);
+            modplayer_ui::markers::panel(ui, controller, waveform, &mut true);
         });
         let stroke = output
             .shapes

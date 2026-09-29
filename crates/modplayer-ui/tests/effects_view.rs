@@ -182,7 +182,9 @@ fn render_panel(
     ctx: &Context,
     controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
 ) -> Vec<AccessNode> {
-    render_nodes_on(ctx, |ui| effects_view::show(ui, controller))
+    render_nodes_on(ctx, |ui| {
+        effects_view::show(ui, controller, &mut true);
+    })
 }
 
 fn find_all<'a>(nodes: &'a [AccessNode], role: Role, name: &str) -> Vec<&'a AccessNode> {
@@ -241,7 +243,9 @@ fn click_at(
         pressed: true,
         modifiers: Modifiers::default(),
     });
-    let output = ctx.run_ui(press, |ui| effects_view::show(ui, controller));
+    let output = ctx.run_ui(press, |ui| {
+        effects_view::show(ui, controller, &mut true);
+    });
     output.drop_without_applying_deltas();
 
     let mut release = default_input();
@@ -251,7 +255,9 @@ fn click_at(
         pressed: false,
         modifiers: Modifiers::default(),
     });
-    let output = ctx.run_ui(release, |ui| effects_view::show(ui, controller));
+    let output = ctx.run_ui(release, |ui| {
+        effects_view::show(ui, controller, &mut true);
+    });
     output.drop_without_applying_deltas();
 }
 
@@ -269,16 +275,31 @@ fn e_and_header_toggle_panel_and_it_survives_track_change() {
                  artwork: &mut ArtworkCache,
                  waveform: &mut WaveformState| {
         render_nodes_on(&ctx, |ui| {
-            modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0)
+            modplayer_ui::now_playing::show(
+                ui,
+                controller,
+                artwork,
+                waveform,
+                &mut modplayer_ui::section_memory::SectionMemory::default(),
+            )
         })
         .iter()
         .filter_map(|node| node.accessible_name().map(str::to_string))
         .collect::<Vec<_>>()
     };
 
+    // 021-transport-bar-and-panel-layout (contract C2, superseding 016
+    // C10): a collapsed card still renders its header — `effects-panel-
+    // title` is present either way now — so "closed" is checked through a
+    // body-only marker instead: `effects-add-node`, only drawn while
+    // `add_contents` runs (i.e. while open).
     let initial = texts(&mut controller, &mut artwork, &mut waveform);
     assert!(
-        !initial.contains(&tr("effects-panel-title")),
+        initial.contains(&tr("effects-panel-title")),
+        "a collapsed card still shows its header"
+    );
+    assert!(
+        !initial.contains(&tr("effects-add-node")),
         "the panel starts closed"
     );
 
@@ -287,7 +308,7 @@ fn e_and_header_toggle_panel_and_it_survives_track_change() {
     effects_view::toggle_effect_chain_panel(&mut controller);
     let opened = texts(&mut controller, &mut artwork, &mut waveform);
     assert!(
-        opened.contains(&tr("effects-panel-title")),
+        opened.contains(&tr("effects-add-node")),
         "E must open the panel"
     );
 
@@ -295,13 +316,19 @@ fn e_and_header_toggle_panel_and_it_survives_track_change() {
     controller.skip_forward();
     let after_track_change = texts(&mut controller, &mut artwork, &mut waveform);
     assert!(
-        after_track_change.contains(&tr("effects-panel-title")),
+        after_track_change.contains(&tr("effects-add-node")),
         "the panel must survive a track change"
     );
 
     // The header toggle button closes it again.
     let nodes = render_nodes_on(&ctx, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     let bounds = find_one(&nodes, Role::Button, &tr("effects-toggle"))
         .bounds
@@ -314,7 +341,13 @@ fn e_and_header_toggle_panel_and_it_survives_track_change() {
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(press, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     output.drop_without_applying_deltas();
     let mut release = default_input();
@@ -325,13 +358,19 @@ fn e_and_header_toggle_panel_and_it_survives_track_change() {
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(release, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     output.drop_without_applying_deltas();
 
     let closed = texts(&mut controller, &mut artwork, &mut waveform);
     assert!(
-        !closed.contains(&tr("effects-panel-title")),
+        !closed.contains(&tr("effects-add-node")),
         "the header toggle button must close the panel again"
     );
 }
@@ -458,7 +497,9 @@ fn drag_drop_reorders_and_calls_move_to() {
         pressed: false,
         modifiers: Modifiers::default(),
     });
-    let output = ctx.run_ui(release, |ui| effects_view::show(ui, &mut controller));
+    let output = ctx.run_ui(release, |ui| {
+        effects_view::show(ui, &mut controller, &mut true);
+    });
     output.drop_without_applying_deltas();
 
     let order: Vec<NodeId> = controller
@@ -496,7 +537,7 @@ fn arrow_up_on_focused_handle_moves_node_and_keeps_focus() {
     // for our own move-and-keep-focus handling (mirrors real usage: the
     // handle already had focus, drawn, on an earlier frame).
     let output = ctx.run_ui(default_input(), |ui| {
-        effects_view::show(ui, &mut controller)
+        effects_view::show(ui, &mut controller, &mut true);
     });
     output.drop_without_applying_deltas();
 
@@ -509,7 +550,7 @@ fn arrow_up_on_focused_handle_moves_node_and_keeps_focus() {
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(input, |ui| {
-        effects_view::show(ui, &mut controller);
+        effects_view::show(ui, &mut controller, &mut true);
         effects_view::handle_focused_handle_keys(ui, &mut controller);
     });
     output.drop_without_applying_deltas();
@@ -932,21 +973,26 @@ fn click_on_waveform_takes_focus_so_plus_zooms() {
     let mut waveform = WaveformState::default();
 
     let nodes = render_nodes_on(&ctx, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
-    // The overview strip is the top-most `Slider` on the screen.
-    let mut sliders: Vec<Rect> = nodes
+    // The overview strip is the `Slider` named `transport-seek` (021-
+    // transport-bar-and-panel-layout, contract B2.4: the bar's own master-
+    // volume `Slider` now sits above it on screen, so "top-most Slider"
+    // no longer picks it out).
+    let overview = nodes
         .iter()
-        .filter(|node| node.role == Role::Slider)
-        .filter_map(|node| node.bounds)
-        .collect();
-    sliders.sort_by(|a, b| {
-        a.min
-            .y
-            .partial_cmp(&b.min.y)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let overview = sliders.first().copied().expect("an overview waveform");
+        .find(|node| {
+            node.role == Role::Slider
+                && node.accessible_name() == Some(tr("transport-seek").as_str())
+        })
+        .and_then(|node| node.bounds)
+        .expect("an overview waveform");
     assert!(
         ctx.memory(|memory| memory.focused()).is_none(),
         "sanity: nothing is focused before the click"
@@ -962,7 +1008,13 @@ fn click_on_waveform_takes_focus_so_plus_zooms() {
             modifiers: Modifiers::default(),
         });
         let output = ctx.run_ui(input, |ui| {
-            modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+            modplayer_ui::now_playing::show(
+                ui,
+                &mut controller,
+                &mut artwork,
+                &mut waveform,
+                &mut modplayer_ui::section_memory::SectionMemory::default(),
+            )
         });
         output.drop_without_applying_deltas();
     }
@@ -984,7 +1036,13 @@ fn click_on_waveform_takes_focus_so_plus_zooms() {
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(plus, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     output.drop_without_applying_deltas();
     let after = waveform.detail.expect("detail window still exists");

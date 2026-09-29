@@ -313,7 +313,13 @@ fn transport_controls_expose_accessible_names() {
     let mut waveform = WaveformState::default();
 
     let nodes = render_nodes(|ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
 
     // Play/pause, stop, skip back/forward, and the Queue toggle are plain
@@ -352,7 +358,13 @@ fn transport_controls_are_disabled_when_playback_is_not_permitted() {
     let mut waveform = WaveformState::default();
 
     let nodes = render_nodes(|ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     let play = find_one(&nodes, Role::Button, &tr("transport-play"));
     assert!(
@@ -366,7 +378,8 @@ fn queue_shuffle_toggle_reports_its_toggled_state() {
     let (mut controller, _handle, _dir) = active_controller("queue-shuffle-state");
     controller.queue_replace(vec![track("a"), track("b")]);
 
-    let off = render_nodes(|ui| modplayer_ui::queue_view::show(ui, &mut controller));
+    let mut artwork = ArtworkCache::new();
+    let off = render_nodes(|ui| modplayer_ui::queue_view::show(ui, &mut controller, &mut artwork));
     let shuffle = find_one(&off, Role::Button, &tr("queue-shuffle"));
     assert_eq!(
         shuffle.toggled,
@@ -380,7 +393,7 @@ fn queue_shuffle_toggle_reports_its_toggled_state() {
 
     controller.set_shuffle(true);
     controller.set_repeat(Repeat::All);
-    let on = render_nodes(|ui| modplayer_ui::queue_view::show(ui, &mut controller));
+    let on = render_nodes(|ui| modplayer_ui::queue_view::show(ui, &mut controller, &mut artwork));
     let shuffle = find_one(&on, Role::Button, &tr("queue-shuffle"));
     assert_eq!(
         shuffle.toggled,
@@ -395,7 +408,9 @@ fn queue_row_actions_expose_accessible_names() {
     let (mut controller, _handle, _dir) = active_controller("queue-row-actions");
     controller.queue_replace(vec![track("a"), track("b")]);
 
-    let nodes = render_nodes(|ui| modplayer_ui::queue_view::show(ui, &mut controller));
+    let mut artwork = ArtworkCache::new();
+    let nodes =
+        render_nodes(|ui| modplayer_ui::queue_view::show(ui, &mut controller, &mut artwork));
 
     // Two rows -> at least two of each row action, each a real `Button`
     // whose name is exactly the action (never blank/icon-only).
@@ -423,8 +438,22 @@ fn queue_row_actions_expose_accessible_names() {
 fn queue_panel_header_exposes_its_exact_accessible_name() {
     let (mut controller, _handle, _dir) = active_controller("queue-panel-heading");
     controller.queue_replace(vec![track("a"), track("b")]);
+    let mut artwork = ArtworkCache::new();
+    let mut waveform = WaveformState::default();
 
-    let nodes = render_nodes(|ui| modplayer_ui::queue_view::show(ui, &mut controller));
+    // 021-transport-bar-and-panel-layout (contract C1/C4): the Queue
+    // card's chrome — including its `Role::Heading` — moved out of
+    // `queue_view::show` (now body-only) into `now_playing::show`, which
+    // owns it via `collapsible_panel_card`.
+    let nodes = render_nodes(|ui| {
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
+    });
     let title = find_one(&nodes, Role::Heading, &tr("queue-panel-title"));
     assert!(!title.disabled, "{title:?}");
     assert_eq!(
@@ -448,7 +477,9 @@ fn effect_chain_controls_expose_accessible_names_and_states() {
         .chain_add_node(NodeKind::PitchShift)
         .unwrap_or_else(|_| unreachable!());
 
-    let nodes = render_nodes(|ui| modplayer_ui::effects_view::show(ui, &mut controller));
+    let nodes = render_nodes(|ui| {
+        modplayer_ui::effects_view::show(ui, &mut controller, &mut true);
+    });
 
     assert_eq!(
         find_all(&nodes, Role::Button, &tr("effects-reorder-handle")).len(),
@@ -471,7 +502,9 @@ fn effect_chain_controls_expose_accessible_names_and_states() {
     controller
         .chain_set_bypass(gain, true)
         .unwrap_or_else(|_| unreachable!());
-    let nodes = render_nodes(|ui| modplayer_ui::effects_view::show(ui, &mut controller));
+    let nodes = render_nodes(|ui| {
+        modplayer_ui::effects_view::show(ui, &mut controller, &mut true);
+    });
     let bypass = find_all(&nodes, Role::Button, &tr("effects-bypass"));
     assert!(
         bypass.iter().any(|b| b.toggled == Some(Toggled::True)),
@@ -503,7 +536,9 @@ fn eq_filter_stereo_controls_expose_accessible_names_and_states() {
         .chain_add_node(NodeKind::StereoTools)
         .unwrap_or_else(|_| unreachable!());
 
-    let nodes = render_nodes(|ui| modplayer_ui::effects_view::show(ui, &mut controller));
+    let nodes = render_nodes(|ui| {
+        modplayer_ui::effects_view::show(ui, &mut controller, &mut true);
+    });
 
     // Equalizer: 8 bands × (freq/gain/q `DragValue` + type `ComboBox`).
     let eq_drag_values = nodes
@@ -546,7 +581,9 @@ fn eq_filter_stereo_controls_expose_accessible_names_and_states() {
     controller
         .chain_set_param(stereo, modplayer_effects::catalog::ParamId(2), 1.0)
         .unwrap_or_else(|_| unreachable!());
-    let nodes = render_nodes(|ui| modplayer_ui::effects_view::show(ui, &mut controller));
+    let nodes = render_nodes(|ui| {
+        modplayer_ui::effects_view::show(ui, &mut controller, &mut true);
+    });
     let phase_invert = find_one(&nodes, Role::Button, &tr("effects-param-phase-invert"));
     assert!(
         !phase_invert.disabled,
@@ -575,7 +612,9 @@ fn effect_chain_meters_spectrum_and_overload_controls_expose_accessible_names() 
         .slot;
 
     // Baseline: no badge, a zero overload counter, no auto-bypassed label.
-    let nodes = render_nodes(|ui| modplayer_ui::effects_view::show(ui, &mut controller));
+    let nodes = render_nodes(|ui| {
+        modplayer_ui::effects_view::show(ui, &mut controller, &mut true);
+    });
     assert!(
         find_all(&nodes, Role::Label, &tr("effects-over-budget-badge")).is_empty(),
         "badge must not show while not over budget: {nodes:?}"
@@ -627,7 +666,9 @@ fn effect_chain_meters_spectrum_and_overload_controls_expose_accessible_names() 
     controller.debug_inject_engine_event(EngineEvent::AutoBypassed { slot });
     controller.tick();
 
-    let nodes = render_nodes(|ui| modplayer_ui::effects_view::show(ui, &mut controller));
+    let nodes = render_nodes(|ui| {
+        modplayer_ui::effects_view::show(ui, &mut controller, &mut true);
+    });
     find_one(&nodes, Role::Label, &tr("effects-over-budget-badge"));
     find_one(
         &nodes,
@@ -655,7 +696,13 @@ fn transfer_banner_play_here_button_exposes_its_accessible_name() {
     let mut waveform = WaveformState::default();
 
     let nodes = render_nodes(|ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     let play_here = find_one(&nodes, Role::Button, &tr("banner-play-here"));
     assert!(
@@ -1345,7 +1392,13 @@ fn waveform_overview_is_a_named_slider_with_mmss_value_text() {
     let mut waveform = WaveformState::default();
 
     let nodes = render_nodes(|ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
 
     let overview = find_one(&nodes, Role::Slider, &tr("transport-seek"));
@@ -1368,7 +1421,13 @@ fn empty_state_exposes_pick_a_track_and_no_waveform_slider() {
     let mut waveform = WaveformState::default();
 
     let nodes = render_nodes(|ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
 
     assert!(
@@ -1411,7 +1470,13 @@ fn waveform_detail_is_a_named_slider_with_windowed_description() {
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
     let nodes = render_nodes(|ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
 
     let detail = find_one(&nodes, Role::Slider, &tr("waveform-detail"));
@@ -1451,7 +1516,13 @@ fn every_waveform_key_in_the_contract_table_is_reachable() {
             modifiers: Modifiers::default(),
         });
         let mut output = ctx.run_ui(input, |ui| {
-            modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+            modplayer_ui::now_playing::show(
+                ui,
+                &mut controller,
+                &mut artwork,
+                &mut waveform,
+                &mut modplayer_ui::section_memory::SectionMemory::default(),
+            )
         });
         let update = output
             .platform_output
@@ -1484,7 +1555,13 @@ fn every_waveform_key_in_the_contract_table_is_reachable() {
             modifiers,
         });
         let output = ctx.run_ui(input, |ui| {
-            modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+            modplayer_ui::now_playing::show(
+                ui,
+                &mut controller,
+                &mut artwork,
+                &mut waveform,
+                &mut modplayer_ui::section_memory::SectionMemory::default(),
+            )
         });
         output.drop_without_applying_deltas();
     };
@@ -1613,7 +1690,13 @@ fn press_marker_key(
             &mut shell,
             waveform,
         );
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            controller,
+            artwork,
+            waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     output.drop_without_applying_deltas();
 }
@@ -1660,7 +1743,13 @@ fn every_marker_kind_glyph_exposes_role_button_named_marker_glyph() {
         .unwrap_or_else(|e| unreachable!("set_cue: {e}"));
 
     let nodes = render_nodes(|ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
 
     // At least one `Role::Button` glyph per marker (one per lane: the
@@ -1700,7 +1789,13 @@ fn panel_row_exposes_role_list_item() {
         .unwrap_or_else(|e| unreachable!("add_point_marker: {e}"));
 
     let nodes = render_nodes(|ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
 
     let rows: Vec<_> = nodes.iter().filter(|n| n.role == Role::ListItem).collect();
@@ -1732,7 +1827,13 @@ fn arm_toggle_exposes_role_checkbox_and_reports_toggled_state() {
         .unwrap_or_else(|| unreachable!("region must exist"));
 
     let off = render_nodes(|ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     let checkbox = find_one(&off, Role::CheckBox, &tr("loop-arm"));
     assert_eq!(
@@ -1745,7 +1846,13 @@ fn arm_toggle_exposes_role_checkbox_and_reports_toggled_state() {
         .arm_loop(region)
         .unwrap_or_else(|e| unreachable!("arm_loop: {e}"));
     let on = render_nodes(|ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     let checkbox = find_one(&on, Role::CheckBox, &tr("loop-disarm"));
     assert_eq!(
@@ -1767,7 +1874,13 @@ fn loop_numeric_fields_and_nudge_step_are_labelled() {
         .unwrap_or_else(|e| unreachable!("set_loop_b: {e}"));
 
     let nodes = render_nodes(|ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     let spin_fields: Vec<_> = nodes
         .iter()
@@ -1808,7 +1921,13 @@ fn markers_panel_and_empty_state_are_exposed() {
     let (mut controller, _dirs, mut artwork, mut waveform) = marker_controller("panel-exposed");
 
     let empty = render_nodes(|ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     assert!(
         empty
@@ -1827,7 +1946,13 @@ fn markers_panel_and_empty_state_are_exposed() {
         .add_point_marker()
         .unwrap_or_else(|e| unreachable!("add_point_marker: {e}"));
     let with_marker = render_nodes(|ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     assert!(
         with_marker
@@ -2510,7 +2635,9 @@ fn transport_panel_controls_expose_accessible_names_and_states() {
         "both fixtures must already be requesting: {view:?}"
     );
 
-    let nodes = render_nodes(|ui| modplayer_ui::transport_view::show(ui, &mut controller));
+    let nodes = render_nodes(|ui| {
+        modplayer_ui::transport_view::show(ui, &mut controller, &mut true);
+    });
 
     // 016-list-row-and-panel-components (FR-018's stated correction,
     // contract C7): the header moved from a plain `ui.heading()` (`Role::
@@ -2562,7 +2689,9 @@ fn transport_panel_controls_expose_accessible_names_and_states() {
     // Give focus to A: the holder label, "Take back" and A's own row/give
     // button all follow.
     controller.focus_give(id_a);
-    let nodes = render_nodes(|ui| modplayer_ui::transport_view::show(ui, &mut controller));
+    let nodes = render_nodes(|ui| {
+        modplayer_ui::transport_view::show(ui, &mut controller, &mut true);
+    });
 
     let holder = find_one(
         &nodes,
@@ -2637,7 +2766,9 @@ fn transport_panel_empty_state_exposes_its_accessible_name() {
     );
     controller.plugin_disable(section_loop);
 
-    let nodes = render_nodes(|ui| modplayer_ui::transport_view::show(ui, &mut controller));
+    let nodes = render_nodes(|ui| {
+        modplayer_ui::transport_view::show(ui, &mut controller, &mut true);
+    });
     let empty = find_one(&nodes, Role::Label, &tr("transport-empty"));
     assert!(!empty.disabled, "{empty:?}");
 }

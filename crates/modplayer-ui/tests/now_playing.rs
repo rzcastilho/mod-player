@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use egui::accesskit::{NodeId, Role};
+use egui::accesskit::{NodeId, Role, Toggled};
 use egui::{Context, Event, Key, Modifiers, PointerButton, Pos2, RawInput, Rect};
 use modplayer_audio_io::{FakeBackend, FakeDevice};
 use modplayer_audio_source::{Availability, SourceCommand, SourceHealth, TrackId, TrackRef};
@@ -22,7 +22,7 @@ use modplayer_core::markers::{CueSlot, TrackMarkers};
 use modplayer_core::plugins::PluginId;
 use modplayer_core::settings::SettingsStore;
 use modplayer_core::transport::Intent;
-use modplayer_core::{NotRegisteredReason, NowPlayingPanel, PlaybackController, tr};
+use modplayer_core::{NotRegisteredReason, NowPlayingPanel, PlaybackController, tr, tr_args};
 use modplayer_engine::{BufferPreset, DeviceId, FrameCount, SampleRate};
 use modplayer_ui::artwork::{ArtworkCache, ArtworkState};
 use modplayer_ui::waveform::{DetailWindow, DragOrigin, DragPreview, TimeSpace, WaveformState};
@@ -86,6 +86,22 @@ fn track(id: &str, duration_ms: u32) -> TrackRef {
     TrackRef::new(
         TrackId::new(format!("spotify:track:{id}")).unwrap_or_else(|_| unreachable!()),
         id,
+        vec!["Artist".to_string()],
+        None,
+        None,
+        duration_ms,
+        Availability::Available,
+    )
+}
+
+/// As [`track`], but with an explicit `title` independent of the (short,
+/// ASCII, <=64-byte) `id` used for the `TrackId` — needed by the 021
+/// (021-transport-bar-and-panel-layout) bar-height/identity tests below,
+/// which exercise 5- and 200-character titles (contract B3, B4).
+fn track_with_title(id: &str, title: &str, duration_ms: u32) -> TrackRef {
+    TrackRef::new(
+        TrackId::new(format!("spotify:track:{id}")).unwrap_or_else(|_| unreachable!()),
+        title,
         vec!["Artist".to_string()],
         None,
         None,
@@ -177,7 +193,13 @@ fn rendered_texts<B: modplayer_audio_io::OutputBackend, H: modplayer_audio_sourc
     let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut output = ctx.run_ui(default_input(), |ui| {
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0);
+        modplayer_ui::now_playing::show(
+            ui,
+            controller,
+            artwork,
+            waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
     let Some(update) = output.platform_output.accesskit_update.take() else {
         panic!("accesskit_update should be populated once enabled");
@@ -209,7 +231,13 @@ fn rendered_painted_texts<
 ) -> Vec<String> {
     let ctx = fresh_ctx();
     let output = ctx.run_ui(default_input(), |ui| {
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0);
+        modplayer_ui::now_playing::show(
+            ui,
+            controller,
+            artwork,
+            waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
     let texts = output
         .shapes
@@ -261,7 +289,13 @@ fn render_nodes<B: modplayer_audio_io::OutputBackend, H: modplayer_audio_source:
     let ctx = fresh_ctx();
     ctx.enable_accesskit();
     let mut output = ctx.run_ui(input, |ui| {
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0);
+        modplayer_ui::now_playing::show(
+            ui,
+            controller,
+            artwork,
+            waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
     let update = output
         .platform_output
@@ -290,7 +324,13 @@ fn overview_bounds<B: modplayer_audio_io::OutputBackend, H: modplayer_audio_sour
     waveform: &mut WaveformState,
 ) -> Rect {
     let mut output = ctx.run_ui(default_input(), |ui| {
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0);
+        modplayer_ui::now_playing::show(
+            ui,
+            controller,
+            artwork,
+            waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
     let update = output
         .platform_output
@@ -299,9 +339,13 @@ fn overview_bounds<B: modplayer_audio_io::OutputBackend, H: modplayer_audio_sour
         .expect("accesskit_update should be populated once enabled");
     output.drop_without_applying_deltas();
 
+    // 021-transport-bar-and-panel-layout (contract B2.4): the bar's own
+    // master-volume `Slider` now sits above the waveform on screen, so
+    // "the topmost `Role::Slider`" no longer picks the overview out —
+    // matched by its own accessible name (`transport-seek`) instead.
     let mut best: Option<egui::accesskit::Rect> = None;
     for (_, node) in &update.nodes {
-        if node.role() != Role::Slider {
+        if node.role() != Role::Slider || node.label() != Some(tr("transport-seek").as_str()) {
             continue;
         }
         if let Some(bounds) = node.bounds()
@@ -310,7 +354,7 @@ fn overview_bounds<B: modplayer_audio_io::OutputBackend, H: modplayer_audio_sour
             best = Some(bounds);
         }
     }
-    let bounds = best.expect("Now Playing must render at least one Role::Slider node");
+    let bounds = best.expect("Now Playing must render a `transport-seek` Role::Slider node");
     Rect::from_min_max(
         Pos2::new(bounds.x0 as f32, bounds.y0 as f32),
         Pos2::new(bounds.x1 as f32, bounds.y1 as f32),
@@ -536,7 +580,13 @@ fn click_on_overview_seeks_to_exact_frame() {
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(press, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     output.drop_without_applying_deltas();
 
@@ -548,7 +598,13 @@ fn click_on_overview_seeks_to_exact_frame() {
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(release, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     output.drop_without_applying_deltas();
 
@@ -584,14 +640,26 @@ fn drag_previews_without_seeking_and_esc_cancels() {
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(press, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     output.drop_without_applying_deltas();
 
     let mut drag = default_input();
     drag.events.push(Event::PointerMoved(right));
     let output = ctx.run_ui(drag, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     output.drop_without_applying_deltas();
 
@@ -619,7 +687,13 @@ fn drag_previews_without_seeking_and_esc_cancels() {
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(esc, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     output.drop_without_applying_deltas();
 
@@ -654,7 +728,13 @@ fn seek_slider_commits_once_per_release() {
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(press, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     output.drop_without_applying_deltas();
     assert_eq!(
@@ -666,7 +746,13 @@ fn seek_slider_commits_once_per_release() {
     let mut drag = default_input();
     drag.events.push(Event::PointerMoved(right));
     let output = ctx.run_ui(drag, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     output.drop_without_applying_deltas();
     assert_eq!(
@@ -683,7 +769,13 @@ fn seek_slider_commits_once_per_release() {
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(release, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     output.drop_without_applying_deltas();
     assert_eq!(
@@ -694,7 +786,13 @@ fn seek_slider_commits_once_per_release() {
     let position_after_release = controller.position();
 
     let output = ctx.run_ui(default_input(), |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     output.drop_without_applying_deltas();
     assert_eq!(controller.transport_state().intent, Intent::Paused);
@@ -914,7 +1012,13 @@ fn pointer_zoom_on_detail_is_anchored_on_the_pointer_not_the_playhead() {
     // the overview's `transport-seek`).
     let bounds = {
         let mut output = ctx.run_ui(default_input(), |ui| {
-            modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+            modplayer_ui::now_playing::show(
+                ui,
+                &mut controller,
+                &mut artwork,
+                &mut waveform,
+                &mut modplayer_ui::section_memory::SectionMemory::default(),
+            )
         });
         let update = output
             .platform_output
@@ -963,7 +1067,13 @@ fn pointer_zoom_on_detail_is_anchored_on_the_pointer_not_the_playhead() {
         .push(Event::PointerMoved(Pos2::new(pointer_x, bounds.center().y)));
     input.events.push(Event::Zoom(2.0));
     let output = ctx.run_ui(input, |ui| {
-        modplayer_ui::now_playing::show(ui, &mut controller, &mut artwork, &mut waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     output.drop_without_applying_deltas();
 
@@ -1053,7 +1163,13 @@ fn run_key_frame<B: modplayer_audio_io::OutputBackend, H: modplayer_audio_source
             &mut shell,
             waveform,
         );
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0)
+        modplayer_ui::now_playing::show(
+            ui,
+            controller,
+            artwork,
+            waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        )
     });
     let update = output
         .platform_output
@@ -1651,8 +1767,17 @@ fn transport_toggle_beside_queue_and_effects() {
         texts.contains(&tr("transport-toggle")),
         "the Transport toggle must render beside Queue/Effects, got {texts:?}"
     );
+    // 021-transport-bar-and-panel-layout (contract C2, superseding 016
+    // C10): a collapsed card still renders its header — `transport-
+    // panel-title` is present either way now — so "closed" is checked
+    // through a body-only marker instead: `transport-policy`, only drawn
+    // while `add_contents` runs (i.e. while open).
     assert!(
-        !texts.contains(&tr("transport-panel-title")),
+        texts.contains(&tr("transport-panel-title")),
+        "a collapsed card still shows its header, got {texts:?}"
+    );
+    assert!(
+        !texts.contains(&tr("transport-policy")),
         "the panel must start closed"
     );
 }
@@ -1674,7 +1799,13 @@ fn transport_panel_survives_track_change() {
                  artwork: &mut ArtworkCache,
                  waveform: &mut WaveformState| {
         let mut output = ctx.run_ui(default_input(), |ui| {
-            modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0);
+            modplayer_ui::now_playing::show(
+                ui,
+                controller,
+                artwork,
+                waveform,
+                &mut modplayer_ui::section_memory::SectionMemory::default(),
+            );
         });
         let update = output
             .platform_output
@@ -1691,23 +1822,30 @@ fn transport_panel_survives_track_change() {
             .collect::<Vec<_>>()
     };
 
+    // 021-transport-bar-and-panel-layout (contract C2, superseding 016
+    // C10): a collapsed card still renders its header, so "closed" is
+    // checked through a body-only marker (`transport-policy`) instead.
     let initial = texts(&mut controller, &mut artwork, &mut waveform);
     assert!(
-        !initial.contains(&tr("transport-panel-title")),
+        initial.contains(&tr("transport-panel-title")),
+        "a collapsed card still shows its header, got {initial:?}"
+    );
+    assert!(
+        !initial.contains(&tr("transport-policy")),
         "the panel starts closed"
     );
 
     modplayer_ui::transport_view::toggle_transport_panel(&mut controller);
     let opened = texts(&mut controller, &mut artwork, &mut waveform);
     assert!(
-        opened.contains(&tr("transport-panel-title")),
+        opened.contains(&tr("transport-policy")),
         "toggling must open the panel, got {opened:?}"
     );
 
     controller.skip_forward();
     let after_track_change = texts(&mut controller, &mut artwork, &mut waveform);
     assert!(
-        after_track_change.contains(&tr("transport-panel-title")),
+        after_track_change.contains(&tr("transport-policy")),
         "the panel must survive a track change, got {after_track_change:?}"
     );
 }
@@ -1726,6 +1864,10 @@ struct PanelNode {
     label: Option<String>,
     value: Option<String>,
     bounds: Option<Rect>,
+    /// `Toggled::True`/`False` for a switch/disclosure (021-transport-bar-
+    /// and-panel-layout contracts B6, C3) — `None` for a node that isn't a
+    /// toggle at all.
+    toggled: Option<Toggled>,
 }
 
 impl PanelNode {
@@ -1757,7 +1899,13 @@ fn render_panel_frame<
 ) -> PanelFrame {
     ctx.enable_accesskit();
     let mut output = ctx.run_ui(input, |ui| {
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0);
+        modplayer_ui::now_playing::show(
+            ui,
+            controller,
+            artwork,
+            waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
     let update = output
         .platform_output
@@ -1780,6 +1928,7 @@ fn render_panel_frame<
                     Pos2::new(b.x1 as f32, b.y1 as f32),
                 )
             }),
+            toggled: node.toggled(),
         })
         .collect();
     PanelFrame { nodes, shapes }
@@ -1832,7 +1981,13 @@ fn warm_up<B: modplayer_audio_io::OutputBackend, H: modplayer_audio_source::Sour
     input: RawInput,
 ) {
     let output = ctx.run_ui(input, |ui| {
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0);
+        modplayer_ui::now_playing::show(
+            ui,
+            controller,
+            artwork,
+            waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
     output.drop_without_applying_deltas();
 }
@@ -1857,7 +2012,13 @@ fn click_now_playing<
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(press_input, |ui| {
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0);
+        modplayer_ui::now_playing::show(
+            ui,
+            controller,
+            artwork,
+            waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
     output.drop_without_applying_deltas();
 
@@ -1869,9 +2030,143 @@ fn click_now_playing<
         modifiers: Modifiers::default(),
     });
     let output = ctx.run_ui(release_input, |ui| {
-        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, 0);
+        modplayer_ui::now_playing::show(
+            ui,
+            controller,
+            artwork,
+            waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
     output.drop_without_applying_deltas();
+}
+
+/// As [`click_now_playing`], but over an explicit `input` (screen size)
+/// instead of the fixed 800x600 `default_input` — needed whenever a test
+/// must click a control whose bounds it measured at a different viewport
+/// (021-transport-bar-and-panel-layout T-B1).
+fn click_now_playing_at<
+    B: modplayer_audio_io::OutputBackend,
+    H: modplayer_audio_source::SourceHost,
+>(
+    ctx: &Context,
+    controller: &mut PlaybackController<B, H>,
+    artwork: &mut ArtworkCache,
+    waveform: &mut WaveformState,
+    input: &RawInput,
+    pos: Pos2,
+) {
+    let mut press_input = input.clone();
+    press_input.events.push(Event::PointerButton {
+        pos,
+        button: PointerButton::Primary,
+        pressed: true,
+        modifiers: Modifiers::default(),
+    });
+    let output = ctx.run_ui(press_input, |ui| {
+        modplayer_ui::now_playing::show(
+            ui,
+            controller,
+            artwork,
+            waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
+    });
+    output.drop_without_applying_deltas();
+
+    let mut release_input = input.clone();
+    release_input.events.push(Event::PointerButton {
+        pos,
+        button: PointerButton::Primary,
+        pressed: false,
+        modifiers: Modifiers::default(),
+    });
+    let output = ctx.run_ui(release_input, |ui| {
+        modplayer_ui::now_playing::show(
+            ui,
+            controller,
+            artwork,
+            waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
+    });
+    output.drop_without_applying_deltas();
+}
+
+/// As [`click_now_playing`], but captures and returns the release frame's
+/// own [`PanelFrame`] — needed by the same-frame header/bar-toggle
+/// consistency test (021-transport-bar-and-panel-layout, contract C3,
+/// research R7: a header click's `request_discard` re-runs this same pass,
+/// so the *release* frame's own output already carries the toggled state).
+fn click_now_playing_capturing<
+    B: modplayer_audio_io::OutputBackend,
+    H: modplayer_audio_source::SourceHost,
+>(
+    ctx: &Context,
+    controller: &mut PlaybackController<B, H>,
+    artwork: &mut ArtworkCache,
+    waveform: &mut WaveformState,
+    pos: Pos2,
+) -> PanelFrame {
+    let mut press_input = default_input();
+    press_input.events.push(Event::PointerButton {
+        pos,
+        button: PointerButton::Primary,
+        pressed: true,
+        modifiers: Modifiers::default(),
+    });
+    let output = ctx.run_ui(press_input, |ui| {
+        modplayer_ui::now_playing::show(
+            ui,
+            controller,
+            artwork,
+            waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
+    });
+    output.drop_without_applying_deltas();
+
+    let mut release_input = default_input();
+    release_input.events.push(Event::PointerButton {
+        pos,
+        button: PointerButton::Primary,
+        pressed: false,
+        modifiers: Modifiers::default(),
+    });
+    let mut output = ctx.run_ui(release_input, |ui| {
+        modplayer_ui::now_playing::show(
+            ui,
+            controller,
+            artwork,
+            waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
+    });
+    let update = output
+        .platform_output
+        .accesskit_update
+        .take()
+        .expect("accesskit_update should be populated once enabled");
+    let shapes: Vec<egui::Shape> = output.shapes.iter().map(|c| c.shape.clone()).collect();
+    output.drop_without_applying_deltas();
+
+    let nodes = update
+        .nodes
+        .iter()
+        .map(|(_, node)| PanelNode {
+            role: node.role(),
+            label: node.label().map(str::to_string),
+            value: node.value().map(str::to_string),
+            bounds: node.bounds().map(|b| {
+                Rect::from_min_max(
+                    Pos2::new(b.x0 as f32, b.y0 as f32),
+                    Pos2::new(b.x1 as f32, b.y1 as f32),
+                )
+            }),
+            toggled: node.toggled(),
+        })
+        .collect();
+    PanelFrame { nodes, shapes }
 }
 
 /// C5 (contracts/panel-card.md): with a track loaded and Effect Chain/
@@ -1960,14 +2255,16 @@ fn each_open_panel_has_exactly_one_heading_node() {
     }
 }
 
-/// C9 (contracts/panel-card.md, FR-035): wrapping a panel in the shared
-/// card adds chrome only — no collapse/expand affordance is added to any
-/// header; the three control-row switches (and their `Q`/`E`/`T`
-/// shortcuts) remain the only way to open/close a panel (mirrors
-/// `markers.rs`'s own C11 "no added interactive controls" pattern).
+/// T-C5 (021-transport-bar-and-panel-layout, contract C1, C5; supersedes
+/// 016 C9's "no collapse/expand affordance is added to any header"):
+/// every card — including Markers, which still has no *bar* toggle —
+/// gains its own header disclosure button now, reachable with Tab and
+/// activated with Space/Enter. The three bar switches (and their
+/// `Q`/`E`/`T` shortcuts) remain, unchanged, as the Queue/Effects/
+/// Transport cards' *other* open/close path.
 #[test]
-fn no_collapse_control_is_added_to_any_card_header() {
-    let (mut controller, _handle, _dirs) = active_controller("c9-no-collapse");
+fn every_card_has_exactly_one_header_disclosure() {
+    let (mut controller, _handle, _dirs) = active_controller("c9-disclosure");
     controller.queue_replace(vec![track("a", 200_000)]);
     controller.set_now_playing_panel_open(NowPlayingPanel::EffectChain, true);
     controller.set_now_playing_panel_open(NowPlayingPanel::Transport, true);
@@ -1997,16 +2294,20 @@ fn no_collapse_control_is_added_to_any_card_header() {
         .filter(|node| node.role == Role::Button)
         .filter_map(|node| node.accessible_name().map(str::to_string))
         .collect();
-    assert!(
-        !button_names.iter().any(|name| {
+    let disclosure_count = button_names
+        .iter()
+        .filter(|name| {
             let lower = name.to_lowercase();
             lower.contains("collaps") || lower.contains("expand")
-        }),
-        "no collapse/expand control may be added to any panel card: {button_names:?}"
+        })
+        .count();
+    assert_eq!(
+        disclosure_count, 4,
+        "expected one collapse/expand disclosure per card (Markers, Effect \
+         Chain, Transport, Queue): {button_names:?}"
     );
 
-    // The only three panel-open affordances left are the control-row
-    // switches — still present, unchanged.
+    // The three bar switches are still present, unchanged (FR-006, C3).
     for key in ["queue-toggle", "effects-toggle", "transport-toggle"] {
         assert!(
             button_names.contains(&tr(key)),
@@ -2015,11 +2316,14 @@ fn no_collapse_control_is_added_to_any_card_header() {
     }
 }
 
-/// C10 (contracts/panel-card.md, FR-035): a closed panel draws nothing at
-/// all — not a header-only card. With no track loaded, Markers never
-/// renders either, and the three persisted panels all default closed.
+/// T-C2 (021-transport-bar-and-panel-layout, contract C2, C4; replaces the
+/// 016 C10 test "a closed panel draws nothing at all"): a closed panel now
+/// draws its header (and its card frame) but none of its body nodes. With
+/// no track loaded, Markers doesn't render at all (contract C4); the other
+/// three panels default closed but each still contributes one card and one
+/// heading — just no body content.
 #[test]
-fn a_closed_panel_contributes_no_card_or_heading() {
+fn a_closed_panel_contributes_a_header_only_card() {
     let (mut controller, _handle, _dirs) = active_controller("c10-closed-panel");
     assert!(!controller.now_playing_panel_open(NowPlayingPanel::EffectChain));
     assert!(!controller.now_playing_panel_open(NowPlayingPanel::Transport));
@@ -2045,8 +2349,9 @@ fn a_closed_panel_contributes_no_card_or_heading() {
 
     assert_eq!(
         card_rects(&frame.shapes).len(),
-        0,
-        "no panel is open: no card may render"
+        3,
+        "no track is loaded (Markers absent), but the other three panels \
+         each still contribute a header-only card"
     );
     for header in [
         tr("effects-panel-title"),
@@ -2054,9 +2359,23 @@ fn a_closed_panel_contributes_no_card_or_heading() {
         tr("queue-panel-title"),
     ] {
         assert!(
-            !frame.nodes.iter().any(|node| node.role == Role::Heading
+            frame.nodes.iter().any(|node| node.role == Role::Heading
                 && node.accessible_name() == Some(header.as_str())),
-            "a closed panel must not expose its heading node: `{header}`"
+            "a closed panel must still expose its heading node: `{header}`"
+        );
+    }
+    // No body content leaks through while closed (contract C2).
+    for body_marker in [
+        tr("effects-add-node"),
+        tr("transport-policy"),
+        tr("queue-shuffle"),
+    ] {
+        assert!(
+            !frame
+                .nodes
+                .iter()
+                .any(|node| node.accessible_name() == Some(body_marker.as_str())),
+            "a collapsed card must not draw its body: `{body_marker}`"
         );
     }
 }
@@ -2211,4 +2530,1229 @@ fn switch_click_and_host_action_toggles_persist_through_a_settings_reload() {
             "{action:?} must persist immediately, from the same setter the switch uses"
         );
     }
+}
+
+// ---------------------------------------------------------------------
+// 021-transport-bar-and-panel-layout, Phase 3 (User Story 1): the pinned
+// transport bar (contracts B1-B7), the single scroll region (S1, S3), and
+// the collapsible cards (C3, C4, C6) — see contracts/ui-now-playing-
+// layout.md.
+// ---------------------------------------------------------------------
+
+/// T-B1 (contract B1, FR-001, FR-010, SC-001): with all four panels open
+/// and the scroll region seeded to its maximum offset (021 research R2's
+/// "egui clamps it to the new content height on show"), every bar
+/// control's AccessKit bounds still sit inside the window's content rect,
+/// and a click on play/pause still changes `Intent` — the bar never
+/// scrolls away and never stops responding.
+#[test]
+fn bar_controls_stay_in_bounds_and_clickable_after_scrolling_to_max() {
+    let (mut controller, _handle, _dirs) = active_controller("b1-scrolled-to-max");
+    controller.queue_replace(vec![track("a", 200_000)]);
+    controller.set_now_playing_panel_open(NowPlayingPanel::EffectChain, true);
+    controller.set_now_playing_panel_open(NowPlayingPanel::Transport, true);
+    controller.set_now_playing_panel_open(NowPlayingPanel::Queue, true);
+
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut artwork = ArtworkCache::new();
+    let mut waveform = WaveformState::default();
+    let content_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(960.0, 640.0));
+    let input = RawInput {
+        screen_rect: Some(content_rect),
+        ..Default::default()
+    };
+
+    // Warm up (unscrolled) so widget/layout state settles before measuring
+    // (mirrors this file's own `warm_up` convention).
+    let output = ctx.run_ui(input.clone(), |ui| {
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
+    });
+    output.drop_without_applying_deltas();
+
+    // Seed the scroll region's offset to an enormous value: `SectionMemory
+    // ::scroll_area`'s doc comment says egui clamps a seeded offset to the
+    // actual content height on show, so this lands at the true maximum
+    // without needing to simulate physical wheel input (021 data-model.md
+    // §5, research R2).
+    let mut memory = modplayer_ui::section_memory::SectionMemory::default();
+    memory.record(modplayer_ui::section_memory::ViewKey::NowPlaying, 1.0e6);
+    // A different key, purely to flip `shown_last_frame` away from
+    // `NowPlaying` so the seed above is actually applied (`scroll_area`
+    // only seeds the first frame a view is shown again after being away).
+    memory.record(modplayer_ui::section_memory::ViewKey::Search, 0.0);
+
+    let mut output = ctx.run_ui(input.clone(), |ui| {
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut memory,
+        );
+    });
+    let update = output
+        .platform_output
+        .accesskit_update
+        .take()
+        .expect("accesskit_update should be populated once enabled");
+    output.drop_without_applying_deltas();
+
+    let nodes: Vec<PanelNode> = update
+        .nodes
+        .iter()
+        .map(|(_, node)| PanelNode {
+            role: node.role(),
+            label: node.label().map(str::to_string),
+            value: node.value().map(str::to_string),
+            bounds: node.bounds().map(|b| {
+                Rect::from_min_max(
+                    Pos2::new(b.x0 as f32, b.y0 as f32),
+                    Pos2::new(b.x1 as f32, b.y1 as f32),
+                )
+            }),
+            toggled: node.toggled(),
+        })
+        .collect();
+
+    let bar_control_labels = [
+        tr("transport-skip-back"),
+        tr("transport-play"),
+        tr("transport-stop"),
+        tr("transport-skip-forward"),
+        tr("queue-toggle"),
+        tr("effects-toggle"),
+        tr("transport-toggle"),
+    ];
+    for label in &bar_control_labels {
+        let bounds = find_panel_node(&nodes, Role::Button, label)
+            .and_then(|node| node.bounds)
+            .unwrap_or_else(|| panic!("expected the `{label}` bar control to render"));
+        assert!(
+            content_rect.contains_rect(bounds),
+            "`{label}` must stay inside the content rect at max scroll: {bounds:?}"
+        );
+    }
+
+    // The bar still responds to a click at max scroll (FR-010).
+    let play_pause = find_panel_node(&nodes, Role::Button, &tr("transport-play"))
+        .and_then(|node| node.bounds)
+        .expect("play/pause must render");
+    assert_ne!(controller.transport_state().intent, Intent::Playing);
+    click_now_playing_at(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        &input,
+        play_pause.center(),
+    );
+    assert_eq!(
+        controller.transport_state().intent,
+        Intent::Playing,
+        "play/pause must still respond to a click at max scroll"
+    );
+}
+
+/// The pinned bar's own outer height (contract B3), read back from
+/// `PanelState` after two frames on a fresh context (the second frame
+/// mirrors this file's own `warm_up` convention, letting any layout
+/// settle before the measurement is trusted).
+#[allow(clippy::too_many_arguments)]
+fn bar_outer_height(
+    label: &str,
+    title_len: Option<usize>,
+    all_open: bool,
+    playing: bool,
+    width: f32,
+    height: f32,
+    scroll_max: bool,
+) -> f32 {
+    let (mut controller, _handle, _dirs) = active_controller(label);
+    if let Some(len) = title_len {
+        let title: String = "T".repeat(len);
+        controller.queue_replace(vec![track_with_title("a", &title, 200_000)]);
+        controller.set_now_playing_panel_open(NowPlayingPanel::Markers, all_open);
+        if playing {
+            controller.play();
+        }
+    }
+    controller.set_now_playing_panel_open(NowPlayingPanel::EffectChain, all_open);
+    controller.set_now_playing_panel_open(NowPlayingPanel::Transport, all_open);
+    controller.set_now_playing_panel_open(NowPlayingPanel::Queue, all_open);
+
+    let ctx = fresh_ctx();
+    let mut artwork = ArtworkCache::new();
+    let mut waveform = WaveformState::default();
+    let input = RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(width, height))),
+        ..Default::default()
+    };
+
+    let mut memory = modplayer_ui::section_memory::SectionMemory::default();
+    if scroll_max {
+        memory.record(modplayer_ui::section_memory::ViewKey::NowPlaying, 1.0e6);
+        memory.record(modplayer_ui::section_memory::ViewKey::Search, 0.0);
+    }
+
+    // Warm-up frame.
+    let output = ctx.run_ui(input.clone(), |ui| {
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut memory,
+        );
+    });
+    output.drop_without_applying_deltas();
+
+    // Measured frame.
+    let output = ctx.run_ui(input, |ui| {
+        modplayer_ui::now_playing::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut memory,
+        );
+    });
+    output.drop_without_applying_deltas();
+
+    let bar_id = egui::Id::new("now-playing-transport-bar");
+    egui::PanelState::load(&ctx, bar_id)
+        .expect("the transport bar must register its PanelState after a frame")
+        .size()
+        .y
+}
+
+/// T-B3 (contract B3, FR-002, FR-011, SC-003): the bar's outer height
+/// stays within +-1px of a baseline across window height, scroll offset,
+/// panel-open combination, playback intent, title length, and the
+/// no-track state — perturbed one axis at a time from the baseline
+/// (960x640, no scroll, all panels closed, paused, a 5-char title).
+#[test]
+fn bar_height_invariant_across_window_scroll_panel_state_and_title() {
+    let baseline = bar_outer_height("b3-baseline", Some(5), false, false, 960.0, 640.0, false);
+
+    for height in [640.0, 820.0, 1200.0] {
+        let measured = bar_outer_height(
+            &format!("b3-height-{height}"),
+            Some(5),
+            false,
+            false,
+            960.0,
+            height,
+            false,
+        );
+        assert!(
+            (measured - baseline).abs() <= 1.0,
+            "window height {height}: bar height {measured} vs baseline {baseline}"
+        );
+    }
+
+    for scroll_max in [false, true] {
+        let measured = bar_outer_height(
+            &format!("b3-scroll-{scroll_max}"),
+            Some(5),
+            true,
+            false,
+            960.0,
+            640.0,
+            scroll_max,
+        );
+        assert!(
+            (measured - baseline).abs() <= 1.0,
+            "scroll_max={scroll_max}: bar height {measured} vs baseline {baseline}"
+        );
+    }
+
+    for all_open in [false, true] {
+        let measured = bar_outer_height(
+            &format!("b3-panels-{all_open}"),
+            Some(5),
+            all_open,
+            false,
+            960.0,
+            640.0,
+            false,
+        );
+        assert!(
+            (measured - baseline).abs() <= 1.0,
+            "all_open={all_open}: bar height {measured} vs baseline {baseline}"
+        );
+    }
+
+    for playing in [false, true] {
+        let measured = bar_outer_height(
+            &format!("b3-intent-{playing}"),
+            Some(5),
+            false,
+            playing,
+            960.0,
+            640.0,
+            false,
+        );
+        assert!(
+            (measured - baseline).abs() <= 1.0,
+            "playing={playing}: bar height {measured} vs baseline {baseline}"
+        );
+    }
+
+    for len in [5usize, 200] {
+        let measured = bar_outer_height(
+            &format!("b3-title-{len}"),
+            Some(len),
+            false,
+            false,
+            960.0,
+            640.0,
+            false,
+        );
+        assert!(
+            (measured - baseline).abs() <= 1.0,
+            "title_len={len}: bar height {measured} vs baseline {baseline}"
+        );
+    }
+
+    let no_track = bar_outer_height("b3-no-track", None, false, false, 960.0, 640.0, false);
+    assert!(
+        (no_track - baseline).abs() <= 1.0,
+        "no track: bar height {no_track} vs baseline {baseline}"
+    );
+}
+
+/// T-B4 (contract B4, edge case "long title"): a 200-character title
+/// renders on one painted line (truncated with an ellipsis, never
+/// wrapped), while the identity group's AccessKit label
+/// (`now-playing-bar-identity`) still carries the full, untruncated
+/// title and artist.
+#[test]
+fn long_title_renders_one_line_with_full_text_in_the_a11y_label() {
+    let (mut controller, _handle, _dirs) = active_controller("b4-long-title");
+    let title = "T".repeat(200);
+    controller.queue_replace(vec![track_with_title("a", &title, 200_000)]);
+
+    let ctx = fresh_ctx();
+    let mut artwork = ArtworkCache::new();
+    let mut waveform = WaveformState::default();
+    let input = RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(960.0, 640.0))),
+        ..Default::default()
+    };
+    let frame = render_panel_frame(&ctx, &mut controller, &mut artwork, &mut waveform, input);
+
+    let title_galley = frame
+        .shapes
+        .iter()
+        .find_map(|shape| match shape {
+            egui::Shape::Text(text_shape) if text_shape.galley.job.text == title => {
+                Some(text_shape.galley.clone())
+            }
+            _ => None,
+        })
+        .expect("the bar identity title must paint as a Text shape");
+    assert_eq!(
+        title_galley.rows.len(),
+        1,
+        "a 200-char title must render on exactly one line"
+    );
+    assert!(
+        title_galley.elided,
+        "a 200-char title must be truncated with an ellipsis, not wrapped"
+    );
+
+    let artist = "Artist".to_string();
+    let full_name = tr_args(
+        "now-playing-bar-identity",
+        &[("title", title.clone()), ("artist", artist)],
+    );
+    assert!(
+        frame
+            .nodes
+            .iter()
+            .any(|node| node.accessible_name() == Some(full_name.as_str())),
+        "the identity group's AccessKit label must carry the full, untruncated title/artist"
+    );
+}
+
+/// T-B6 (contract B6, B2.5, FR-019): the Queue/Effects/Transport toggles
+/// report `Toggled` matching their own open flag, and the toggle group
+/// sits at least `space::XL` from skip forward's own rect.
+#[test]
+fn bar_toggles_report_toggled_and_stay_xl_from_skip_forward() {
+    let (mut controller, _handle, _dirs) = active_controller("b6-toggles");
+    controller.queue_replace(vec![track("a", 200_000)]);
+    controller.set_now_playing_panel_open(NowPlayingPanel::Queue, true);
+    controller.set_now_playing_panel_open(NowPlayingPanel::EffectChain, false);
+    controller.set_now_playing_panel_open(NowPlayingPanel::Transport, true);
+
+    let ctx = fresh_ctx();
+    let mut artwork = ArtworkCache::new();
+    let mut waveform = WaveformState::default();
+    // Wide enough that the bar draws in one row (no wrap), so the gap
+    // measured below reads the actual `XL` spacing (research R4).
+    let input = RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1600.0, 640.0))),
+        ..Default::default()
+    };
+    let frame = render_panel_frame(&ctx, &mut controller, &mut artwork, &mut waveform, input);
+
+    for (key, expected) in [
+        ("queue-toggle", Toggled::True),
+        ("effects-toggle", Toggled::False),
+        ("transport-toggle", Toggled::True),
+    ] {
+        let node = find_panel_node(&frame.nodes, Role::Button, &tr(key))
+            .unwrap_or_else(|| panic!("expected the `{key}` switch to render"));
+        assert_eq!(
+            node.toggled,
+            Some(expected),
+            "`{key}` must report `Toggled` matching its own open flag"
+        );
+    }
+
+    let skip_forward = find_panel_node(&frame.nodes, Role::Button, &tr("transport-skip-forward"))
+        .and_then(|node| node.bounds)
+        .expect("skip forward must render");
+    let queue_toggle = find_panel_node(&frame.nodes, Role::Button, &tr("queue-toggle"))
+        .and_then(|node| node.bounds)
+        .expect("the Queue toggle must render");
+    let gap = queue_toggle.min.x - skip_forward.max.x;
+    assert!(
+        gap >= modplayer_ui::theme::space::XL - 0.5,
+        "the toggle group must sit at least `space::XL` from skip forward: gap={gap}"
+    );
+}
+
+/// T-S1 (contract S1, FR-003): source-level check that Now Playing builds
+/// its one scroll region through `SectionMemory::scroll_area` and never a
+/// raw, nested `ScrollArea`, and that `effects_panel_reserved_height` — the
+/// old inner-scroll reservation this feature deletes — is gone.
+#[test]
+fn source_has_exactly_one_scroll_region_and_no_reserved_height_calc() {
+    let now_playing_src = include_str!("../src/now_playing.rs");
+    assert!(
+        !now_playing_src.contains("ScrollArea"),
+        "now_playing.rs must build its one scroll region through \
+         `SectionMemory::scroll_area`, not a raw `ScrollArea` (contract S1)"
+    );
+    assert_eq!(
+        now_playing_src.matches(".scroll_area(").count(),
+        1,
+        "now_playing.rs must contain exactly one scroll region (contract S1)"
+    );
+
+    let effects_src = include_str!("../src/effects_view.rs");
+    assert!(
+        !effects_src.contains("ScrollArea"),
+        "the Effect Chain's own inner scroll area must be deleted (contract S1)"
+    );
+    assert!(
+        !effects_src.contains("effects_panel_reserved_height")
+            && !now_playing_src.contains("effects_panel_reserved_height"),
+        "`effects_panel_reserved_height` must be deleted (contract S1)"
+    );
+}
+
+/// T-S3 (contract S3, FR-005): no `Separator`/hairline is painted in the
+/// scroll region — source-level for the widgets it hosts, plus a rendered
+/// check that adjacent cards are separated by exactly `space::XL`.
+#[test]
+fn scroll_region_has_no_separator_and_cards_are_xl_spaced() {
+    for src in [
+        include_str!("../src/now_playing.rs"),
+        include_str!("../src/markers.rs"),
+        include_str!("../src/effects_view.rs"),
+        include_str!("../src/transport_view.rs"),
+        include_str!("../src/queue_view.rs"),
+    ] {
+        assert!(
+            !src.contains(".separator("),
+            "the scroll region must use `space::XL` gaps, not a `Separator`/hairline (contract S3)"
+        );
+    }
+
+    let (mut controller, _handle, _dirs) = active_controller("s3-xl-gaps");
+    controller.queue_replace(vec![track("a", 200_000)]);
+    controller.set_now_playing_panel_open(NowPlayingPanel::EffectChain, true);
+    controller.set_now_playing_panel_open(NowPlayingPanel::Transport, true);
+    controller.set_now_playing_panel_open(NowPlayingPanel::Queue, true);
+
+    let ctx = fresh_ctx();
+    let mut artwork = ArtworkCache::new();
+    let mut waveform = WaveformState::default();
+    warm_up(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        tall_input(),
+    );
+    let frame = render_panel_frame(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        tall_input(),
+    );
+
+    let mut rects = card_rects(&frame.shapes);
+    rects.sort_by(|a, b| a.min.y.total_cmp(&b.min.y));
+    assert_eq!(
+        rects.len(),
+        4,
+        "expected all four cards to render, got {}",
+        rects.len()
+    );
+    // Each gap is `ui.add_space(space::XL)` plus the vertical layout's own
+    // automatic `item_spacing.y` between successive widgets — a constant
+    // baseline every gap in this vertical stack shares equally, so `space
+    // ::XL` shows up as "at least XL, and every gap identical" rather than
+    // as the literal on-screen distance.
+    let gaps: Vec<f32> = rects
+        .windows(2)
+        .map(|pair| pair[1].min.y - pair[0].max.y)
+        .collect();
+    for &gap in &gaps {
+        assert!(
+            gap >= modplayer_ui::theme::space::XL - 0.5,
+            "adjacent cards must be separated by at least `space::XL`: gap={gap}"
+        );
+    }
+    let first = gaps[0];
+    for &gap in &gaps {
+        assert!(
+            (gap - first).abs() <= 1.0,
+            "every card gap must be the same `space::XL` spacing: {gaps:?}"
+        );
+    }
+}
+
+/// T-C3 (contract C3, FR-006, edge case "same frame", research R7): a
+/// header disclosure click closes the Queue card and, in that SAME
+/// output, the bar's own Queue toggle already reports `Toggled::False` —
+/// `request_discard` re-runs the pass so the two never disagree for even
+/// one frame.
+#[test]
+fn header_disclosure_click_and_bar_toggle_agree_in_the_same_output() {
+    let (mut controller, _handle, _dirs) = active_controller("c3-same-frame");
+    controller.queue_replace(vec![track("a", 200_000)]);
+    controller.set_now_playing_panel_open(NowPlayingPanel::Queue, true);
+
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut artwork = ArtworkCache::new();
+    let mut waveform = WaveformState::default();
+    warm_up(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        tall_input(),
+    );
+    let frame = render_panel_frame(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        tall_input(),
+    );
+
+    let queue_title = tr("queue-panel-title");
+    let collapse_name = tr_args("panel-collapse", &[("panel", queue_title.clone())]);
+    let disclosure = find_panel_node(&frame.nodes, Role::Button, &collapse_name)
+        .and_then(|node| node.bounds)
+        .expect("the Queue card's header disclosure must render while open");
+
+    let after = click_now_playing_capturing(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        disclosure.center(),
+    );
+
+    assert!(
+        !controller.now_playing_panel_open(NowPlayingPanel::Queue),
+        "the header click must close the Queue panel"
+    );
+    let expand_name = tr_args("panel-expand", &[("panel", queue_title)]);
+    assert!(
+        after
+            .nodes
+            .iter()
+            .any(|node| node.accessible_name() == Some(expand_name.as_str())),
+        "the header disclosure must show `Expand Queue` in the same output"
+    );
+    let bar_toggle = find_panel_node(&after.nodes, Role::Button, &tr("queue-toggle"))
+        .expect("the bar's Queue toggle must render");
+    assert_eq!(
+        bar_toggle.toggled,
+        Some(Toggled::False),
+        "the bar toggle must report `Toggled::False` in the same output as the header click"
+    );
+}
+
+/// T-C4 (contract C4, FR-004): the cards render Markers, Effect Chain,
+/// Transport, Queue, top to bottom; without a track, Markers is absent but
+/// the other three still render in the same order.
+#[test]
+fn cards_render_in_markers_effects_transport_queue_order_and_presence_rules() {
+    let (mut controller, _handle, _dirs) = active_controller("c4-with-track");
+    controller.queue_replace(vec![track("a", 200_000)]);
+    controller.set_now_playing_panel_open(NowPlayingPanel::EffectChain, true);
+    controller.set_now_playing_panel_open(NowPlayingPanel::Transport, true);
+    controller.set_now_playing_panel_open(NowPlayingPanel::Queue, true);
+
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut artwork = ArtworkCache::new();
+    let mut waveform = WaveformState::default();
+    warm_up(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        tall_input(),
+    );
+    let frame = render_panel_frame(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        tall_input(),
+    );
+
+    let headings = [
+        tr("markers-panel"),
+        tr("effects-panel-title"),
+        tr("transport-panel-title"),
+        tr("queue-panel-title"),
+    ];
+    let mut ys = Vec::new();
+    for name in &headings {
+        let bounds = find_panel_node(&frame.nodes, Role::Heading, name)
+            .and_then(|node| node.bounds)
+            .unwrap_or_else(|| panic!("expected the `{name}` heading to render"));
+        ys.push(bounds.min.y);
+    }
+    assert!(
+        ys.windows(2).all(|w| w[0] < w[1]),
+        "cards must render Markers, Effect Chain, Transport, Queue top to bottom: {ys:?}"
+    );
+
+    let (mut controller2, _handle2, _dirs2) = active_controller("c4-no-track");
+    controller2.set_now_playing_panel_open(NowPlayingPanel::EffectChain, true);
+    controller2.set_now_playing_panel_open(NowPlayingPanel::Transport, true);
+    controller2.set_now_playing_panel_open(NowPlayingPanel::Queue, true);
+
+    let ctx2 = fresh_ctx();
+    ctx2.enable_accesskit();
+    let mut artwork2 = ArtworkCache::new();
+    let mut waveform2 = WaveformState::default();
+    warm_up(
+        &ctx2,
+        &mut controller2,
+        &mut artwork2,
+        &mut waveform2,
+        tall_input(),
+    );
+    let frame2 = render_panel_frame(
+        &ctx2,
+        &mut controller2,
+        &mut artwork2,
+        &mut waveform2,
+        tall_input(),
+    );
+
+    assert!(
+        !frame2.nodes.iter().any(|node| node.role == Role::Heading
+            && node.accessible_name() == Some(tr("markers-panel").as_str())),
+        "Markers must not render without a track (contract C4)"
+    );
+    let mut ys2 = Vec::new();
+    for name in [
+        tr("effects-panel-title"),
+        tr("transport-panel-title"),
+        tr("queue-panel-title"),
+    ] {
+        let bounds = find_panel_node(&frame2.nodes, Role::Heading, &name)
+            .and_then(|node| node.bounds)
+            .unwrap_or_else(|| panic!("expected the `{name}` heading to render"));
+        ys2.push(bounds.min.y);
+    }
+    assert!(
+        ys2.windows(2).all(|w| w[0] < w[1]),
+        "the other three cards must still render top to bottom without a track: {ys2:?}"
+    );
+}
+
+/// T-C6 (contract C6, FR-004): the master-volume row and the peak meter
+/// render exactly once each, and only inside the pinned bar — never again
+/// below it, inside the scroll region.
+#[test]
+fn master_volume_and_peak_meter_render_only_once_inside_the_bar() {
+    let (mut controller, _handle, _dirs) = active_controller("c6-volume-in-bar");
+    controller.queue_replace(vec![track("a", 200_000)]);
+    controller.set_now_playing_panel_open(NowPlayingPanel::EffectChain, true);
+    controller.set_now_playing_panel_open(NowPlayingPanel::Transport, true);
+    controller.set_now_playing_panel_open(NowPlayingPanel::Queue, true);
+
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut artwork = ArtworkCache::new();
+    let mut waveform = WaveformState::default();
+    warm_up(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        tall_input(),
+    );
+    let frame = render_panel_frame(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        tall_input(),
+    );
+
+    let bar_id = egui::Id::new("now-playing-transport-bar");
+    let bar_state = egui::PanelState::load(&ctx, bar_id)
+        .expect("the bar must register its PanelState after a frame");
+    let bar_bottom = bar_state.outer_rect.bottom();
+
+    for label in [tr("master-volume"), tr("peak-meter")] {
+        // `Role::Label` only: text nodes also carry an implicit
+        // `Role::TextRun` child with the same name (AccessKit's own tree
+        // shape), which isn't a second occurrence of this widget.
+        let matches: Vec<&PanelNode> = frame
+            .nodes
+            .iter()
+            .filter(|node| {
+                node.role == Role::Label && node.accessible_name() == Some(label.as_str())
+            })
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "expected exactly one `{label}` node, got {}",
+            matches.len()
+        );
+        let bounds = matches[0]
+            .bounds
+            .unwrap_or_else(|| panic!("`{label}` must have bounds"));
+        assert!(
+            bounds.max.y <= bar_bottom + 0.5,
+            "`{label}` must render inside the bar, not the scroll region: {bounds:?} vs bar_bottom={bar_bottom}"
+        );
+    }
+}
+
+// -- 021-transport-bar-and-panel-layout, Phase 4 (US2): a bar toggle or
+// keyboard shortcut opens-and-reveals a closed panel, or collapses an open
+// one, in the same interaction (contracts/ui-now-playing-layout.md R1-R6)
+// -----------------------------------------------------------------------
+
+/// The pinned bar's own outer rect's bottom edge (contract R1: "directly
+/// under the bar") — the scroll region's own viewport top.
+fn bar_panel_bottom(ctx: &Context) -> f32 {
+    let bar_id = egui::Id::new("now-playing-transport-bar");
+    egui::PanelState::load(ctx, bar_id)
+        .expect("the transport bar must register its PanelState after a frame")
+        .outer_rect
+        .bottom()
+}
+
+/// As [`render_panel_frame`], but threads an explicit, caller-owned
+/// `SectionMemory` through the render instead of a throwaway default one:
+/// needed wherever a test must read the scroll region's own resulting
+/// offset afterwards, which `now_playing::show` only ever exposes by
+/// writing it into `memory` (`memory.offset(&ViewKey::NowPlaying)`).
+fn render_panel_frame_with_memory<
+    B: modplayer_audio_io::OutputBackend,
+    H: modplayer_audio_source::SourceHost,
+>(
+    ctx: &Context,
+    controller: &mut PlaybackController<B, H>,
+    artwork: &mut ArtworkCache,
+    waveform: &mut WaveformState,
+    memory: &mut modplayer_ui::section_memory::SectionMemory,
+    input: RawInput,
+) -> PanelFrame {
+    ctx.enable_accesskit();
+    let mut output = ctx.run_ui(input, |ui| {
+        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, memory);
+    });
+    let update = output
+        .platform_output
+        .accesskit_update
+        .take()
+        .expect("accesskit_update should be populated once enabled");
+    let shapes: Vec<egui::Shape> = output.shapes.iter().map(|c| c.shape.clone()).collect();
+    output.drop_without_applying_deltas();
+
+    let nodes = update
+        .nodes
+        .iter()
+        .map(|(_, node)| PanelNode {
+            role: node.role(),
+            label: node.label().map(str::to_string),
+            value: node.value().map(str::to_string),
+            bounds: node.bounds().map(|b| {
+                Rect::from_min_max(
+                    Pos2::new(b.x0 as f32, b.y0 as f32),
+                    Pos2::new(b.x1 as f32, b.y1 as f32),
+                )
+            }),
+            toggled: node.toggled(),
+        })
+        .collect();
+    PanelFrame { nodes, shapes }
+}
+
+/// As [`click_now_playing_capturing`], but threads an explicit
+/// `SectionMemory` through both the press and release frame (see
+/// [`render_panel_frame_with_memory`]'s doc comment).
+fn click_now_playing_capturing_with_memory<
+    B: modplayer_audio_io::OutputBackend,
+    H: modplayer_audio_source::SourceHost,
+>(
+    ctx: &Context,
+    controller: &mut PlaybackController<B, H>,
+    artwork: &mut ArtworkCache,
+    waveform: &mut WaveformState,
+    memory: &mut modplayer_ui::section_memory::SectionMemory,
+    input: &RawInput,
+    pos: Pos2,
+) -> PanelFrame {
+    let mut press_input = input.clone();
+    press_input.events.push(Event::PointerButton {
+        pos,
+        button: PointerButton::Primary,
+        pressed: true,
+        modifiers: Modifiers::default(),
+    });
+    let output = ctx.run_ui(press_input, |ui| {
+        modplayer_ui::now_playing::show(ui, controller, artwork, waveform, memory);
+    });
+    output.drop_without_applying_deltas();
+
+    let mut release_input = input.clone();
+    release_input.events.push(Event::PointerButton {
+        pos,
+        button: PointerButton::Primary,
+        pressed: false,
+        modifiers: Modifiers::default(),
+    });
+    render_panel_frame_with_memory(ctx, controller, artwork, waveform, memory, release_input)
+}
+
+/// [`click_now_playing_capturing_with_memory`], plus one settle pass with
+/// no new input at all: `Ui::scroll_to_rect`'s own offset adjustment
+/// (`egui::containers::scroll_area`) is computed at the *end* of the
+/// click's own release pass — already reflected in that pass's returned
+/// `state.offset.y` (what [`SectionMemory::offset`] reads) — but it only
+/// feeds the *next* pass's content layout, so that release pass's own
+/// painted AccessKit bounds still reflect the pre-scroll positions. One
+/// more repaint, with no further input, is exactly what a live app's next
+/// vsync already shows by the time a person's eye registers the click
+/// (contract R1: "no second input is needed" — a second *pass*, driven by
+/// `ScrollArea`'s own `request_repaint`, is not a second input).
+fn click_and_settle_now_playing_with_memory<
+    B: modplayer_audio_io::OutputBackend,
+    H: modplayer_audio_source::SourceHost,
+>(
+    ctx: &Context,
+    controller: &mut PlaybackController<B, H>,
+    artwork: &mut ArtworkCache,
+    waveform: &mut WaveformState,
+    memory: &mut modplayer_ui::section_memory::SectionMemory,
+    input: &RawInput,
+    pos: Pos2,
+) -> PanelFrame {
+    click_now_playing_capturing_with_memory(ctx, controller, artwork, waveform, memory, input, pos);
+    render_panel_frame_with_memory(ctx, controller, artwork, waveform, memory, input.clone())
+}
+
+/// T-R1 (contract R1, R6, FR-007, SC-002): with a closed Queue/Effects/
+/// Transport panel and the scroll region at the top, clicking its bar
+/// toggle opens it and, in that same pass, its heading sits inside the
+/// window's content rect — no further scroll needed for a card this
+/// short (the 16-node-chain test below exercises the taller-than-
+/// viewport branch). The bar toggle itself reports `Toggled::True` in
+/// that same output (mirrors T-C3's same-frame guarantee, now for the
+/// bar → card direction).
+#[test]
+fn bar_toggle_opens_and_reveals_a_closed_panel_inside_the_viewport() {
+    for (panel, toggle_key, heading_key) in [
+        (NowPlayingPanel::Queue, "queue-toggle", "queue-panel-title"),
+        (
+            NowPlayingPanel::EffectChain,
+            "effects-toggle",
+            "effects-panel-title",
+        ),
+        (
+            NowPlayingPanel::Transport,
+            "transport-toggle",
+            "transport-panel-title",
+        ),
+    ] {
+        let (mut controller, _handle, _dirs) = active_controller(&format!("r1-{toggle_key}"));
+        controller.queue_replace(vec![track("a", 200_000)]);
+        assert!(
+            !controller.now_playing_panel_open(panel),
+            "sanity: {toggle_key}'s panel must start closed"
+        );
+
+        let ctx = fresh_ctx();
+        let mut artwork = ArtworkCache::new();
+        let mut waveform = WaveformState::default();
+        let mut memory = modplayer_ui::section_memory::SectionMemory::default();
+
+        render_panel_frame_with_memory(
+            &ctx,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut memory,
+            default_input(),
+        );
+        let before = render_panel_frame_with_memory(
+            &ctx,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut memory,
+            default_input(),
+        );
+        let toggle_rect = find_panel_node(&before.nodes, Role::Button, &tr(toggle_key))
+            .and_then(|node| node.bounds)
+            .unwrap_or_else(|| panic!("the {toggle_key} bar toggle must render"));
+
+        let after = click_and_settle_now_playing_with_memory(
+            &ctx,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut memory,
+            &default_input(),
+            toggle_rect.center(),
+        );
+
+        assert!(
+            controller.now_playing_panel_open(panel),
+            "the click must open the panel"
+        );
+        let bar_toggle = find_panel_node(&after.nodes, Role::Button, &tr(toggle_key))
+            .expect("the bar toggle must still render");
+        assert_eq!(
+            bar_toggle.toggled,
+            Some(Toggled::True),
+            "{toggle_key} must report Toggled::True in the reveal pass"
+        );
+
+        let heading = find_panel_node(&after.nodes, Role::Heading, &tr(heading_key))
+            .and_then(|node| node.bounds)
+            .unwrap_or_else(|| panic!("the {heading_key} heading must render once open"));
+        let viewport_top = bar_panel_bottom(&ctx);
+        assert!(
+            heading.min.y + 0.5 >= viewport_top,
+            "{heading_key}'s heading must not sit above the scroll viewport: {heading:?} vs top={viewport_top}"
+        );
+        assert!(
+            heading.max.y <= 600.0 + 0.5,
+            "{heading_key}'s heading must be inside the 800x600 content rect: {heading:?}"
+        );
+    }
+}
+
+/// T-R2 (contract R2, FR-007): when a panel's card already fits fully
+/// inside a generously tall viewport, opening it through the bar toggle
+/// doesn't move the scroll offset at all.
+#[test]
+fn revealing_an_already_visible_panel_leaves_the_offset_unchanged() {
+    for (panel, toggle_key) in [
+        (NowPlayingPanel::Queue, "queue-toggle"),
+        (NowPlayingPanel::EffectChain, "effects-toggle"),
+        (NowPlayingPanel::Transport, "transport-toggle"),
+    ] {
+        let (mut controller, _handle, _dirs) = active_controller(&format!("r2-{toggle_key}"));
+        controller.queue_replace(vec![track("a", 200_000)]);
+
+        let ctx = fresh_ctx();
+        let mut artwork = ArtworkCache::new();
+        let mut waveform = WaveformState::default();
+        let mut memory = modplayer_ui::section_memory::SectionMemory::default();
+
+        render_panel_frame_with_memory(
+            &ctx,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut memory,
+            tall_input(),
+        );
+        let before = render_panel_frame_with_memory(
+            &ctx,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut memory,
+            tall_input(),
+        );
+        let offset_before = memory
+            .offset(&modplayer_ui::section_memory::ViewKey::NowPlaying)
+            .unwrap_or(0.0);
+        assert!(
+            offset_before.abs() < 0.5,
+            "sanity: a 960x4000 viewport must start unscrolled, got {offset_before}"
+        );
+        let toggle_rect = find_panel_node(&before.nodes, Role::Button, &tr(toggle_key))
+            .and_then(|node| node.bounds)
+            .unwrap_or_else(|| panic!("the {toggle_key} bar toggle must render"));
+
+        click_now_playing_capturing_with_memory(
+            &ctx,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            &mut memory,
+            &tall_input(),
+            toggle_rect.center(),
+        );
+        assert!(
+            controller.now_playing_panel_open(panel),
+            "the click must open the panel"
+        );
+
+        let offset_after = memory
+            .offset(&modplayer_ui::section_memory::ViewKey::NowPlaying)
+            .unwrap_or(0.0);
+        assert!(
+            (offset_after - offset_before).abs() < 0.5,
+            "{toggle_key}: offset must stay unchanged when the card is already fully visible, {offset_before} -> {offset_after}"
+        );
+    }
+}
+
+/// T-R1's tall-card branch (contract R1, research R5's `reveal_align`): an
+/// Effect Chain at its 16-node capacity is always taller than the
+/// viewport, so opening it aligns its heading to the very top of the
+/// scroll viewport — within `item_spacing.y` of the pinned bar's own
+/// bottom edge — and the offset actually moves (the branch T-B1/T-R2's
+/// short cards never exercise).
+#[test]
+fn revealing_a_taller_than_viewport_card_aligns_its_header_to_the_top() {
+    let (mut controller, _handle, _dirs) = active_controller("r1-tall-chain");
+    for _ in 0..16 {
+        controller
+            .chain_add_node(modplayer_effects::catalog::NodeKind::Gain)
+            .expect("add gain node");
+    }
+    assert!(!controller.now_playing_panel_open(NowPlayingPanel::EffectChain));
+
+    let ctx = fresh_ctx();
+    let mut artwork = ArtworkCache::new();
+    let mut waveform = WaveformState::default();
+    let mut memory = modplayer_ui::section_memory::SectionMemory::default();
+
+    render_panel_frame_with_memory(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        &mut memory,
+        default_input(),
+    );
+    let before = render_panel_frame_with_memory(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        &mut memory,
+        default_input(),
+    );
+    let offset_before = memory
+        .offset(&modplayer_ui::section_memory::ViewKey::NowPlaying)
+        .unwrap_or(0.0);
+    let toggle_rect = find_panel_node(&before.nodes, Role::Button, &tr("effects-toggle"))
+        .and_then(|node| node.bounds)
+        .expect("the Effects bar toggle must render");
+
+    let after = click_and_settle_now_playing_with_memory(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        &mut memory,
+        &default_input(),
+        toggle_rect.center(),
+    );
+    assert!(controller.now_playing_panel_open(NowPlayingPanel::EffectChain));
+
+    let offset_after = memory
+        .offset(&modplayer_ui::section_memory::ViewKey::NowPlaying)
+        .unwrap_or(0.0);
+    assert!(
+        offset_after > offset_before + 1.0,
+        "opening a 16-node chain must actually scroll: {offset_before} -> {offset_after}"
+    );
+
+    let heading = find_panel_node(&after.nodes, Role::Heading, &tr("effects-panel-title"))
+        .and_then(|node| node.bounds)
+        .expect("the Effect chain heading must render once open");
+    let viewport_top = bar_panel_bottom(&ctx);
+    // `Align::Min` aligns the *card's own outer rect* (`CardResponse::
+    // rect`, contract R1/R6, T031) to the viewport's top, with egui's own
+    // `item_spacing.y` gap (`scroll_area.rs`'s `Align::Min` branch)
+    // between them; the heading itself sits one more `space::LG` (the
+    // card's own `inner_margin`, contract C1/C2) further down, inside the
+    // card. The tolerance below is exactly that stack, so this still
+    // fails if the card ever stopped aligning to the top at all (e.g. a
+    // regression back to `Some(None)`'s minimum-scroll branch, which
+    // would leave a much larger, `viewport.span()`-sized gap).
+    let tolerance = modplayer_ui::theme::space::LG + modplayer_ui::theme::space::XS + 2.0;
+    assert!(
+        (heading.min.y - viewport_top).abs() <= tolerance,
+        "a card taller than the viewport must align its heading to the top: heading={heading:?} viewport_top={viewport_top} tolerance={tolerance}"
+    );
+}
+
+/// T-R4 (contract R4, FR-008): pressing an OPEN panel's bar toggle
+/// collapses it even while its card sits off screen, and the resulting
+/// scroll offset is explained entirely by the shorter content's own
+/// clamp — never by a reveal. Proven by comparison against a twin
+/// controller whose chain starts (and stays) collapsed at the same seeded
+/// scroll offset: if the collapse path ever revealed anything, its
+/// resulting offset would differ from this reveal-free baseline.
+#[test]
+fn collapsing_an_open_off_screen_panel_never_reveals_it() {
+    fn sixteen_node_controller(
+        label: &str,
+        start_open: bool,
+    ) -> (
+        PlaybackController<FakeBackend, ScriptedHost>,
+        ScriptedHostHandle,
+        TestDirs,
+    ) {
+        let (mut controller, handle, dirs) = active_controller(label);
+        for _ in 0..16 {
+            controller
+                .chain_add_node(modplayer_effects::catalog::NodeKind::Gain)
+                .expect("add gain node");
+        }
+        controller.set_now_playing_panel_open(NowPlayingPanel::EffectChain, start_open);
+        (controller, handle, dirs)
+    }
+
+    /// Warm up, seed the scroll offset to egui's own clamped maximum (the
+    /// "scrolled to max" trick this file's own T-B1 test uses), and return
+    /// the resulting offset plus that pass's `PanelFrame`.
+    fn scroll_to_max(
+        ctx: &Context,
+        controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+        artwork: &mut ArtworkCache,
+        waveform: &mut WaveformState,
+        memory: &mut modplayer_ui::section_memory::SectionMemory,
+    ) -> (f32, PanelFrame) {
+        render_panel_frame_with_memory(ctx, controller, artwork, waveform, memory, default_input());
+        memory.record(modplayer_ui::section_memory::ViewKey::NowPlaying, 1.0e6);
+        memory.record(modplayer_ui::section_memory::ViewKey::Search, 0.0);
+        let frame = render_panel_frame_with_memory(
+            ctx,
+            controller,
+            artwork,
+            waveform,
+            memory,
+            default_input(),
+        );
+        let offset = memory
+            .offset(&modplayer_ui::section_memory::ViewKey::NowPlaying)
+            .expect("the seeded pass must record an offset");
+        (offset, frame)
+    }
+
+    // -- Baseline: the chain starts (and stays) collapsed, scrolled to the
+    // same seeded max offset — nothing ever reveals it, so its resulting
+    // offset is purely the natural clamp at this (short, header-only)
+    // content height.
+    let (mut baseline_controller, _baseline_handle, _baseline_dirs) =
+        sixteen_node_controller("r4-baseline", false);
+    let baseline_ctx = fresh_ctx();
+    let mut baseline_artwork = ArtworkCache::new();
+    let mut baseline_waveform = WaveformState::default();
+    let mut baseline_memory = modplayer_ui::section_memory::SectionMemory::default();
+    let (baseline_offset, _) = scroll_to_max(
+        &baseline_ctx,
+        &mut baseline_controller,
+        &mut baseline_artwork,
+        &mut baseline_waveform,
+        &mut baseline_memory,
+    );
+
+    // -- Subject: the chain starts OPEN (tall), scrolled to the same
+    // seeded max offset (so its card sits off the top of the viewport),
+    // then its bar toggle collapses it.
+    let (mut controller, _handle, _dirs) = sixteen_node_controller("r4-subject", true);
+    let ctx = fresh_ctx();
+    let mut artwork = ArtworkCache::new();
+    let mut waveform = WaveformState::default();
+    let mut memory = modplayer_ui::section_memory::SectionMemory::default();
+    let (_subject_scrolled_offset, scrolled) = scroll_to_max(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        &mut memory,
+    );
+
+    let toggle_rect = find_panel_node(&scrolled.nodes, Role::Button, &tr("effects-toggle"))
+        .and_then(|node| node.bounds)
+        .expect("the Effects bar toggle must render");
+    let heading = find_panel_node(&scrolled.nodes, Role::Heading, &tr("effects-panel-title"))
+        .and_then(|node| node.bounds);
+    let viewport_top = bar_panel_bottom(&ctx);
+    assert!(
+        heading.is_none_or(|h| h.max.y < viewport_top - 1.0),
+        "sanity: the open chain's heading must already be scrolled off the top before collapsing: {heading:?} vs top={viewport_top}"
+    );
+
+    let after = click_now_playing_capturing_with_memory(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &mut waveform,
+        &mut memory,
+        &default_input(),
+        toggle_rect.center(),
+    );
+    assert!(
+        !controller.now_playing_panel_open(NowPlayingPanel::EffectChain),
+        "the click must collapse the panel even while its card is off screen"
+    );
+    let bar_toggle = find_panel_node(&after.nodes, Role::Button, &tr("effects-toggle"))
+        .expect("the bar toggle must still render");
+    assert_eq!(
+        bar_toggle.toggled,
+        Some(Toggled::False),
+        "the bar toggle must report Toggled::False after the collapse"
+    );
+
+    let subject_offset = memory
+        .offset(&modplayer_ui::section_memory::ViewKey::NowPlaying)
+        .expect("the subject's collapse pass must record an offset");
+    assert!(
+        (subject_offset - baseline_offset).abs() < 0.5,
+        "collapsing an off-screen panel must change the offset only by the shorter-content \
+         clamp, matching a chain that was never open: baseline={baseline_offset} \
+         subject={subject_offset}"
+    );
 }

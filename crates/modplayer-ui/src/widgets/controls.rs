@@ -8,9 +8,10 @@
 
 use egui::accesskit::{Role, Toggled};
 use egui::{
-    Button, Color32, Context, FontSelection, Frame, Id, Label, LayerId, Order, Response, RichText,
-    Sense, StrokeKind, TextWrapMode, Ui, WidgetInfo, WidgetText, WidgetType, pos2,
+    Button, Color32, Context, FontSelection, Frame, Id, Label, LayerId, Order, Rect, Response,
+    RichText, Sense, StrokeKind, TextWrapMode, Ui, WidgetInfo, WidgetText, WidgetType, pos2,
 };
+use modplayer_core::tr_args;
 
 use crate::theme::{controls, tokens};
 
@@ -322,6 +323,124 @@ pub fn panel_card(ui: &mut Ui, header: &str, add_contents: impl FnOnce(&mut Ui))
 }
 
 // ---------------------------------------------------------------------
+// `collapsible_panel_card` (021-transport-bar-and-panel-layout, data-
+// model.md §7, contracts/ui-now-playing-layout.md C1-C6)
+// ---------------------------------------------------------------------
+
+/// [`collapsible_panel_card`]'s disclosure glyph while the card is open.
+pub const DISCLOSURE_OPEN_GLYPH: &str = "⏷";
+/// [`collapsible_panel_card`]'s disclosure glyph while the card is closed.
+pub const DISCLOSURE_CLOSED_GLYPH: &str = "⏵";
+
+/// [`collapsible_panel_card`]'s per-pass result (data-model.md §7).
+/// `rect` is the card's own outer rect this pass — the caller's reveal
+/// check (`layout::reveal_align`) reads it. `toggled` is `true` exactly
+/// when this pass's header-disclosure click flipped `*open`, so the
+/// caller persists the flag and calls `ctx.request_discard(..)` (research
+/// R7, contract C3).
+#[derive(Debug, Clone, Copy)]
+pub struct CardResponse {
+    pub rect: Rect,
+    pub toggled: bool,
+}
+
+/// The collapsible sibling of [`panel_card`] every Now Playing block
+/// (Markers, Effect Chain, Transport, Queue) renders through
+/// (021-transport-bar-and-panel-layout, FR-004, FR-006, FR-016; contract
+/// C1). The 016 card chrome is unchanged (C2-C4: `roles.surface_raised`
+/// fill, `space::LG` padding, `radius::MD` corner radius, an uppercase
+/// `section`-role header whose accessible name is pinned to the exact,
+/// un-uppercased `header` string). A header disclosure button —
+/// `Role::Button`, accessible name `panel-collapse`/`panel-expand`
+/// ("Collapse { $panel }" / "Expand { $panel }" depending on this pass's
+/// resulting state), and `expanded` set to that same state — toggles
+/// `*open`. `add_contents` draws only while `*open`; a collapsed card
+/// draws its header and disclosure only, none of its body nodes
+/// (contract C2, superseding 016 C10).
+///
+/// # Examples
+///
+/// ```
+/// # use egui::Context;
+/// use modplayer_ui::widgets::controls::collapsible_panel_card;
+///
+/// let ctx = Context::default();
+/// ctx.set_fonts(egui::FontDefinitions::empty());
+/// modplayer_ui::theme::apply_tokens(&ctx);
+/// let mut open = true;
+/// let output = ctx.run_ui(Default::default(), |ui| {
+///     let response = collapsible_panel_card(ui, "Queue", &mut open, |ui| {
+///         ui.label("body");
+///     });
+///     assert!(!response.toggled, "no click happened, so `open` didn't flip");
+/// });
+/// output.drop_without_applying_deltas();
+/// assert!(open, "unchanged");
+/// ```
+pub fn collapsible_panel_card(
+    ui: &mut Ui,
+    header: &str,
+    open: &mut bool,
+    add_contents: impl FnOnce(&mut Ui),
+) -> CardResponse {
+    let roles = tokens::roles(ui.visuals());
+    let mut toggled = false;
+    let outer = Frame::new()
+        .fill(roles.surface_raised)
+        .inner_margin(tokens::space::LG)
+        .corner_radius(tokens::radius::MD)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let heading = ui.label(tokens::section_label(header));
+                ui.ctx().accesskit_node_builder(heading.id, |b| {
+                    b.set_role(Role::Heading);
+                    b.set_label(header.to_string());
+                });
+
+                // `⏷`/`⏵` come from egui's `emoji-icon-font`, which is in
+                // the proportional fallback chain; `▾`/`▸` exist only in
+                // the monospace Hack font and drew as tofu (2026-09-28
+                // manual walk, research R15).
+                let glyph = if *open {
+                    DISCLOSURE_OPEN_GLYPH
+                } else {
+                    DISCLOSURE_CLOSED_GLYPH
+                };
+                let disclosure = button(ui, controls::Variant::Quiet, glyph);
+                if disclosure.clicked() {
+                    *open = !*open;
+                    toggled = true;
+                }
+                // Read the *resulting* state (post-click), not the
+                // pre-click `was_open` — same precedent as `category_row.
+                // rs`'s "More" popup opener (research R7): a click that
+                // flips `open` must be reflected in this same pass's
+                // accessible name and `expanded` flag, not next frame's.
+                let is_open_now = *open;
+                let a11y_key = if is_open_now {
+                    "panel-collapse"
+                } else {
+                    "panel-expand"
+                };
+                let a11y_name = tr_args(a11y_key, &[("panel", header.to_string())]);
+                ui.ctx().accesskit_node_builder(disclosure.id, |b| {
+                    b.set_role(Role::Button);
+                    b.set_label(a11y_name);
+                    b.set_expanded(is_open_now);
+                });
+            });
+            if *open {
+                add_contents(ui);
+            }
+        });
+
+    CardResponse {
+        rect: outer.response.rect,
+        toggled,
+    }
+}
+
+// ---------------------------------------------------------------------
 // `destructive_gap` (data-model.md §7, FR-006)
 // ---------------------------------------------------------------------
 
@@ -374,6 +493,25 @@ mod tests {
     /// interaction state must track a real hover/press across passes
     /// exactly like any other egui widget (research R4's "simulates two
     /// passes to prove the state tracks").
+    /// 2026-09-28 manual walk (research R15): the disclosure glyphs must
+    /// resolve in the proportional family the app actually renders
+    /// button text in (egui's default fonts; the app installs no others),
+    /// not fall back to the replacement box.
+    #[test]
+    fn disclosure_glyphs_resolve_in_the_proportional_font() {
+        let ctx = Context::default();
+        crate::theme::apply_tokens(&ctx);
+        ctx.run_ui(RawInput::default(), |_| {})
+            .drop_without_applying_deltas();
+        let font_id = egui::FontId::proportional(14.0);
+        for glyph in [DISCLOSURE_OPEN_GLYPH, DISCLOSURE_CLOSED_GLYPH] {
+            assert!(
+                ctx.fonts_mut(|fonts| fonts.has_glyphs(&font_id, glyph)),
+                "{glyph:?} has no proportional glyph and would draw as tofu"
+            );
+        }
+    }
+
     #[test]
     fn button_hover_and_press_track_across_passes() {
         let ctx = Context::default();

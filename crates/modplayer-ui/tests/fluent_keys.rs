@@ -110,7 +110,6 @@ const PLAYBACK_KEYS: &[&str] = &[
     "queue-repeat-off",
     "queue-repeat-one",
     "queue-repeat-all",
-    "queue-current",
     "queue-badge-play-next",
     "queue-badge-unavailable",
     "queue-move-up",
@@ -118,6 +117,9 @@ const PLAYBACK_KEYS: &[&str] = &[
     "queue-play-next",
     "queue-remove",
     "queue-empty",
+    // 021-transport-bar-and-panel-layout (contract Q5): the current row's
+    // leading glyph, a shape rather than colour alone.
+    "queue-playing-glyph",
     // Stream/session/subscription notifications and their actions.
     "transfer-request-failed",
     "stream-reconnect-warning",
@@ -170,6 +172,12 @@ const PLAYBACK_KEYS: &[&str] = &[
     "markers-rename",
 ];
 
+/// 021-transport-bar-and-panel-layout (contract Q7, Q11): the Queue row's
+/// `Role::ListItem` accessible name, templated with `$title`/`$artist` and
+/// a `$has_artist` Fluent selector (`"yes"`/anything-else). Replaces the
+/// removed `queue-current` prefix key.
+const QUEUE_ROW_NAME_ARG_KEYS: &[&str] = &["queue-row-name", "queue-row-name-current"];
+
 /// Now Playing / queue / transfer-banner keys that take a Fluent
 /// placeholder — resolved via `tr_args` with a stand-in value.
 const PLAYBACK_ARG_KEYS: &[&str] = &[
@@ -178,6 +186,9 @@ const PLAYBACK_ARG_KEYS: &[&str] = &[
     "now-playing-album",
     "queue-row",
     "banner-playing-elsewhere",
+    // 021-transport-bar-and-panel-layout (contract B4): the pinned
+    // transport bar's identity group AccessKit label.
+    "now-playing-bar-identity",
 ];
 
 /// 005-now-playing-waveform's waveform-detail-window key: templated with
@@ -322,6 +333,11 @@ const CONTROLS_ARG_KEYS: &[&str] = &[
     "controls-conflict-with-host",
     "controls-conflict-with-plugin",
     "controls-plugin-group",
+    // 021-transport-bar-and-panel-layout (contract C1):
+    // `widgets::controls::collapsible_panel_card`'s header disclosure
+    // button accessible name.
+    "panel-collapse",
+    "panel-expand",
 ];
 
 /// `effects.ftl` keys added by 008 Phase 4 (US2), Phase 5 (US3) and
@@ -932,6 +948,29 @@ fn every_shell_nav_and_notification_key_resolves() {
         );
     }
 
+    // 021-transport-bar-and-panel-layout: both the `$has_artist` selector
+    // arms resolve, and the resolved text names the given title.
+    for key in QUEUE_ROW_NAME_ARG_KEYS {
+        for has_artist in ["yes", "no"] {
+            let resolved = tr_args(
+                key,
+                &[
+                    ("title", "Example Track".to_string()),
+                    ("artist", "Example Artist".to_string()),
+                    ("has_artist", has_artist.to_string()),
+                ],
+            );
+            assert_ne!(
+                &resolved, key,
+                "Fluent key `{key}` is missing from locales/en-US/playback.ftl (tr_args() fell back to the raw key, has_artist={has_artist})"
+            );
+            assert!(
+                resolved.contains("Example Track"),
+                "`{key}` resolved to `{resolved}`, which doesn't name the track (has_artist={has_artist})"
+            );
+        }
+    }
+
     for key in PLAYBACK_WINDOW_ARG_KEYS {
         let resolved = tr_args(
             key,
@@ -1014,6 +1053,7 @@ fn every_shell_nav_and_notification_key_resolves() {
                 ("action", "Play/pause".to_string()),
                 ("other", "Stop".to_string()),
                 ("plugin", "Fixture".to_string()),
+                ("panel", "Effect chain".to_string()),
             ],
         );
         assert_ne!(
@@ -1192,6 +1232,7 @@ fn no_unused_keys_in_playback_and_settings_ftl() {
         .chain(ACCOUNT_KEYS)
         .chain(PLAYBACK_KEYS)
         .chain(PLAYBACK_ARG_KEYS)
+        .chain(QUEUE_ROW_NAME_ARG_KEYS)
         .chain(PLAYBACK_WINDOW_ARG_KEYS)
         .chain(PLAYBACK_TIME_ARG_KEYS)
         .chain(PLAYBACK_COUNT_ARG_KEYS)
@@ -1364,6 +1405,26 @@ fn device_lost_and_missing_wording_names_both_devices() {
             "`{key}` resolved to `{resolved}`, which doesn't name the fallback device"
         );
     }
+}
+
+/// T046 (Phase 7, contract Q7): `queue-current` — the old "Now playing:"
+/// prefix key — is gone, replaced by `queue-row-name-current`'s own
+/// "Now playing, …" wording (contract Q11). Pins the removal: neither
+/// resolves to a real string nor is still defined in `playback.ftl`.
+#[test]
+fn queue_current_key_was_removed() {
+    let resolved = tr("queue-current");
+    assert_eq!(
+        &resolved, "queue-current",
+        "`queue-current` still resolves to a real string — it was expected removed by \
+         021-transport-bar-and-panel-layout (contract Q7), replaced by `queue-row-name-current`"
+    );
+
+    let playback_ftl = include_str!("../../../locales/en-US/playback.ftl");
+    assert!(
+        !defined_keys(playback_ftl).contains("queue-current"),
+        "`queue-current` is still defined in playback.ftl — remove it with the old prefix wiring"
+    );
 }
 
 #[test]
