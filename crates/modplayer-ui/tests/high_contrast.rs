@@ -836,3 +836,34 @@ fn high_contrast_is_named_only_at_its_selection_and_control_sites() {
         );
     }
 }
+
+// ---------------------------------------------------------------------
+// 025 collection header (contracts/collection-header.md H12)
+// ---------------------------------------------------------------------
+
+/// H12: the collection header paints only `text_primary` (title) and
+/// `text_secondary` (facts) on the page's `surface_base`; in each of the
+/// four appearances both clear the 017 floors (4.5:1 normal, 7:1 high
+/// contrast).
+#[test]
+fn collection_header_title_and_facts_meet_contrast_in_all_four_appearances() {
+    use modplayer_ui::theme::contrast::ratio;
+    for (dark, hc, floor) in [
+        (false, false, 4.5_f32),
+        (true, false, 4.5),
+        (false, true, 7.0),
+        (true, true, 7.0),
+    ] {
+        let roles = for_theme(dark, hc);
+        for (name, colour) in [
+            ("title text_primary", roles.text_primary),
+            ("facts text_secondary", roles.text_secondary),
+        ] {
+            let measured = ratio(colour, roles.surface_base);
+            assert!(
+                measured >= floor,
+                "{name} (dark={dark}, hc={hc}) = {measured:.2}, floor {floor}"
+            );
+        }
+    }
+}

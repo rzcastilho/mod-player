@@ -31,7 +31,7 @@ use crate::rows::{
 use crate::section_memory::{LibraryViewKey, SectionMemory, ViewKey};
 use crate::theme;
 use crate::widgets::controls::tab as tab_widget;
-use crate::widgets::skeleton::{ROW_HEIGHT, WIDE_ROW_HEIGHT, skeleton_row};
+use crate::widgets::skeleton::{ROW_HEIGHT, SkeletonShape, WIDE_ROW_HEIGHT, skeleton_row};
 
 /// The five fixed-order tabs (contracts/ui-surface.md §3).
 ///
@@ -56,6 +56,17 @@ impl LibraryTab {
         LibraryTab::Playlists,
         LibraryTab::RecentlyPlayed,
     ];
+
+    /// Skeleton geometry matching this tab's loaded rows (025 FR-010).
+    #[must_use]
+    pub fn skeleton_shape(self) -> SkeletonShape {
+        match self {
+            LibraryTab::SavedTracks | LibraryTab::RecentlyPlayed => SkeletonShape::TRACK,
+            LibraryTab::SavedAlbums => SkeletonShape::ALBUM,
+            LibraryTab::FollowedArtists => SkeletonShape::ARTIST,
+            LibraryTab::Playlists => SkeletonShape::PLAYLIST,
+        }
+    }
 
     fn label_key(self) -> &'static str {
         match self {
@@ -173,7 +184,7 @@ pub fn show<B: OutputBackend, H: SourceHost>(
 
     if status.loading {
         for _ in 0..3 {
-            skeleton_row(ui, ROW_HEIGHT);
+            skeleton_row(ui, state.tab.skeleton_shape());
         }
         return LibraryOutcome::None;
     }
@@ -403,7 +414,7 @@ fn draw_virtualized_tracks<B: OutputBackend, H: SourceHost>(
                 }
             }
             None => {
-                skeleton_row(ui, ROW_HEIGHT);
+                skeleton_row(ui, SkeletonShape::TRACK);
                 visible_missing.push(id.clone());
             }
         }
@@ -460,7 +471,7 @@ fn show_saved_albums<B: OutputBackend, H: SourceHost>(
                     None => {}
                 }
             }
-            None => skeleton_row(ui, WIDE_ROW_HEIGHT),
+            None => skeleton_row(ui, SkeletonShape::ALBUM),
         }
     });
     memory.record(key, offset);
@@ -504,7 +515,7 @@ fn show_followed_artists<B: OutputBackend, H: SourceHost>(
                     None => {}
                 }
             }
-            None => skeleton_row(ui, WIDE_ROW_HEIGHT),
+            None => skeleton_row(ui, SkeletonShape::ALBUM),
         }
     });
     memory.record(key, offset);

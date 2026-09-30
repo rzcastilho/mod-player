@@ -33,8 +33,25 @@ use crate::theme::{controls, tokens};
 /// egui shrink the label's text inside the button instead of moving the
 /// whole button to the next line — never what this design system wants.
 pub fn button(ui: &mut Ui, variant: controls::Variant, text: impl Into<RichText>) -> Response {
+    button_over(ui, variant, text, None)
+}
+
+/// [`button`] drawn over a non-default surface: `over = Some((surface,
+/// label))` replaces the resting surface the hover/pressed blend starts
+/// from and the label colour — for a Quiet control sitting on an `accent`
+/// selected row, whose `text_primary` label would fail the 4.5:1 floor
+/// (025, US3).
+pub fn button_over(
+    ui: &mut Ui,
+    variant: controls::Variant,
+    text: impl Into<RichText>,
+    over: Option<(Color32, Color32)>,
+) -> Response {
     let roles = tokens::roles(ui.visuals());
-    let paint = controls::variant_paint(roles, variant);
+    let mut paint = controls::variant_paint(roles, variant);
+    if let Some((_, label)) = over {
+        paint.label = label;
+    }
 
     // `next_auto_id()` and `ui.add(...)` below must stay adjacent
     // (research R4/R7): nothing that allocates a widget id may run
@@ -47,7 +64,7 @@ pub fn button(ui: &mut Ui, variant: controls::Variant, text: impl Into<RichText>
         .is_some_and(Response::is_pointer_button_down_on);
 
     let resting = if paint.fill == Color32::TRANSPARENT {
-        roles.surface_base
+        over.map_or(roles.surface_base, |(surface, _)| surface)
     } else {
         paint.fill
     };

@@ -571,6 +571,8 @@ fn primary_sites_match_the_one_per_view_rule() {
         ("welcome.rs", "welcome-acknowledge"),
         ("effects_view.rs", "effects-empty-add"),
         ("effects_view.rs", "effects-add"),
+        // 025: the collection header's Play — one Primary per detail view.
+        ("detail_view.rs", "detail-play"),
     ];
     assert_eq!(
         primary_sites.len(),
@@ -615,6 +617,13 @@ fn primary_sites_match_the_one_per_view_rule() {
 /// row-action button (`show_row_action` — jump, nudge earlier, nudge
 /// later, remove all call through this one site) — raising the count
 /// from three to five.
+///
+/// 025-library-browsing-and-detail (US2, T018) adds one more in
+/// `detail_view.rs`: the collection header's Back button — six.
+///
+/// 025 US4 (T030) adds the header skeleton's live Back in
+/// `widgets/skeleton.rs` (same Quiet Back, drawn while the ref is
+/// missing) — eight with the rows.rs "…" opener.
 #[test]
 fn queue_row_actions_are_quiet() {
     let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -626,9 +635,16 @@ fn queue_row_actions_are_quiet() {
         "queue-remove",
     ];
     // Two `rows.rs` loops (single-line, wrapped) + category_row.rs's
-    // "More" + markers.rs's name cell + markers.rs's shared row action.
-    let expected_site_count = 5;
-    let allowed_files = ["rows.rs", "settings/category_row.rs", "markers.rs"];
+    // "More" + markers.rs's name cell + markers.rs's shared row action +
+    // detail_view.rs's header Back + rows.rs's "…" actions opener.
+    let expected_site_count = 8;
+    let allowed_files = [
+        "rows.rs",
+        "settings/category_row.rs",
+        "markers.rs",
+        "detail_view.rs",
+        "widgets/skeleton.rs",
+    ];
 
     let mut quiet_sites = Vec::new();
     for path in walk_src_rs_files() {
@@ -678,4 +694,26 @@ fn queue_row_actions_are_quiet() {
             "queue-remove must stay Quiet, not Destructive: {line}"
         );
     }
+}
+
+/// 025 US3 (RM1/FR-009): the row "…" opener is a Quiet button — the
+/// shared `actions_menu` draws it through `widgets::controls::button` with
+/// `Variant::Quiet`, and never through a bare `ui.button`.
+#[test]
+fn row_actions_opener_is_quiet() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/rows.rs");
+    let contents = fs::read_to_string(&path).unwrap_or_default();
+    let openers = lines_containing(&contents, "OPENER_GLYPH, over)");
+    assert!(
+        openers
+            .iter()
+            .any(|(_, l)| l.contains("button_over(ui, Variant::Quiet, OPENER_GLYPH, over)")),
+        "the opener must be button(ui, Variant::Quiet, OPENER_GLYPH): {openers:?}"
+    );
+    assert!(
+        lines_containing(&contents, "ui.button(\"…\")")
+            .iter()
+            .all(|(_, l)| l.trim_start().starts_with("//") || l.contains("opener_id")),
+        "no non-test bare ui.button(\"…\") opener may remain"
+    );
 }

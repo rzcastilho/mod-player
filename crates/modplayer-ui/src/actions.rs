@@ -224,6 +224,21 @@ pub fn effect_handle_claims() -> Vec<ChordPattern> {
     ]
 }
 
+/// `rows.rs`'s open six-action menu items (025, contract RM6): a focused
+/// item owns the arrow/Home/End navigation keys and Enter/Space/Escape, so
+/// no global binding on those keys fires while the menu is open.
+pub fn row_menu_item_claims() -> Vec<ChordPattern> {
+    vec![
+        plain(key("Up")),
+        plain(key("Down")),
+        plain(key("Home")),
+        plain(key("End")),
+        plain(key("Enter")),
+        plain(key("Space")),
+        plain(key("Escape")),
+    ]
+}
+
 /// `settings/category_row.rs`'s "More" overflow menu items
 /// (020-shell-navigation-and-gates, contracts/settings-category-row.md R9):
 /// a focused menu item owns `↑`/`↓` (moves focus between items, clamped at
