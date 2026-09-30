@@ -304,14 +304,22 @@ fn render_library<H: SourceHost>(
     (collect_nodes(&ctx, output), outcome)
 }
 
+/// A context carrying the app's text styles/tokens (the header draws in
+/// `text::DISPLAY`, which only the themed style defines).
+fn themed_ctx() -> Context {
+    let ctx = Context::default();
+    theme::apply_tokens(&ctx);
+    ctx.enable_accesskit();
+    ctx
+}
+
 fn render_detail(
     controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
     artwork: &mut ArtworkCache,
     target: &DetailTarget,
     input: RawInput,
 ) -> (Vec<Node>, DetailOutcome) {
-    let ctx = Context::default();
-    ctx.enable_accesskit();
+    let ctx = themed_ctx();
     let mut outcome = DetailOutcome::None;
     let mut state = detail_view::DetailViewState::default();
     let output = ctx.run_ui(input, |ui| {
@@ -1434,8 +1442,7 @@ fn album_detail_shows_header_and_tracks_in_album_order() {
     // order, not `TreeUpdate::nodes`' own (unspecified) order — the track
     // list renders inside a virtualised `ScrollArea` (US3 T071), same as
     // `tabs_render_in_the_fixed_order`'s own reasoning.
-    let ctx = Context::default();
-    ctx.enable_accesskit();
+    let ctx = themed_ctx();
     let mut outcome = DetailOutcome::None;
     let mut state = detail_view::DetailViewState::default();
     let mut output = ctx.run_ui(default_input(), |ui| {
@@ -1464,7 +1471,7 @@ fn album_detail_shows_header_and_tracks_in_album_order() {
 }
 
 #[test]
-fn playlist_detail_shows_owner_label_and_no_tracks_message_when_empty() {
+fn playlist_detail_shows_owner_fact_and_no_tracks_message_when_empty() {
     let (mut controller, handle, _dir) = active_controller("playlist-detail-empty");
     let id = PlaylistId::new("spotify:playlist:a").unwrap();
     sync_library(
@@ -1494,10 +1501,14 @@ fn playlist_detail_shows_owner_label_and_no_tracks_message_when_empty() {
     controller.tick();
     let (nodes, _) = render_detail(&mut controller, &mut artwork, &target, default_input());
 
+    // 025: the owner now rides the header's single facts line
+    // (`detail-owner`), for owned and non-owned playlists alike.
+    let owner = tr_args("detail-owner", &[("name", "Alex".to_string())]);
     assert!(
-        nodes.iter().any(|n| n.accessible_name()
-            == Some(tr_args("playlist-owner", &[("name", "Alex".to_string())]).as_str())),
-        "expected the owner label since this playlist is not owned: {nodes:?}"
+        nodes.iter().any(|n| n
+            .accessible_name()
+            .is_some_and(|l| l.contains(owner.as_str()))),
+        "expected the owner in the header facts line: {nodes:?}"
     );
     assert!(
         nodes
@@ -1568,6 +1579,383 @@ fn back_button_returns_the_back_outcome() {
         DetailOutcome::Back,
         "Backspace must return the Back outcome"
     );
+}
+
+// -- Collection header (025 US1, contracts/collection-header.md) -----------
+
+/// One header-test frame: accesskit nodes with bounds, plus the header's
+/// own expected height (from the live `Spacing`).
+struct DetailFrame {
+    nodes: Vec<(Role, Option<String>, Option<egui::accesskit::Rect>)>,
+    header_height: f32,
+}
+
+fn detail_frame_in(
+    ctx: &Context,
+    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+    artwork: &mut ArtworkCache,
+    target: &DetailTarget,
+    state: &mut detail_view::DetailViewState,
+    input: RawInput,
+) -> DetailFrame {
+    let mut header_height = 0.0;
+    let mut output = ctx.run_ui(input, |ui| {
+        header_height = detail_view::header_height(ui.spacing());
+        detail_view::show(
+            ui,
+            controller,
+            artwork,
+            target,
+            state,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
+    });
+    let update = output
+        .platform_output
+        .accesskit_update
+        .take()
+        .expect("accesskit_update should be populated once enabled");
+    output.drop_without_applying_deltas();
+    DetailFrame {
+        nodes: update
+            .nodes
+            .iter()
+            .map(|(_, n)| {
+                (
+                    n.role(),
+                    n.label().or(n.value()).map(str::to_string),
+                    n.bounds(),
+                )
+            })
+            .collect(),
+        header_height,
+    }
+}
+
+fn input_width(width: f32) -> RawInput {
+    RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(width, 1200.0))),
+        ..Default::default()
+    }
+}
+
+fn group_height(frame: &DetailFrame, name: &str) -> f32 {
+    let b = frame
+        .nodes
+        .iter()
+        .find(|(r, l, _)| *r == Role::Group && l.as_deref() == Some(name))
+        .and_then(|(_, _, b)| *b)
+        .unwrap_or_else(|| panic!("no header group named {name:?}"));
+    (b.y1 - b.y0) as f32
+}
+
+fn frame_has(frame: &DetailFrame, role: Role, name: &str) -> bool {
+    frame
+        .nodes
+        .iter()
+        .any(|(r, l, _)| *r == role && l.as_deref() == Some(name))
+}
+
+fn frame_center(frame: &DetailFrame, role: Role, name: &str) -> Pos2 {
+    let b = frame
+        .nodes
+        .iter()
+        .find(|(r, l, _)| *r == role && l.as_deref() == Some(name))
+        .and_then(|(_, _, b)| *b)
+        .unwrap_or_else(|| panic!("no {role:?} named {name:?}"));
+    Pos2::new(((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32)
+}
+
+/// A playlist detail primed to `Cached` with `tracks`.
+fn primed_playlist_detail(
+    label: &str,
+    name: &str,
+    owner: &str,
+    editable: bool,
+    tracks: Vec<TrackRef>,
+) -> (
+    PlaybackController<FakeBackend, ScriptedHost>,
+    DetailTarget,
+    TempDir,
+) {
+    let (mut controller, handle, dir) = active_controller(label);
+    let id = PlaylistId::new("spotify:playlist:h").unwrap();
+    let mut pl = playlist(id.as_str(), name, owner, editable);
+    pl.track_count = u32::try_from(tracks.len()).unwrap();
+    sync_library(
+        &mut controller,
+        &handle,
+        vec![],
+        vec![],
+        vec![],
+        vec![LibraryItem::Playlist(pl)],
+    );
+    handle.script_track_list(
+        TrackListSource::Playlist(id.clone()),
+        Ok(TrackList {
+            source: TrackListSource::Playlist(id.clone()),
+            tracks,
+        }),
+    );
+    let target = DetailTarget::Playlist(id);
+    let mut artwork = ArtworkCache::new();
+    let ctx = themed_ctx();
+    let mut state = detail_view::DetailViewState::default();
+    detail_frame_in(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &target,
+        &mut state,
+        default_input(),
+    );
+    controller.tick();
+    (controller, target, dir)
+}
+
+/// **H1**: header height is invariant across width and title length.
+#[test]
+fn header_height_is_fixed_across_widths_and_long_titles() {
+    let long = "T".repeat(300);
+    let (mut c1, t1, _d1) = primed_playlist_detail(
+        "h1-short",
+        "Short",
+        "Alex",
+        false,
+        vec![track("spotify:track:1", "One")],
+    );
+    let (mut c2, t2, _d2) = primed_playlist_detail(
+        "h1-long",
+        &long,
+        "Alex",
+        false,
+        vec![track("spotify:track:1", "One")],
+    );
+    let mut heights = vec![];
+    for (c, t, name) in [(&mut c1, &t1, "Short"), (&mut c2, &t2, long.as_str())] {
+        for width in [560.0, 1400.0] {
+            let ctx = themed_ctx();
+            let mut artwork = ArtworkCache::new();
+            let mut state = detail_view::DetailViewState::default();
+            let f = detail_frame_in(&ctx, c, &mut artwork, t, &mut state, input_width(width));
+            let h = group_height(&f, name);
+            assert!(
+                (h - f.header_height).abs() < 0.5,
+                "header {h} != {} at width {width}",
+                f.header_height
+            );
+            heights.push(h);
+        }
+    }
+    assert!(
+        heights.windows(2).all(|w| (w[0] - w[1]).abs() < 0.5),
+        "{heights:?}"
+    );
+}
+
+/// **H4** + **H9**-adjacent: one facts label, owner shown for owned and
+/// non-owned playlists.
+#[test]
+fn header_shows_one_facts_line_with_owner_for_any_playlist() {
+    for (editable, label) in [(true, "h4-owned"), (false, "h4-followed")] {
+        let tracks = vec![
+            track("spotify:track:1", "One"),
+            track("spotify:track:2", "Two"),
+        ];
+        let (mut controller, target, _dir) =
+            primed_playlist_detail(label, "Road Trip", "Alex", editable, tracks.clone());
+        let mut artwork = ArtworkCache::new();
+        let ctx = themed_ctx();
+        let mut state = detail_view::DetailViewState::default();
+        let f = detail_frame_in(
+            &ctx,
+            &mut controller,
+            &mut artwork,
+            &target,
+            &mut state,
+            default_input(),
+        );
+        let expected = detail_view::facts_line(&detail_view::header_facts(
+            detail_view::FactsInput::Playlist {
+                owner: "Alex",
+                track_count: 2,
+                tracks: Some(&tracks),
+            },
+        ));
+        assert!(frame_has(&f, Role::Label, &expected), "{:?}", f.nodes);
+        let facts_labels = f
+            .nodes
+            .iter()
+            .filter(|(r, l, _)| {
+                *r == Role::Label && l.as_deref().is_some_and(|l| l.contains(" · "))
+            })
+            .count();
+        assert_eq!(facts_labels, 1, "exactly one facts label: {:?}", f.nodes);
+    }
+}
+
+/// **H7**: Play starts the collection at track 1 — same queue as a row's
+/// Play now on that entity.
+#[test]
+fn header_play_starts_the_collection_from_track_one() {
+    let tracks = vec![
+        track("spotify:track:1", "One"),
+        track("spotify:track:2", "Two"),
+    ];
+    let (mut controller, target, _dir) =
+        primed_playlist_detail("h7", "Road Trip", "Alex", true, tracks);
+    let mut artwork = ArtworkCache::new();
+    let ctx = themed_ctx();
+    let mut state = detail_view::DetailViewState::default();
+    let f = detail_frame_in(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &target,
+        &mut state,
+        default_input(),
+    );
+    let name = tr_args("detail-play-name", &[("name", "Road Trip".to_string())]);
+    let pos = frame_center(&f, Role::Button, &name);
+
+    for pressed in [true, false] {
+        let mut input = default_input();
+        input.events.push(Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        });
+        detail_frame_in(
+            &ctx,
+            &mut controller,
+            &mut artwork,
+            &target,
+            &mut state,
+            input,
+        );
+    }
+    let current = controller.queue().current().expect("Play fills the queue");
+    assert_eq!(current.track.id.as_str(), "spotify:track:1");
+}
+
+/// **H8**: zero tracks — Play disabled with the hint, "…" enabled, the
+/// empty-playlist sentence still shown.
+#[test]
+fn header_play_is_disabled_for_an_empty_collection() {
+    let (mut controller, target, _dir) =
+        primed_playlist_detail("h8", "Empty", "Alex", true, vec![]);
+    let mut artwork = ArtworkCache::new();
+    let ctx = themed_ctx();
+    let mut state = detail_view::DetailViewState::default();
+    let mut output = ctx.run_ui(default_input(), |ui| {
+        detail_view::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &target,
+            &mut state,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
+    });
+    let update = output.platform_output.accesskit_update.take().unwrap();
+    output.drop_without_applying_deltas();
+    let play_name = tr_args("detail-play-name", &[("name", "Empty".to_string())]);
+    let more_name = tr_args("row-actions", &[("name", "Empty".to_string())]);
+    let play = update
+        .nodes
+        .iter()
+        .find(|(_, n)| n.label() == Some(play_name.as_str()))
+        .map(|(_, n)| n)
+        .expect("Play node");
+    assert!(play.is_disabled(), "Play must be disabled");
+    assert_eq!(
+        play.description(),
+        Some(tr("detail-no-tracks-hint").as_str())
+    );
+    let more = update
+        .nodes
+        .iter()
+        .find(|(_, n)| n.label() == Some(more_name.as_str()))
+        .map(|(_, n)| n)
+        .expect("… node");
+    assert!(!more.is_disabled(), "… stays enabled");
+    assert!(
+        update.nodes.iter().any(
+            |(_, n)| n.label() == Some(tr("playlist-no-tracks").as_str())
+                || n.value() == Some(tr("playlist-no-tracks").as_str())
+        ),
+        "empty-playlist sentence still shown"
+    );
+}
+
+/// **H9**: the header "…" opens the same six menu items in `RowAction`
+/// order, for a non-owned playlist too.
+#[test]
+fn header_menu_lists_the_six_row_actions() {
+    let tracks = vec![track("spotify:track:1", "One")];
+    let (mut controller, target, _dir) =
+        primed_playlist_detail("h9", "Road Trip", "Alex", false, tracks);
+    let mut artwork = ArtworkCache::new();
+    let ctx = themed_ctx();
+    let mut state = detail_view::DetailViewState::default();
+    let f = detail_frame_in(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &target,
+        &mut state,
+        default_input(),
+    );
+    let name = tr_args("row-actions", &[("name", "Road Trip".to_string())]);
+    let pos = frame_center(&f, Role::Button, &name);
+    for pressed in [true, false] {
+        let mut input = default_input();
+        input.events.push(Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        });
+        detail_frame_in(
+            &ctx,
+            &mut controller,
+            &mut artwork,
+            &target,
+            &mut state,
+            input,
+        );
+    }
+    // Press, release (opens), then one more settled frame.
+    let f = detail_frame_in(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &target,
+        &mut state,
+        default_input(),
+    );
+    let items: Vec<String> = f
+        .nodes
+        .iter()
+        .filter(|(r, _, _)| *r == Role::MenuItem)
+        .filter_map(|(_, l, _)| l.clone())
+        .collect();
+    let expected: Vec<String> = [
+        "action-play-now",
+        "action-play-next",
+        "action-add-to-queue",
+        "action-add-to-playlist",
+        "action-save-to-library",
+        "action-pin-offline",
+    ]
+    .iter()
+    .map(|k| tr(k))
+    .collect();
+    assert_eq!(items.len(), 6, "{items:?}");
+    for e in &expected {
+        assert!(items.contains(e), "missing {e:?} in {items:?}");
+    }
 }
 
 // -- Scale (US3 T069, SC-002, contracts/ui-surface.md §3) -------------------
@@ -1934,4 +2322,353 @@ fn getting_started_tutorial_opens_url() {
         ),
         "App must issue open_url with the tutorial constant, got: {commands:?}"
     );
+}
+
+// -- Back control (025 US2, H10) -------------------------------------------
+
+fn key_event(key: egui::Key, modifiers: egui::Modifiers) -> Event {
+    Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers,
+    }
+}
+
+/// One `show` frame returning the outcome, the (role, label, bounds) nodes
+/// and the label of the accesskit-focused node, if any.
+fn back_frame(
+    ctx: &Context,
+    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+    artwork: &mut ArtworkCache,
+    target: &DetailTarget,
+    state: &mut detail_view::DetailViewState,
+    input: RawInput,
+) -> (DetailOutcome, DetailFrame, Option<String>) {
+    let mut outcome = DetailOutcome::None;
+    let mut output = ctx.run_ui(input, |ui| {
+        outcome = detail_view::show(
+            ui,
+            controller,
+            artwork,
+            target,
+            state,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
+    });
+    let update = output
+        .platform_output
+        .accesskit_update
+        .take()
+        .expect("accesskit_update should be populated once enabled");
+    output.drop_without_applying_deltas();
+    let focused = update
+        .nodes
+        .iter()
+        .find(|(id, _)| *id == update.focus)
+        .and_then(|(_, n)| n.label().map(str::to_string));
+    let nodes = update
+        .nodes
+        .iter()
+        .map(|(_, n)| {
+            (
+                n.role(),
+                n.label().or(n.value()).map(str::to_string),
+                n.bounds(),
+            )
+        })
+        .collect();
+    (
+        outcome,
+        DetailFrame {
+            nodes,
+            header_height: 0.0,
+        },
+        focused,
+    )
+}
+
+/// **H10**: Back is a text-labelled control at the header's top-left, first
+/// in focus order, and click / Backspace / Alt+Left all return `Back`.
+#[test]
+fn h10_back_is_top_left_first_focusable_and_all_paths_return_back() {
+    let tracks = vec![track("spotify:track:1", "One")];
+    let (mut controller, target, _dir) =
+        primed_playlist_detail("h10", "Road Trip", "Alex", true, tracks);
+    let back_label = tr("detail-back");
+    let mut artwork = ArtworkCache::new();
+    let ctx = themed_ctx();
+    let mut state = detail_view::DetailViewState::default();
+
+    let (_, f, _) = back_frame(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &target,
+        &mut state,
+        default_input(),
+    );
+    assert!(frame_has(&f, Role::Button, &back_label), "{:?}", f.nodes);
+    let back = f
+        .nodes
+        .iter()
+        .find(|(r, l, _)| *r == Role::Button && l.as_deref() == Some(back_label.as_str()))
+        .and_then(|(_, _, b)| *b)
+        .expect("Back has bounds");
+    for (role, label, bounds) in &f.nodes {
+        if *role != Role::Button || label.as_deref() == Some(back_label.as_str()) {
+            continue;
+        }
+        if let Some(b) = bounds {
+            assert!(
+                back.x0 <= b.x0 && back.y0 <= b.y0,
+                "Back {back:?} is not top-left of {label:?} {b:?}"
+            );
+        }
+    }
+
+    // Tab from page start reaches Back before Play.
+    let mut focused = None;
+    for _ in 0..2 {
+        let mut input = default_input();
+        input
+            .events
+            .push(key_event(egui::Key::Tab, egui::Modifiers::default()));
+        let (_, _, fo) = back_frame(
+            &ctx,
+            &mut controller,
+            &mut artwork,
+            &target,
+            &mut state,
+            input,
+        );
+        focused = fo.or(focused);
+        if focused.is_some() {
+            break;
+        }
+    }
+    assert_eq!(
+        focused.as_deref(),
+        Some(back_label.as_str()),
+        "first Tab must land on Back"
+    );
+
+    // Click.
+    let pos = frame_center(&f, Role::Button, &back_label);
+    let mut got = DetailOutcome::None;
+    for pressed in [true, false] {
+        let mut input = default_input();
+        input.events.push(Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        });
+        let (o, _, _) = back_frame(
+            &ctx,
+            &mut controller,
+            &mut artwork,
+            &target,
+            &mut state,
+            input,
+        );
+        if o == DetailOutcome::Back {
+            got = o;
+        }
+    }
+    assert_eq!(got, DetailOutcome::Back, "click on Back");
+
+    // Alt+Left.
+    let mut input = default_input();
+    input
+        .events
+        .push(Event::ModifiersChanged(egui::Modifiers::ALT));
+    input.events.push(key_event(
+        egui::Key::ArrowLeft,
+        egui::Modifiers {
+            alt: true,
+            ..Default::default()
+        },
+    ));
+    let (o, _, _) = back_frame(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &target,
+        &mut state,
+        input,
+    );
+    assert_eq!(o, DetailOutcome::Back, "Alt+Left");
+
+    // Backspace.
+    let mut input = default_input();
+    input
+        .events
+        .push(key_event(egui::Key::Backspace, egui::Modifiers::default()));
+    let (o, _, _) = back_frame(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &target,
+        &mut state,
+        input,
+    );
+    assert_eq!(o, DetailOutcome::Back, "Backspace");
+}
+
+/// **H10**: Back stays usable while the header is a skeleton (ref not in
+/// the library index yet), and its call site is `Variant::Quiet`.
+#[test]
+fn h10_back_is_quiet_and_usable_while_header_is_a_skeleton() {
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/detail_view.rs"))
+        .unwrap();
+    assert!(
+        src.contains(r#"button(ui, Variant::Quiet, tr("detail-back"))"#),
+        "Back must be a Variant::Quiet button labelled detail-back"
+    );
+
+    let (mut controller, _handle, _dir) = active_controller("h10-skeleton");
+    let target = DetailTarget::Album(AlbumId::new("spotify:album:missing").unwrap());
+    let back_label = tr("detail-back");
+    let mut artwork = ArtworkCache::new();
+    let ctx = themed_ctx();
+    let mut state = detail_view::DetailViewState::default();
+    let (_, f, _) = back_frame(
+        &ctx,
+        &mut controller,
+        &mut artwork,
+        &target,
+        &mut state,
+        default_input(),
+    );
+    let pos = frame_center(&f, Role::Button, &back_label);
+    let mut got = DetailOutcome::None;
+    for pressed in [true, false] {
+        let mut input = default_input();
+        input.events.push(Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        });
+        let (o, _, _) = back_frame(
+            &ctx,
+            &mut controller,
+            &mut artwork,
+            &target,
+            &mut state,
+            input,
+        );
+        if o == DetailOutcome::Back {
+            got = o;
+        }
+    }
+    assert_eq!(
+        got,
+        DetailOutcome::Back,
+        "Back must work on a skeleton header"
+    );
+}
+
+// -- US4: stable loading (025 K1–K5) ------------------------------------
+
+fn loading_controller(label: &str) -> (PlaybackController<FakeBackend, SyntheticHost>, TempDir) {
+    let (store, dir) = fresh_store(label);
+    let paths = LibraryPaths::with_dir(dir.path().join("does-not-exist"));
+    let controller =
+        PlaybackController::new(FakeBackend::new(vec![]), SyntheticHost::new(44_100), store)
+            .with_library_paths(Some(paths));
+    assert!(controller.library_status().loading);
+    (controller, dir)
+}
+
+/// Content height (`ui.min_rect`) of the loading library view on `tab`,
+/// plus its accesskit nodes.
+fn loading_height(tab: LibraryTab, label: &str) -> (f32, Vec<Node>) {
+    let (mut controller, _dir) = loading_controller(label);
+    let mut artwork = ArtworkCache::new();
+    let mut state = LibraryViewState {
+        tab,
+        ..LibraryViewState::default()
+    };
+    let ctx = themed_ctx();
+    let mut height = 0.0;
+    let output = ctx.run_ui(default_input(), |ui| {
+        let _ = library_view::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut state,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
+        height = ui.min_rect().height();
+    });
+    (height, collect_nodes(&ctx, output))
+}
+
+/// K1/K4: three `Role::Status` "loading" skeletons per tab, no ListItem.
+#[test]
+fn k1_k4_every_tab_shows_three_loading_statuses_and_no_list_item() {
+    for tab in LibraryTab::ORDER {
+        let (_, nodes) = loading_height(tab, "k1");
+        let statuses = nodes
+            .iter()
+            .filter(|n| n.role == Role::Status && n.label.as_deref() == Some(&*tr("loading")))
+            .count();
+        assert_eq!(statuses, 3, "{tab:?}");
+        assert_eq!(count(&nodes, Role::ListItem), 0, "{tab:?}");
+    }
+}
+
+/// K1/K2: skeleton row height follows the tab's loaded row height — 56 px
+/// for track tabs, 72 px for album/artist/playlist tabs.
+#[test]
+fn k1_k2_skeleton_height_matches_loaded_row_height_per_tab() {
+    let (base, _) = loading_height(LibraryTab::SavedTracks, "k2-base");
+    let (recent, _) = loading_height(LibraryTab::RecentlyPlayed, "k2-recent");
+    assert!((recent - base).abs() < 0.5, "track tabs share 56 px rows");
+    for tab in [
+        LibraryTab::SavedAlbums,
+        LibraryTab::FollowedArtists,
+        LibraryTab::Playlists,
+    ] {
+        let (h, _) = loading_height(tab, "k2");
+        assert!(
+            ((h - base) - 3.0 * 16.0).abs() < 0.5,
+            "{tab:?}: 3 rows x (72 - 56) taller than the track tab, got {}",
+            h - base
+        );
+    }
+}
+
+/// K5: a missing ref renders the header skeleton — same height as the
+/// loaded header, one loading status, no ListItem, Back present.
+#[test]
+fn k5_header_skeleton_has_header_height_status_and_back() {
+    let (mut controller, _handle, _dir) = active_controller("k5");
+    let target = DetailTarget::Album(AlbumId::new("spotify:album:missing").unwrap());
+    let mut artwork = ArtworkCache::new();
+    let ctx = themed_ctx();
+    let mut state = detail_view::DetailViewState::default();
+    let mut top_height = 0.0;
+    let mut expected = 0.0;
+    let output = ctx.run_ui(default_input(), |ui| {
+        expected = detail_view::header_height(ui.spacing());
+        let before = ui.cursor().min.y;
+        let _ = detail_view::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &target,
+            &mut state,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
+        top_height = ui.cursor().min.y - before;
+    });
+    let nodes = collect_nodes(&ctx, output);
+    assert!(top_height >= expected, "{top_height} < {expected}");
+    assert!(has(&nodes, Role::Status, &tr("loading")), "{nodes:?}");
+    assert!(has(&nodes, Role::Button, &tr("detail-back")), "{nodes:?}");
+    assert_eq!(count(&nodes, Role::ListItem), 0);
 }

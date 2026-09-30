@@ -25,7 +25,7 @@ use crate::rows::{
     entity_key, list_row, virtualized_list,
 };
 use crate::theme;
-use crate::widgets::skeleton::{ROW_HEIGHT, WIDE_ROW_HEIGHT, skeleton_row};
+use crate::widgets::skeleton::{SkeletonShape, skeleton_row};
 
 /// A group's own scroll area is capped to this many rows tall (US3 T071,
 /// contracts/ui-surface.md §2 "virtualised `show_rows`") — long enough to
@@ -170,7 +170,7 @@ fn show_group<B: OutputBackend, H: SourceHost>(
         GroupState::Pending => {
             draw_header(ui, kind);
             for _ in 0..3 {
-                skeleton_row(ui, skeleton_height(kind));
+                skeleton_row(ui, skeleton_shape(kind));
             }
         }
         GroupState::Loaded {
@@ -249,9 +249,9 @@ fn draw_rows<B: OutputBackend, H: SourceHost>(
     virtualized_list(
         ui,
         ("search-group", kind, query),
-        skeleton_height(kind),
+        skeleton_shape(kind).height,
         items.len(),
-        Some(skeleton_height(kind) * GROUP_VISIBLE_ROWS),
+        Some(skeleton_shape(kind).height * GROUP_VISIBLE_ROWS),
         |ui, i| {
             let entity = hit_entity(&items[i]);
             let key = entity_key(&entity);
@@ -346,10 +346,12 @@ fn hit_entity(hit: &SearchHit) -> RowEntity {
     }
 }
 
-fn skeleton_height(kind: SearchKind) -> f32 {
+fn skeleton_shape(kind: SearchKind) -> SkeletonShape {
     match kind {
-        SearchKind::Track => ROW_HEIGHT,
-        SearchKind::Album | SearchKind::Artist | SearchKind::Playlist => WIDE_ROW_HEIGHT,
+        SearchKind::Track => SkeletonShape::TRACK,
+        SearchKind::Album => SkeletonShape::ALBUM,
+        SearchKind::Artist => SkeletonShape::ARTIST,
+        SearchKind::Playlist => SkeletonShape::PLAYLIST,
     }
 }
 
