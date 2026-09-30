@@ -636,14 +636,16 @@ fn queue_row_actions_are_quiet() {
     ];
     // Two `rows.rs` loops (single-line, wrapped) + category_row.rs's
     // "More" + markers.rs's name cell + markers.rs's shared row action +
-    // detail_view.rs's header Back + rows.rs's "…" actions opener.
-    let expected_site_count = 8;
+    // detail_view.rs's header Back + rows.rs's "…" actions opener +
+    // search_view.rs's trailing "×" clear control (026 FR-008).
+    let expected_site_count = 9;
     let allowed_files = [
         "rows.rs",
         "settings/category_row.rs",
         "markers.rs",
         "detail_view.rs",
         "widgets/skeleton.rs",
+        "search_view.rs",
     ];
 
     let mut quiet_sites = Vec::new();
