@@ -1569,3 +1569,112 @@ fn markers_heading_key_was_intentionally_consolidated() {
          `PLAYBACK_KEYS` above, or this test/comment is stale"
     );
 }
+
+/// 025-library-browsing-and-detail (contracts/fluent-strings.md): keys
+/// with no Fluent placeholder, resolved via plain `tr`.
+const LIBRARY_025_PLAIN_KEYS: &[&str] = &[
+    "detail-back",
+    "detail-play",
+    "detail-no-tracks-hint",
+    "detail-kind-artist",
+];
+
+/// 025: keys with placeholders, with the args to resolve each one.
+const LIBRARY_025_ARG_KEYS: &[(&str, &[&str])] = &[
+    ("detail-play-name", &["name"]),
+    ("detail-owner", &["name"]),
+    ("detail-top-track-count", &["count"]),
+    ("detail-runtime-minutes", &["minutes"]),
+    ("detail-runtime-hours", &["hours", "minutes"]),
+];
+
+/// 025: pt-BR-only keys (en-US values already exist from 004) with the
+/// placeholders both locales must share.
+const LIBRARY_025_PT_BR_ONLY_KEYS: &[&str] =
+    &["playlist-track-count", "row-actions", "playlist-no-tracks"];
+
+/// The sorted set of `$placeholder` names in `key`'s entry (its first line
+/// plus any indented/closing continuation lines).
+fn placeholders_of(ftl: &str, key: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_entry = false;
+    for line in ftl.lines() {
+        if in_entry {
+            let continues = line.starts_with(char::is_whitespace) || line.starts_with('}');
+            if !continues || line.trim().is_empty() {
+                break;
+            }
+        } else if line
+            .split_once(" = ")
+            .is_some_and(|(k, _)| k.trim() == key && !line.starts_with('#'))
+        {
+            in_entry = true;
+        } else {
+            continue;
+        }
+        let mut rest = line;
+        while let Some(i) = rest.find('$') {
+            let name: String = rest[i + 1..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                .collect();
+            out.push(name);
+            rest = &rest[i + 1..];
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// 025 (FR-012, NFR-7.1): every contract key resolves against en-US.
+#[test]
+fn library_025_keys_resolve() {
+    for key in LIBRARY_025_PLAIN_KEYS {
+        assert_ne!(
+            &tr(key),
+            key,
+            "`{key}` missing from locales/en-US/library.ftl"
+        );
+    }
+    for (key, args) in LIBRARY_025_ARG_KEYS {
+        let owned: Vec<(&str, String)> = args.iter().map(|a| (*a, "3".to_string())).collect();
+        assert_ne!(
+            &tr_args(key, &owned),
+            key,
+            "`{key}` missing from locales/en-US/library.ftl"
+        );
+    }
+    assert_eq!(tr("detail-back"), "‹ Library");
+}
+
+/// 025 (FR-012, NFR-7.1): every key exists in both en-US and pt-BR
+/// `library.ftl` with identical placeholders.
+#[test]
+fn library_025_keys_have_en_us_and_pt_br_parity() {
+    let en_us_ftl = include_str!("../../../locales/en-US/library.ftl");
+    let pt_br_ftl = include_str!("../../../locales/pt-BR/library.ftl");
+    let en_us_keys = defined_keys(en_us_ftl);
+    let pt_br_keys = defined_keys(pt_br_ftl);
+
+    let all = LIBRARY_025_PLAIN_KEYS
+        .iter()
+        .copied()
+        .chain(LIBRARY_025_ARG_KEYS.iter().map(|(k, _)| *k))
+        .chain(LIBRARY_025_PT_BR_ONLY_KEYS.iter().copied());
+    for key in all {
+        assert!(
+            en_us_keys.contains(key),
+            "`{key}` is missing from locales/en-US/library.ftl"
+        );
+        assert!(
+            pt_br_keys.contains(key),
+            "`{key}` is missing from locales/pt-BR/library.ftl"
+        );
+        assert_eq!(
+            placeholders_of(en_us_ftl, key),
+            placeholders_of(pt_br_ftl, key),
+            "`{key}` placeholders differ between en-US and pt-BR"
+        );
+    }
+}

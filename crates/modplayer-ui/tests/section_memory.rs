@@ -363,3 +363,157 @@ fn m5_switching_library_tabs_keeps_independent_offsets_per_tab() {
     );
     assert!((memory.offset(&albums).unwrap_or(-1.0) - 300.0).abs() <= 1.0);
 }
+
+// -- S1-S6 (025 US2): back to the library where I left off -----------------
+
+/// Like [`draw_view`] at an explicit screen width, also returning the first
+/// row `show_rows` laid out (the "first visible row").
+fn draw_view_at(
+    ctx: &Context,
+    memory: &mut SectionMemory,
+    key: &ViewKey,
+    rows: usize,
+    width: f32,
+) -> (f32, usize) {
+    let mut scroll = Some(memory.scroll_area(key));
+    let mut offset_y = 0.0_f32;
+    let mut first_row = usize::MAX;
+    {
+        let (offset_ref, first_ref) = (&mut offset_y, &mut first_row);
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(width, SCREEN_HEIGHT))),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, move |ui| {
+            let out = scroll
+                .take()
+                .unwrap_or_else(|| unreachable!("run_ui only calls its closure once"))
+                .show_rows(ui, ROW_HEIGHT, rows, |ui, range| {
+                    *first_ref = (*first_ref).min(range.start);
+                    for i in range {
+                        ui.label(format!("row {i}"));
+                    }
+                });
+            *offset_ref = out.state.offset.y;
+        });
+        output.drop_without_applying_deltas();
+    }
+    memory.record(key.clone(), offset_y);
+    (offset_y, first_row)
+}
+
+fn detail_key() -> ViewKey {
+    ViewKey::Library(LibraryViewKey::Detail(DetailTarget::Album(album_id("s"))))
+}
+
+/// **S1**: library list -> detail -> Back restores the same offset and the
+/// same first visible row.
+#[test]
+fn s1_round_trip_restores_offset_and_first_visible_row() {
+    let ctx = fresh_ctx();
+    let mut memory = SectionMemory::default();
+    let tab = ViewKey::Library(LibraryViewKey::Tab(LibraryTab::Playlists));
+    seed_and_leave(&mut memory, &tab, 1500.0);
+    let (before, first_before) = draw_view_at(&ctx, &mut memory, &tab, 500, SCREEN_WIDTH);
+    assert!((before - 1500.0).abs() <= 1.0, "{before}");
+
+    // Open an item (detail drawn), then Back to the tab.
+    draw_view_at(&ctx, &mut memory, &detail_key(), 50, SCREEN_WIDTH);
+    let (after, first_after) = draw_view_at(&ctx, &mut memory, &tab, 500, SCREEN_WIDTH);
+    assert!((after - before).abs() <= 1.0, "offset {before} -> {after}");
+    assert_eq!(first_before, first_after, "first visible row changed");
+}
+
+/// **S2**: the active tab (Playlists) keeps its own offset; other tabs do
+/// not disturb it.
+#[test]
+fn s2_active_tab_offset_is_preserved_across_detail() {
+    let ctx = fresh_ctx();
+    let mut memory = SectionMemory::default();
+    let playlists = ViewKey::Library(LibraryViewKey::Tab(LibraryTab::Playlists));
+    let albums = ViewKey::Library(LibraryViewKey::Tab(LibraryTab::SavedAlbums));
+    seed_and_leave(&mut memory, &playlists, 900.0);
+    seed_and_leave(&mut memory, &albums, 200.0);
+    draw_view_at(&ctx, &mut memory, &playlists, 300, SCREEN_WIDTH);
+    draw_view_at(&ctx, &mut memory, &detail_key(), 40, SCREEN_WIDTH);
+    let (back, _) = draw_view_at(&ctx, &mut memory, &playlists, 300, SCREEN_WIDTH);
+    assert!((back - 900.0).abs() <= 1.0, "Playlists offset {back}");
+    assert_eq!(memory.offset(&albums), Some(200.0));
+}
+
+/// **S3**: content shrank while away -> offset clamps to `max_scroll`.
+#[test]
+fn s3_offset_clamps_to_max_scroll_when_list_shrank() {
+    let ctx = fresh_ctx();
+    let tab = ViewKey::Library(LibraryViewKey::Tab(LibraryTab::Playlists));
+    let mut baseline = SectionMemory::default();
+    seed_and_leave(&mut baseline, &tab, 1_000_000.0);
+    let (max_scroll, _) = draw_view_at(&ctx, &mut baseline, &tab, 20, SCREEN_WIDTH);
+
+    let mut memory = SectionMemory::default();
+    seed_and_leave(&mut memory, &tab, 3000.0);
+    draw_view_at(&ctx, &mut memory, &tab, 200, SCREEN_WIDTH);
+    draw_view_at(&ctx, &mut memory, &detail_key(), 10, SCREEN_WIDTH);
+    let (back, _) = draw_view_at(&ctx, &mut memory, &tab, 20, SCREEN_WIDTH);
+    assert!(
+        (back - max_scroll).abs() <= 1.0,
+        "{back} != max_scroll {max_scroll}"
+    );
+}
+
+/// **S4**: window narrowed 1400 -> 960 while in detail; the first visible
+/// row is unchanged on return (fixed row height, width-independent).
+#[test]
+fn s4_width_change_keeps_first_visible_row() {
+    let ctx = fresh_ctx();
+    let mut memory = SectionMemory::default();
+    let tab = ViewKey::Library(LibraryViewKey::Tab(LibraryTab::Playlists));
+    seed_and_leave(&mut memory, &tab, 1200.0);
+    let (_, first_wide) = draw_view_at(&ctx, &mut memory, &tab, 400, 1400.0);
+    draw_view_at(&ctx, &mut memory, &detail_key(), 30, 960.0);
+    let (_, first_narrow) = draw_view_at(&ctx, &mut memory, &tab, 400, 960.0);
+    assert_eq!(first_wide, first_narrow);
+}
+
+/// **S5**: the restore is applied once; a later stored value never
+/// overrides the live scroll state on subsequent frames.
+#[test]
+fn s5_restore_is_applied_once() {
+    let ctx = fresh_ctx();
+    let mut memory = SectionMemory::default();
+    let tab = ViewKey::Library(LibraryViewKey::Tab(LibraryTab::Playlists));
+    seed_and_leave(&mut memory, &tab, 1000.0);
+    let (restored, _) = draw_view_at(&ctx, &mut memory, &tab, 300, SCREEN_WIDTH);
+    assert!((restored - 1000.0).abs() <= 1.0);
+
+    // Next frame: stored value differs (as if the user scrolled elsewhere);
+    // the view must keep its live offset rather than re-apply the store.
+    memory.record(tab.clone(), 100.0);
+    let (next, _) = draw_view_at(&ctx, &mut memory, &tab, 300, SCREEN_WIDTH);
+    assert!((next - restored).abs() <= 1.0, "restore re-applied: {next}");
+}
+
+/// **S6**: nothing is persisted to disk, and a session reset (sign-out)
+/// forgets every offset.
+#[test]
+fn s6_nothing_on_disk_and_reset_forgets_offsets() {
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/section_memory.rs"
+    ))
+    .unwrap();
+    for banned in ["std::fs", "serde", "File::", "persist_egui_memory"] {
+        // The module doc mentions persistence in prose only; code must not.
+        let code: String = src
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!code.contains(banned), "section_memory.rs uses {banned}");
+    }
+    let mut memory = SectionMemory::default();
+    memory.record(detail_key(), 500.0);
+    memory.reset();
+    assert_eq!(memory.offset(&detail_key()), None);
+    assert_eq!(memory.epoch(), 1);
+}
