@@ -535,6 +535,12 @@ pub fn reduce(mut state: TransportState, input: Input) -> (TransportState, Vec<E
             if matches!(state.active, ActiveState::NotRegistered { .. }) {
                 state.active = ActiveState::Active;
             }
+            // A successful registration proves Premium (the receiver
+            // session is the tier authority), so an earlier downgrade
+            // warning no longer applies (issue #35).
+            effects.push(Effect::DismissNotify {
+                key: KEY_SUBSCRIPTION_DOWNGRADED,
+            });
         }
         // FR-027/T23 (US4): a `Deregister` the controller sent for a known
         // reason (sign-out, downgrade, tier rejection) already recorded
