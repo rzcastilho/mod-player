@@ -405,6 +405,14 @@ fn run(
         }
 
         let ended = Arc::new(AtomicBool::new(false));
+        // #31: this session's player-event task forwards only while the
+        // session is live. `Player` (and its event channel) outlives the
+        // session — across reconnects, and now across a parked
+        // `Deregister` whose runtime stays up — so without this the old
+        // task would keep forwarding: the teardown's own
+        // `SessionDisconnected` surfaced as `BecameInactive` after
+        // `Deregistered`, and every reconnect stacked another forwarder.
+        let session_live = Arc::new(AtomicBool::new(true));
         {
             let ended = Arc::clone(&ended);
             runtime.spawn(async move {
@@ -424,6 +432,7 @@ fn run(
             let preload_window_open = Arc::clone(&preload_window_open);
             let mapper = Arc::clone(&mapper);
             let decode_ahead = Arc::clone(&decode_ahead);
+            let session_live = Arc::clone(&session_live);
             let session_for_decode = session.clone();
             let runtime_handle = runtime.handle().clone();
             runtime.spawn(async move {
@@ -464,6 +473,9 @@ fn run(
                                 Ok(Some(event)) => event,
                                 Ok(None) => break,
                                 Err(_) => {
+                                    if !session_live.load(Ordering::Acquire) {
+                                        break;
+                                    }
                                     // No `TrackChanged` arrived in time:
                                     // this activation has no known context.
                                     awaiting_transfer_context = None;
@@ -483,6 +495,9 @@ fn run(
                             None => break,
                         },
                     };
+                    if !session_live.load(Ordering::Acquire) {
+                        break;
+                    }
 
                     if matches!(event, PlayerEvent::SessionConnected { .. }) {
                         if transfer_requested.swap(false, Ordering::AcqRel) {
@@ -623,6 +638,7 @@ fn run(
             &event_tx,
             &catalog_semaphore,
         );
+        session_live.store(false, Ordering::Release);
         drain_retired(&mut retired_rx);
 
         match outcome {
