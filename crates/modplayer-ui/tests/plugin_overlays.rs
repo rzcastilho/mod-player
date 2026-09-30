@@ -215,7 +215,14 @@ fn above_markers_below_playhead_order() {
         modplayer_ui::theme::marker_color(modplayer_core::markers::PaletteIndex::new(1));
     let plugin_color =
         modplayer_ui::theme::overlay_color(OverlayColor::Accent, &egui::Visuals::dark());
-    let playhead_color = egui::Visuals::dark().strong_text_color();
+    // 022-waveform-legibility (WL3): the playhead now paints as a casing
+    // stroke followed by a core stroke (`waveform::paint::playhead`); the
+    // core is the topmost segment, so it is the one that must sit above
+    // the plugin's line in the shape stream.
+    let playhead_color = modplayer_ui::theme::waveform::waveform_roles(modplayer_ui::theme::roles(
+        &egui::Visuals::dark(),
+    ))
+    .playhead_core;
 
     let index_of = |color: egui::Color32| {
         shapes

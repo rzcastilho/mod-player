@@ -11,7 +11,7 @@
 
 use std::time::{Duration, Instant};
 
-use egui::Vec2;
+use egui::{Align, Rangef, Vec2};
 
 /// Below this window width the plugin dock auto-hides (data-model.md §3,
 /// FR-006).
@@ -411,6 +411,85 @@ impl WindowSizeTracker {
     }
 }
 
+// ---------------------------------------------------------------------
+// `reveal_align` / `identity_width` (021-transport-bar-and-panel-layout,
+// data-model.md §6, research R4/R5)
+// ---------------------------------------------------------------------
+
+/// The identity group's fixed width inside the transport bar
+/// (data-model.md §6, research R4): a quarter of the bar's own width,
+/// clamped to `[160, 320]` logical points. Depends only on the bar's
+/// width — never on the title or artist text (P-I3), so it can be
+/// measured before either string is laid out.
+///
+/// # Examples
+///
+/// ```
+/// use modplayer_ui::layout::identity_width;
+///
+/// assert_eq!(identity_width(1200.0), 300.0);
+/// assert_eq!(identity_width(400.0), 160.0); // clamped to the floor
+/// assert_eq!(identity_width(2000.0), 320.0); // clamped to the ceiling
+/// ```
+#[must_use]
+pub fn identity_width(bar_width: f32) -> f32 {
+    (IDENTITY_WIDTH_PROPORTION * bar_width).clamp(IDENTITY_WIDTH_MIN, IDENTITY_WIDTH_MAX)
+}
+
+/// [`identity_width`]'s proportion of the bar's width (data-model.md §6).
+pub const IDENTITY_WIDTH_PROPORTION: f32 = 0.25;
+
+/// [`identity_width`]'s floor, in logical points (data-model.md §6).
+pub const IDENTITY_WIDTH_MIN: f32 = 160.0;
+
+/// [`identity_width`]'s ceiling, in logical points (data-model.md §6).
+pub const IDENTITY_WIDTH_MAX: f32 = 320.0;
+
+/// How far (if at all) to scroll a card into view once it is revealed
+/// (data-model.md §6, research R5): `card` and `viewport` are the same
+/// axis's `y`-range, both in the same coordinate space. Returns the value
+/// to hand `Ui::scroll_to_rect`'s `align` parameter, wrapped in `Some`
+/// when a scroll is needed at all, or `None` when the card is already
+/// fully visible.
+///
+/// - The card is taller than the viewport: `Some(Some(Align::Min))` —
+///   align the card's header to the viewport's top, since the card can
+///   never fit fully on screen.
+/// - The card already sits fully within the viewport: `None` — no scroll.
+/// - Otherwise: `Some(None)` — egui's own "minimum scroll to become
+///   visible" behaviour.
+///
+/// # Examples
+///
+/// ```
+/// use egui::{Align, Rangef};
+/// use modplayer_ui::layout::reveal_align;
+///
+/// let viewport = Rangef::new(0.0, 600.0);
+///
+/// // Already fully visible: no scroll.
+/// assert_eq!(reveal_align(Rangef::new(100.0, 200.0), viewport), None);
+///
+/// // Below the viewport, but shorter than it: egui's minimum scroll.
+/// assert_eq!(reveal_align(Rangef::new(700.0, 800.0), viewport), Some(None));
+///
+/// // Taller than the viewport: align its header to the top.
+/// assert_eq!(
+///     reveal_align(Rangef::new(50.0, 900.0), viewport),
+///     Some(Some(Align::Min))
+/// );
+/// ```
+#[must_use]
+pub fn reveal_align(card: Rangef, viewport: Rangef) -> Option<Option<Align>> {
+    if card.span() > viewport.span() {
+        Some(Some(Align::Min))
+    } else if viewport.min <= card.min && card.max <= viewport.max {
+        None
+    } else {
+        Some(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
@@ -572,5 +651,114 @@ mod tests {
         // Flush fires immediately, no debounce wait.
         assert_eq!(tracker.flush(), Some(Vec2::new(1300.0, 820.0)));
         assert_eq!(tracker.flush(), None);
+    }
+
+    // ---------------------------------------------------------------
+    // T-L1 (021-transport-bar-and-panel-layout, data-model.md §6,
+    // contracts/ui-now-playing-layout.md): reveal_align / identity_width.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn reveal_align_truth_table_examples() {
+        let viewport = Rangef::new(100.0, 500.0);
+        // Fully visible, including the boundary-touching case.
+        assert_eq!(reveal_align(Rangef::new(150.0, 450.0), viewport), None);
+        assert_eq!(reveal_align(viewport, viewport), None);
+        // Off-screen, but shorter than the viewport: egui's minimum scroll.
+        assert_eq!(
+            reveal_align(Rangef::new(600.0, 650.0), viewport),
+            Some(None)
+        );
+        assert_eq!(reveal_align(Rangef::new(0.0, 50.0), viewport), Some(None));
+        // Straddles a viewport edge, still shorter than the viewport.
+        assert_eq!(
+            reveal_align(Rangef::new(450.0, 550.0), viewport),
+            Some(None)
+        );
+        // Taller than the viewport: align the card's header to the top.
+        assert_eq!(
+            reveal_align(Rangef::new(50.0, 550.0), viewport),
+            Some(Some(Align::Min))
+        );
+    }
+
+    #[test]
+    fn identity_width_examples() {
+        assert_eq!(identity_width(1200.0), 300.0);
+        assert_eq!(identity_width(400.0), 160.0);
+        assert_eq!(identity_width(2000.0), 320.0);
+    }
+
+    // Generators use integers cast to `f32` (exact within `f32`'s integer
+    // range for these small bounds) so that `translate by dy` in
+    // `reveal_align_is_translation_invariant` is exact floating-point
+    // addition with no rounding, and the property doesn't flake on a
+    // boundary tie that only floating-point rounding would create.
+    proptest! {
+        /// P-R1: `None` implies the card is fully inside the viewport.
+        #[test]
+        fn reveal_align_none_implies_fully_visible(
+            v_min in -1_000i32..1_000,
+            v_span in 0i32..2_000,
+            c_min in -1_000i32..1_000,
+            c_span in 0i32..2_000,
+        ) {
+            let viewport = Rangef::new(v_min as f32, (v_min + v_span) as f32);
+            let card = Rangef::new(c_min as f32, (c_min + c_span) as f32);
+            if reveal_align(card, viewport).is_none() {
+                prop_assert!(viewport.min <= card.min);
+                prop_assert!(card.max <= viewport.max);
+            }
+        }
+
+        /// P-R2: a card no taller than the viewport never yields
+        /// `Some(Some(_))` — only a card taller than the viewport does.
+        #[test]
+        fn reveal_align_never_aligns_when_card_fits(
+            v_min in -1_000i32..1_000,
+            v_span in 0i32..2_000,
+            c_min in -1_000i32..1_000,
+            c_span in 0i32..2_000,
+        ) {
+            let viewport = Rangef::new(v_min as f32, (v_min + v_span) as f32);
+            let card = Rangef::new(c_min as f32, (c_min + c_span) as f32);
+            prop_assume!(card.span() <= viewport.span());
+            prop_assert_ne!(reveal_align(card, viewport), Some(Some(Align::Min)));
+        }
+
+        /// P-R3: translating both ranges by the same `dy` never changes the
+        /// result — it depends only on their relative position.
+        #[test]
+        fn reveal_align_is_translation_invariant(
+            v_min in -1_000i32..1_000,
+            v_span in 0i32..2_000,
+            c_min in -1_000i32..1_000,
+            c_span in 0i32..2_000,
+            dy in -500i32..500,
+        ) {
+            let viewport = Rangef::new(v_min as f32, (v_min + v_span) as f32);
+            let card = Rangef::new(c_min as f32, (c_min + c_span) as f32);
+            let shifted_viewport = Rangef::new((v_min + dy) as f32, (v_min + v_span + dy) as f32);
+            let shifted_card = Rangef::new((c_min + dy) as f32, (c_min + c_span + dy) as f32);
+            prop_assert_eq!(
+                reveal_align(card, viewport),
+                reveal_align(shifted_card, shifted_viewport)
+            );
+        }
+
+        /// P-I1: `identity_width`'s result always lies in `[160, 320]`.
+        #[test]
+        fn identity_width_stays_in_bounds(bar_width in -1_000.0f32..4_000.0) {
+            let width = identity_width(bar_width);
+            prop_assert!(width >= IDENTITY_WIDTH_MIN);
+            prop_assert!(width <= IDENTITY_WIDTH_MAX);
+        }
+
+        /// P-I2: `identity_width` never decreases as `bar_width` grows.
+        #[test]
+        fn identity_width_is_monotone(a in -1_000.0f32..4_000.0, b in -1_000.0f32..4_000.0) {
+            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+            prop_assert!(identity_width(lo) <= identity_width(hi));
+        }
     }
 }

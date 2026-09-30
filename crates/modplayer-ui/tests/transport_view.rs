@@ -250,7 +250,9 @@ fn render_panel(
     ctx: &Context,
     controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
 ) -> Vec<AccessNode> {
-    render_nodes_on(ctx, |ui| transport_view::show(ui, controller))
+    render_nodes_on(ctx, |ui| {
+        transport_view::show(ui, controller, &mut true);
+    })
 }
 
 fn find_all<'a>(nodes: &'a [AccessNode], role: Role, name: &str) -> Vec<&'a AccessNode> {
@@ -285,7 +287,9 @@ fn click_at(
         pressed: true,
         modifiers: Modifiers::default(),
     });
-    let output = ctx.run_ui(press, |ui| transport_view::show(ui, controller));
+    let output = ctx.run_ui(press, |ui| {
+        transport_view::show(ui, controller, &mut true);
+    });
     output.drop_without_applying_deltas();
 
     let mut release = default_input();
@@ -295,7 +299,9 @@ fn click_at(
         pressed: false,
         modifiers: Modifiers::default(),
     });
-    let output = ctx.run_ui(release, |ui| transport_view::show(ui, controller));
+    let output = ctx.run_ui(release, |ui| {
+        transport_view::show(ui, controller, &mut true);
+    });
     output.drop_without_applying_deltas();
 }
 

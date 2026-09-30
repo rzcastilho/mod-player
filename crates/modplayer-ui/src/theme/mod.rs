@@ -27,12 +27,14 @@ pub mod controls;
 pub mod markers;
 pub mod style;
 pub mod tokens;
+pub mod waveform;
 
 pub use markers::{MARKER_PALETTE, marker_color, overlay_color, paint_host_glyph};
 pub use tokens::{
     Roles, body_measure, divider_color, duration_measure, initials_font_id, mono_font_id,
     mono_text, radius, roles, secondary_font_id, section_label, space, text,
 };
+pub use waveform::{WaveformRoles, waveform_roles};
 
 /// Map the domain `Theme` to egui's `ThemePreference` and apply it to `ctx`.
 pub fn apply(ctx: &Context, theme: Theme) {

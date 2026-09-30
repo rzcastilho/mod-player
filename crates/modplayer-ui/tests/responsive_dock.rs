@@ -426,7 +426,13 @@ fn run_now_playing_frame(
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
     run_frame(ctx, input, |ui| {
-        now_playing::show(ui, controller, &mut artwork, &mut waveform, 0);
+        now_playing::show(
+            ui,
+            controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     })
 }
 
@@ -547,7 +553,13 @@ fn run_now_playing_frame_with_elisions(
     let mut artwork = ArtworkCache::new();
     let mut waveform = WaveformState::default();
     let mut output = ctx.run_ui(now_playing_input(width, height), |ui| {
-        now_playing::show(ui, controller, &mut artwork, &mut waveform, 0);
+        now_playing::show(
+            ui,
+            controller,
+            &mut artwork,
+            &mut waveform,
+            &mut modplayer_ui::section_memory::SectionMemory::default(),
+        );
     });
     let update = output
         .platform_output
@@ -879,6 +891,17 @@ fn overlay_toggle_escape_and_widen() {
     );
     let toggle = find_one(&nodes, Role::Button, &tr("plugin-dock-panels-toggle"));
     assert_eq!(toggle.toggled, Some(Toggled::False));
+    // 021-transport-bar-and-panel-layout: the transport bar is now an
+    // `egui::Panel::top`, whose reported outer height (and so its
+    // content's own clip rect) settles from a first-pass estimate to the
+    // real, measured height one frame after it is first shown on a fresh
+    // `Context` — exactly as a real session's first couple of frames
+    // would, well before any user's first click. One more render here
+    // lets that settle before a synthetic click is sent, the same way
+    // every real pointer click in the app already arrives on an
+    // already-drawn frame.
+    let (_, nodes) = render_now_playing(&ctx, &mut controller, 960.0, 640.0);
+    let toggle = find_one(&nodes, Role::Button, &tr("plugin-dock-panels-toggle"));
     let toggle_pos = toggle.bounds.expect("the toggle must have bounds").center();
 
     // Activate: the overlay opens with both panels (their own content and
@@ -1135,5 +1158,58 @@ fn pseudo_localization_no_elision_or_overlap() {
             );
         }
         assert_no_overlapping_interactive_rects(&nodes, "960x640 overlay");
+    });
+}
+
+/// T-B5 (021-transport-bar-and-panel-layout, contract B5, FR-017,
+/// NFR-7.4): at 960×640 with +40% pseudo-localisation, and at a docked
+/// width of 240 (`DOCK_WIDTH_MIN`), no *transport bar* control label is
+/// elided (only the identity group's title/artist may truncate, contract
+/// B4) and no two of the bar's own interactive rects overlap. Mirrors
+/// `pseudo_localization_no_elision_or_overlap` above, but scoped to the
+/// bar's own controls rather than the plugin dock's.
+#[test]
+fn bar_controls_no_elision_or_overlap_under_pseudo_localization() {
+    let (mut controller, _dir, _psd, _tsd) = launch_ui_panel("b5-bar-pseudo");
+    controller.set_dock_width(DOCK_WIDTH_MIN);
+
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+
+    with_pseudo_expansion(40, || {
+        // `tr` itself is padded while this closure runs (T006), so the
+        // control labels compared against below must be resolved here
+        // too, not hoisted above `with_pseudo_expansion`.
+        let bar_labels = [
+            tr("transport-skip-back"),
+            tr("transport-play"),
+            tr("transport-stop"),
+            tr("transport-skip-forward"),
+            tr("queue-toggle"),
+            tr("effects-toggle"),
+            tr("transport-toggle"),
+        ];
+
+        // (a) ~1100×800, docked at 240 (research R4).
+        let (nodes, elided) =
+            run_now_playing_frame_with_elisions(&ctx, &mut controller, 1100.0, 800.0);
+        for text in &elided {
+            assert!(
+                !bar_labels.contains(text),
+                "a bar control label elided at 1100×800 docked-240 under +40% pseudo-localization: {text:?}"
+            );
+        }
+        assert_no_overlapping_interactive_rects(&nodes, "1100x800 docked-240 (bar)");
+
+        // (b) 960×640.
+        let (nodes, elided) =
+            run_now_playing_frame_with_elisions(&ctx, &mut controller, 960.0, 640.0);
+        for text in &elided {
+            assert!(
+                !bar_labels.contains(text),
+                "a bar control label elided at 960x640 under +40% pseudo-localization: {text:?}"
+            );
+        }
+        assert_no_overlapping_interactive_rects(&nodes, "960x640 (bar)");
     });
 }

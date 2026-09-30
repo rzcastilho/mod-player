@@ -100,6 +100,7 @@ fn store_fold_peaks_mono_min_max_quantised() {
         PeakBucket {
             min: expected_quantise(-1.0),
             max: expected_quantise(1.0),
+            rms: expected_rms(&[(1.0, -1.0), (-0.5, 0.25), (0.0, 0.0), (0.6, -1.0)]),
         }
     );
 
@@ -121,6 +122,7 @@ fn store_fold_peaks_mono_min_max_quantised() {
         PeakBucket {
             min: expected_quantise(-0.3),
             max: expected_quantise(0.9),
+            rms: expected_rms(&[(0.2, 0.2), (0.2, 0.2), (0.9, -0.3), (0.1, 0.1)]),
         }
     );
 }
@@ -183,6 +185,99 @@ fn store_debug_is_redacted() {
     assert!(debug.contains("sample_rate"));
     assert!(debug.contains("covered_frames"));
     assert!(!debug.contains(&telltale.to_string()));
+}
+
+/// `round(clamp(sqrt((Σl²+Σr²)/(2n)),0,1)×127)` (022-waveform-legibility,
+/// contracts/analysis-rms.md AR1) — duplicated from the documented formula
+/// so the vector tests verify against the contract, not the
+/// implementation's own helper.
+fn expected_rms(pairs: &[(f32, f32)]) -> u8 {
+    let n = pairs.len() as f64;
+    let sum_sq: f64 = pairs
+        .iter()
+        .map(|&(l, r)| f64::from(l) * f64::from(l) + f64::from(r) * f64::from(r))
+        .sum();
+    let rms = (sum_sq / (2.0 * n)).sqrt().clamp(0.0, 1.0);
+    (rms * 127.0).round() as u8
+}
+
+/// silence → `rms == 0` (AR1 vector 1).
+#[test]
+fn fold_peaks_rms_silence_is_zero() {
+    let store = DecodedStore::new(44_100, 4);
+    let buf = vec![0.0f32; 8];
+    store.write_frames(0, &buf);
+    let mut out = vec![PeakBucket::default(); 1];
+    let count = store.fold_peaks(0, 4, &mut out);
+    assert_eq!(count, 1);
+    assert_eq!(out[0].rms, 0);
+}
+
+/// DC `0.5` on both channels → `rms == 64` (`round(0.5×127)=63.5→64`, AR1
+/// vector 2).
+#[test]
+fn fold_peaks_rms_dc_half_rounds_to_64() {
+    let store = DecodedStore::new(44_100, 4);
+    let buf = vec![0.5f32; 8];
+    store.write_frames(0, &buf);
+    let mut out = vec![PeakBucket::default(); 1];
+    let count = store.fold_peaks(0, 4, &mut out);
+    assert_eq!(count, 1);
+    assert_eq!(out[0].rms, 64);
+}
+
+/// Full-scale square `±1.0` → `rms == 127` (AR1 vector 3).
+#[test]
+fn fold_peaks_rms_full_scale_square_is_127() {
+    let store = DecodedStore::new(44_100, 4);
+    let buf = vec![1.0, -1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0];
+    store.write_frames(0, &buf);
+    let mut out = vec![PeakBucket::default(); 1];
+    let count = store.fold_peaks(0, 4, &mut out);
+    assert_eq!(count, 1);
+    assert_eq!(out[0].rms, 127);
+}
+
+/// Out-of-phase stereo `L = +0.5, R = -0.5` → `rms == 64`, not `0` — RMS
+/// folds both channels' energy independently, it does not sum/cancel them
+/// (AR1 vector 4).
+#[test]
+fn fold_peaks_rms_out_of_phase_stereo_is_64_not_zero() {
+    let store = DecodedStore::new(44_100, 4);
+    let buf = vec![0.5, -0.5, 0.5, -0.5, 0.5, -0.5, 0.5, -0.5];
+    store.write_frames(0, &buf);
+    let mut out = vec![PeakBucket::default(); 1];
+    let count = store.fold_peaks(0, 4, &mut out);
+    assert_eq!(count, 1);
+    assert_eq!(out[0].rms, 64);
+}
+
+proptest! {
+    /// `rms ≤ max(|min|, |max|)` for any bucket content (AR1, invariant
+    /// B1) — RMS energy never exceeds the peak magnitude.
+    #[test]
+    fn fold_peaks_rms_never_exceeds_peak_magnitude(
+        samples in prop::collection::vec((-1.0f32..=1.0, -1.0f32..=1.0), 1..32),
+    ) {
+        let n = samples.len() as u64;
+        let store = DecodedStore::new(44_100, n);
+        let mut buf = Vec::with_capacity(samples.len() * 2);
+        for &(l, r) in &samples {
+            buf.push(l);
+            buf.push(r);
+        }
+        store.write_frames(0, &buf);
+        let mut out = vec![PeakBucket::default(); 1];
+        let count = store.fold_peaks(0, n as u32, &mut out);
+        prop_assert_eq!(count, 1);
+        let bucket = out[0];
+        let peak_mag = bucket.min.unsigned_abs().max(bucket.max.unsigned_abs());
+        prop_assert!(bucket.rms <= peak_mag);
+
+        // Cross-check against the documented formula directly.
+        let expected = expected_rms(&samples);
+        prop_assert!((i32::from(bucket.rms) - i32::from(expected)).abs() <= 1);
+    }
 }
 
 proptest! {

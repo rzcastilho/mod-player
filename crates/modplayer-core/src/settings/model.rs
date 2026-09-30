@@ -150,10 +150,11 @@ pub struct AudioSettings {
     /// `disclosure`'s own precedent.
     pub getting_started_dismissed: bool,
     /// `[now_playing_panels]` (016-list-row-and-panel-components, FR-019/
-    /// FR-020): the Effect Chain/Transport/Queue panels' open/closed
-    /// state. Absent ⇒ all three `false` (every panel closed), matching
-    /// today's `unwrap_or(false)` egui-memory lookups. Markers has no
-    /// toggle (FR-021) and is not represented here.
+    /// FR-020; 021-transport-bar-and-panel-layout, FR-006, data-model.md
+    /// §2): the Markers/Effect Chain/Transport/Queue panels' open/closed
+    /// state. Absent ⇒ the three original panels `false` (every panel
+    /// closed), matching today's `unwrap_or(false)` egui-memory lookups,
+    /// and `markers_open` `true` (021 research R10).
     pub now_playing_panels: NowPlayingPanels,
     /// `[window]` (018-window-sizing-and-responsive-dock, contract W1/W2):
     /// the main window's restored inner size and the plugin dock's width.
@@ -191,15 +192,29 @@ impl Default for AudioSettings {
     }
 }
 
-/// The Effect Chain/Transport/Queue panels' open/closed state
-/// (016-list-row-and-panel-components, FR-019/FR-020, data-model.md §11):
-/// the domain shape `AudioSettings` carries. Markers has no toggle
-/// (FR-021).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// The Markers/Effect Chain/Transport/Queue panels' open/closed state
+/// (016-list-row-and-panel-components, FR-019/FR-020, data-model.md §11;
+/// 021-transport-bar-and-panel-layout, FR-006, data-model.md §2): the
+/// domain shape `AudioSettings` carries. `Default` is hand-written, not
+/// derived (V1), so `markers_open` defaults to `true` while the other
+/// three default to `false`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NowPlayingPanels {
     pub effect_chain_open: bool,
     pub transport_open: bool,
     pub queue_open: bool,
+    pub markers_open: bool,
+}
+
+impl Default for NowPlayingPanels {
+    fn default() -> Self {
+        Self {
+            effect_chain_open: false,
+            transport_open: false,
+            queue_open: false,
+            markers_open: true,
+        }
+    }
 }
 
 /// `[markers] nudge_step_ms`'s default (data-model.md §5).
@@ -574,9 +589,12 @@ pub struct RawOnboarding {
 }
 
 /// The `[now_playing_panels]` section (016-list-row-and-panel-components,
-/// FR-019/FR-020): an optional table so older files (with no such
-/// section) load every panel closed.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// FR-019/FR-020; 021-transport-bar-and-panel-layout, FR-006, data-
+/// model.md §2, contract N1): an optional table so older files (with no
+/// such section) load the three original panels closed and `markers_open`
+/// `true`. `Default` is hand-written, not derived (V1), to match
+/// `NowPlayingPanels`'s own default.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawNowPlayingPanels {
     #[serde(default)]
     pub effect_chain_open: bool,
@@ -584,6 +602,19 @@ pub struct RawNowPlayingPanels {
     pub transport_open: bool,
     #[serde(default)]
     pub queue_open: bool,
+    #[serde(default = "default_true")]
+    pub markers_open: bool,
+}
+
+impl Default for RawNowPlayingPanels {
+    fn default() -> Self {
+        Self {
+            effect_chain_open: false,
+            transport_open: false,
+            queue_open: false,
+            markers_open: default_true(),
+        }
+    }
 }
 
 /// The `[window]` section's wire shape (018-window-sizing-and-responsive-
@@ -702,6 +733,7 @@ impl RawSettings {
                 effect_chain_open: settings.now_playing_panels.effect_chain_open,
                 transport_open: settings.now_playing_panels.transport_open,
                 queue_open: settings.now_playing_panels.queue_open,
+                markers_open: settings.now_playing_panels.markers_open,
             },
             // Contract W1: save always writes all three `[window]` keys
             // with the current (already-clamped) shadow values.
@@ -903,6 +935,7 @@ impl RawSettings {
                 effect_chain_open: self.now_playing_panels.effect_chain_open,
                 transport_open: self.now_playing_panels.transport_open,
                 queue_open: self.now_playing_panels.queue_open,
+                markers_open: self.now_playing_panels.markers_open,
             },
             window,
             schema_version: self.schema_version,
@@ -1039,10 +1072,12 @@ mod tests {
         assert_eq!(settings.disclosure, None);
     }
 
-    /// P4 (016-list-row-and-panel-components, FR-020, Edge Case): a
-    /// `settings.toml` with no `[now_playing_panels]` section loads all
-    /// three panels closed — mirrors `plugin_panels_round_trip`'s own
-    /// "absent section" precedent.
+    /// P4 (016-list-row-and-panel-components, FR-020, Edge Case), extended
+    /// by T-N1 (021-transport-bar-and-panel-layout, contracts/settings-
+    /// now-playing-panels.md): a `settings.toml` with no
+    /// `[now_playing_panels]` section loads the three original panels
+    /// closed and `markers_open` open — mirrors
+    /// `plugin_panels_round_trip`'s own "absent section" precedent.
     #[test]
     fn now_playing_panels_default_to_closed_when_absent() {
         let (settings, invalid, dropped) = RawSettings::default().into_settings();
@@ -1052,10 +1087,33 @@ mod tests {
         assert!(!settings.now_playing_panels.effect_chain_open);
         assert!(!settings.now_playing_panels.transport_open);
         assert!(!settings.now_playing_panels.queue_open);
+        assert!(settings.now_playing_panels.markers_open);
     }
 
-    /// P6: the three panels persist and restore independently, in both
-    /// directions — changing one leaves the other two untouched.
+    /// T-N1 (021-transport-bar-and-panel-layout, contracts/settings-now-
+    /// playing-panels.md N1): the section present but `markers_open`
+    /// itself absent from the TOML table still loads `true` — a plain
+    /// `RawSettings::default()` only exercises the "absent section" case
+    /// (`#[serde(default)]` on the field), not this one (`#[serde(default
+    /// = "default_true")]` on `markers_open` itself), so this test parses
+    /// real TOML.
+    #[test]
+    fn markers_open_defaults_to_true_when_key_absent_but_section_present() {
+        let raw: RawSettings = toml::from_str("[now_playing_panels]\nqueue_open = true\n")
+            .unwrap_or_else(|e| unreachable!("parse: {e}"));
+        let (settings, invalid, dropped) = raw.into_settings();
+        assert!(invalid.is_empty());
+        assert!(dropped.is_empty());
+        assert!(settings.now_playing_panels.markers_open);
+        assert!(settings.now_playing_panels.queue_open);
+    }
+
+    /// P6, extended by T-N2 (021-transport-bar-and-panel-layout,
+    /// contracts/settings-now-playing-panels.md N2): the four panels
+    /// persist and restore independently, in both directions — turning
+    /// one flag on from the defaults leaves the other three untouched,
+    /// and turning one back off from all-open leaves the other three
+    /// untouched.
     #[test]
     fn now_playing_panels_round_trip_independently() {
         let mut only_effects = AudioSettings::default();
@@ -1068,6 +1126,7 @@ mod tests {
         assert!(round_tripped.now_playing_panels.effect_chain_open);
         assert!(!round_tripped.now_playing_panels.transport_open);
         assert!(!round_tripped.now_playing_panels.queue_open);
+        assert!(round_tripped.now_playing_panels.markers_open);
 
         let mut transport_and_queue = AudioSettings::default();
         transport_and_queue.now_playing_panels.transport_open = true;
@@ -1080,6 +1139,76 @@ mod tests {
         assert!(!round_tripped.now_playing_panels.effect_chain_open);
         assert!(round_tripped.now_playing_panels.transport_open);
         assert!(round_tripped.now_playing_panels.queue_open);
+        assert!(round_tripped.now_playing_panels.markers_open);
+
+        // Markers closed alone (it defaults open, so this is its own
+        // "turn one on from default" analog): the other three stay
+        // untouched.
+        let mut only_markers_closed = AudioSettings::default();
+        only_markers_closed.now_playing_panels.markers_open = false;
+        let raw = RawSettings::from_settings(&only_markers_closed);
+        let (round_tripped, invalid, dropped) = raw.into_settings();
+        assert!(invalid.is_empty());
+        assert!(dropped.is_empty());
+        assert_eq!(round_tripped, only_markers_closed);
+        assert!(!round_tripped.now_playing_panels.markers_open);
+        assert!(!round_tripped.now_playing_panels.effect_chain_open);
+        assert!(!round_tripped.now_playing_panels.transport_open);
+        assert!(!round_tripped.now_playing_panels.queue_open);
+
+        // The other direction: all four open together round-trips intact
+        // too (V5/N2 — independence holds from either starting point).
+        let all_open = AudioSettings {
+            now_playing_panels: NowPlayingPanels {
+                effect_chain_open: true,
+                transport_open: true,
+                queue_open: true,
+                markers_open: true,
+            },
+            ..AudioSettings::default()
+        };
+        let raw = RawSettings::from_settings(&all_open);
+        let (round_tripped, invalid, dropped) = raw.into_settings();
+        assert!(invalid.is_empty());
+        assert!(dropped.is_empty());
+        assert_eq!(round_tripped, all_open);
+    }
+
+    // T-N5 (021-transport-bar-and-panel-layout, contracts/settings-now-
+    // playing-panels.md N5, Constitution VIII "state serialisation"): for
+    // all 16 combinations of the four `NowPlayingPanels` bools, a
+    // `from_settings` -> `toml::to_string` -> `toml::from_str` ->
+    // `into_settings` round trip preserves the combination exactly, with
+    // no warning. This exercises `into_settings`/serde directly, distinct
+    // from `now_playing_panels_round_trip_proptest` in `tests/settings.rs`
+    // (Constitution VIII precedent at l.1241 above), which drives a real
+    // `SettingsStore::save`/`load`.
+    proptest::proptest! {
+        #[test]
+        fn now_playing_panels_serde_round_trip_all_combinations(
+            effect_chain_open in proptest::prelude::any::<bool>(),
+            transport_open in proptest::prelude::any::<bool>(),
+            queue_open in proptest::prelude::any::<bool>(),
+            markers_open in proptest::prelude::any::<bool>(),
+        ) {
+            let settings = AudioSettings {
+                now_playing_panels: NowPlayingPanels {
+                    effect_chain_open,
+                    transport_open,
+                    queue_open,
+                    markers_open,
+                },
+                ..AudioSettings::default()
+            };
+            let raw = RawSettings::from_settings(&settings);
+            let serialized = toml::to_string(&raw).unwrap_or_else(|e| unreachable!("serialize: {e}"));
+            let reparsed: RawSettings =
+                toml::from_str(&serialized).unwrap_or_else(|e| unreachable!("parse: {e}"));
+            let (round_tripped, invalid, dropped) = reparsed.into_settings();
+            proptest::prop_assert!(invalid.is_empty());
+            proptest::prop_assert!(dropped.is_empty());
+            proptest::prop_assert_eq!(round_tripped.now_playing_panels, settings.now_playing_panels);
+        }
     }
 
     #[test]

@@ -28,11 +28,13 @@ use egui::{
 use modplayer_audio_source::{
     AlbumId, AlbumRef, ArtistId, ArtistRef, Availability, PlaylistId, PlaylistRef, TrackRef,
 };
-use modplayer_core::{tr, tr_args};
+use modplayer_core::{Origin, QueueRow, tr, tr_args};
 
 use crate::actions::{self, Claim};
 use crate::artwork::{ArtworkCache, ArtworkState};
 use crate::theme;
+use crate::theme::controls::Variant;
+use crate::widgets::controls::button;
 use crate::widgets::initials::initials_placeholder;
 use crate::widgets::skeleton::{ROW_HEIGHT, WIDE_ROW_HEIGHT};
 
@@ -457,8 +459,21 @@ fn artwork_decision(state: Option<ArtworkState>, name: &str) -> ArtworkDecision 
 /// square while `Loading`, and the initials placeholder on `Failed` or no
 /// URL at all (contracts/ui-surface.md §6, FR-020).
 fn draw_artwork(ui: &mut Ui, cache: &mut ArtworkCache, entity: &RowEntity) {
-    let state = artwork_url(entity).map(|url| cache.get(ui.ctx(), url));
-    match artwork_decision(state, artwork_name(entity)) {
+    draw_artwork_url(ui, cache, artwork_url(entity), artwork_name(entity));
+}
+
+/// The URL/name half of [`draw_artwork`], factored out so callers that
+/// don't have a `RowEntity` — the Queue panel's `queue_row` (021 research
+/// R8) — can draw the same 40 px artwork square from a raw URL and
+/// placeholder name.
+pub(crate) fn draw_artwork_url(
+    ui: &mut Ui,
+    cache: &mut ArtworkCache,
+    url: Option<&str>,
+    name: &str,
+) {
+    let state = url.map(|url| cache.get(ui.ctx(), url));
+    match artwork_decision(state, name) {
         ArtworkDecision::Texture(texture_id) => {
             ui.add(egui::Image::from_texture((
                 texture_id,
@@ -828,6 +843,303 @@ pub fn list_row(
     }
 
     None
+}
+
+// ---------------------------------------------------------------------
+// `queue_row` (021-transport-bar-and-panel-layout, data-model.md §8,
+// contracts/queue-row.md Q1-Q11, research R8)
+// ---------------------------------------------------------------------
+
+/// Actions [`queue_row`] can report back to the caller (data-model.md §8,
+/// contract Q8-Q10): the caller applies exactly one of these to the
+/// controller, keyed by the row's own `uid` — `queue_row` never touches
+/// `PlaybackController` itself (design note 6, mirrors [`list_row`] /
+/// [`RowEvent`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueRowAction {
+    MoveUp,
+    MoveDown,
+    PlayNext,
+    Remove,
+}
+
+/// The text column's minimum width (contract Q3) below which the row's
+/// four quiet actions move to a second line beneath it, rather than being
+/// elided or hidden (FR-017).
+const QUEUE_TEXT_MIN_WIDTH: f32 = 120.0;
+
+/// `queue_row`'s per-row action set, in display order (contract Q8/Q9):
+/// Play next is absent on the current row; the other three are always
+/// present — unchanged from `queue_view.rs`'s pre-021 behaviour.
+fn queue_row_actions(row: &QueueRow) -> Vec<(&'static str, QueueRowAction)> {
+    let mut actions = vec![
+        ("queue-move-up", QueueRowAction::MoveUp),
+        ("queue-move-down", QueueRowAction::MoveDown),
+    ];
+    if !row.is_current {
+        actions.push(("queue-play-next", QueueRowAction::PlayNext));
+    }
+    actions.push(("queue-remove", QueueRowAction::Remove));
+    actions
+}
+
+/// The origin/availability badges a row's artist line carries (contract
+/// Q1) — unchanged from `queue_view.rs`'s pre-021 behaviour.
+fn queue_badges(row: &QueueRow) -> Vec<&'static str> {
+    let mut badges = Vec::new();
+    if row.origin == Origin::PlayNext {
+        badges.push("queue-badge-play-next");
+    }
+    if row.unavailable {
+        badges.push("queue-badge-unavailable");
+    }
+    badges
+}
+
+/// A label's rendered `Body`-style width (018's own `wrap_switch_before`
+/// pattern) — enough to decide whether the row's actions fit on the main
+/// line (contract Q3), not a pixel-exact layout.
+fn label_width(ui: &Ui, text: &str) -> f32 {
+    egui::WidgetText::from(text)
+        .into_galley(ui, None, f32::INFINITY, egui::TextStyle::Body)
+        .size()
+        .x
+}
+
+/// [`label_width`] plus the padding an `egui::Button` (the [`button`]
+/// widget's base) adds around its label.
+fn button_width(ui: &Ui, text: &str) -> f32 {
+    label_width(ui, text) + 2.0 * ui.spacing().button_padding.x
+}
+
+/// `queue_row`'s accessible name (contract Q11): `queue-row-name`, or for
+/// the current row `queue-row-name-current` — both externalised, with a
+/// Fluent select on `$has_artist` so an artist-less row's name doesn't
+/// carry a bare trailing comma (FR-013, FR-016).
+fn queue_row_name(row: &QueueRow) -> String {
+    let key = if row.is_current {
+        "queue-row-name-current"
+    } else {
+        "queue-row-name"
+    };
+    tr_args(
+        key,
+        &[
+            ("title", row.title.clone()),
+            ("artist", row.artist.clone()),
+            (
+                "has_artist",
+                if row.artist.is_empty() { "no" } else { "yes" }.to_string(),
+            ),
+        ],
+    )
+}
+
+/// The Queue panel's row widget (contracts/queue-row.md Q1-Q11, research
+/// R8): a sibling of [`list_row`] sharing its primitives (`ARTWORK_SIZE`,
+/// [`draw_artwork_url`], `duration_measure`, `theme::mono_text`) rather
+/// than going through `RowEntity`/`list_row` itself — there is no "…"
+/// menu, no selection fill, and the four move/play-next/remove actions
+/// are always visible instead of hidden in a menu (research R8's
+/// rationale).
+///
+/// Leading → trailing: 40 px artwork; the text column (for the current
+/// row, a ▶ glyph then the title; the artist and its badges below,
+/// `.weak()`); the four quiet actions, each its own tab stop; the
+/// 1-based `position`, right-aligned in a `duration_measure`-wide column,
+/// in `theme::mono_text`. When the text column would drop below
+/// [`QUEUE_TEXT_MIN_WIDTH`], the actions move to a second line beneath
+/// the text column instead of eliding (contract Q3, FR-017). The current
+/// row also gets a `theme::controls::nav_indicator`-stroke accent bar the
+/// full height of the row, painted on the row's leading edge — a shape
+/// and a position, not colour alone (contract Q5/Q6, FR-013/FR-014).
+///
+/// Applies nothing itself: the caller matches the returned
+/// [`QueueRowAction`] and drives `PlaybackController` (design note 6,
+/// mirrors [`list_row`]).
+///
+/// `QueueRow`'s `uid` is only ever minted by `Queue` itself (no public
+/// constructor, by design), so this example builds one the same way every
+/// caller does: through a live `PlaybackController`.
+///
+/// ```
+/// # egui::__run_test_ui(|ui| {
+/// use modplayer_audio_io::FakeBackend;
+/// use modplayer_audio_source::{Availability, TrackId, TrackRef};
+/// use modplayer_audio_source_synthetic::SyntheticHost;
+/// use modplayer_core::PlaybackController;
+/// use modplayer_core::settings::SettingsStore;
+/// use modplayer_ui::artwork::ArtworkCache;
+/// use modplayer_ui::rows::queue_row;
+///
+/// let path = std::env::temp_dir().join(format!(
+///     "modplayer-ui-doctest-queue-row-{}.toml",
+///     std::process::id()
+/// ));
+/// let mut controller = PlaybackController::new(
+///     FakeBackend::new(vec![]),
+///     SyntheticHost::new(44_100),
+///     SettingsStore::with_path(path),
+/// );
+/// controller.queue_replace(vec![TrackRef::new(
+///     TrackId::new("spotify:track:a").expect("valid"),
+///     "Song",
+///     vec!["Artist".to_string()],
+///     None,
+///     None,
+///     180_000,
+///     Availability::Available,
+/// )]);
+/// let view = controller.queue_view();
+/// let mut cache = ArtworkCache::new();
+/// let _ = queue_row(ui, &mut cache, &view.items[0], 1);
+/// # });
+/// ```
+pub fn queue_row(
+    ui: &mut Ui,
+    artwork: &mut ArtworkCache,
+    row: &QueueRow,
+    position: usize,
+) -> Option<QueueRowAction> {
+    let row_id = ui.id().with(("queue-row", row.uid));
+    let name = queue_row_name(row);
+    let actions = queue_row_actions(row);
+    let badges = queue_badges(row);
+    let spacing = ui.spacing().item_spacing.x;
+    let duration_width = theme::duration_measure(ui.ctx());
+
+    let actions_width: f32 = actions
+        .iter()
+        .map(|(key, _)| button_width(ui, &tr(key)))
+        .sum::<f32>()
+        + spacing * actions.len().saturating_sub(1) as f32;
+
+    let available = ui.available_width();
+    let inline_text_width =
+        (available - ARTWORK_SIZE - spacing - actions_width - spacing - duration_width - spacing)
+            .max(0.0);
+    let wrap = inline_text_width < QUEUE_TEXT_MIN_WIDTH;
+    let text_width = if wrap {
+        (available - ARTWORK_SIZE - spacing - duration_width - spacing).max(0.0)
+    } else {
+        inline_text_width
+    };
+
+    let action_row_height = ui.spacing().interact_size.y;
+    let height = if wrap {
+        ROW_HEIGHT + spacing + action_row_height
+    } else {
+        ROW_HEIGHT
+    };
+
+    let (_auto_id, rect) = ui.allocate_space(Vec2::new(available, height));
+    let where_to_put_background = ui.painter().add(egui::Shape::Noop);
+    let response = ui.interact(rect, row_id, Sense::hover());
+
+    let mut action = None;
+    if ui.is_rect_visible(rect) {
+        let roles = theme::roles(ui.visuals());
+        let fill = if response.is_pointer_button_down_on() {
+            Some(
+                roles
+                    .surface_base
+                    .blend(theme::controls::pressed_fill(roles)),
+            )
+        } else if response.hovered() {
+            Some(roles.surface_base.blend(theme::controls::hover_fill(roles)))
+        } else {
+            None
+        };
+        if let Some(fill) = fill {
+            ui.painter().set(
+                where_to_put_background,
+                egui::Shape::rect_filled(rect, egui::CornerRadius::ZERO, fill),
+            );
+        }
+
+        let mut content_ui = ui.new_child(
+            UiBuilder::new()
+                .max_rect(rect)
+                .layout(Layout::top_down(Align::Min)),
+        );
+        content_ui.allocate_ui_with_layout(
+            Vec2::new(available, ROW_HEIGHT),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                draw_artwork_url(ui, artwork, row.artwork_url.as_deref(), &row.artwork_name);
+
+                ui.scope(|ui| {
+                    ui.set_max_width(text_width);
+                    ui.set_min_width(text_width);
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            if row.is_current {
+                                ui.label(
+                                    RichText::new(tr("queue-playing-glyph"))
+                                        .color(theme::roles(ui.visuals()).accent),
+                                );
+                            }
+                            line(ui, title_text(ui, &row.title));
+                        });
+                        if !row.artist.is_empty() || !badges.is_empty() {
+                            ui.horizontal(|ui| {
+                                if !row.artist.is_empty() {
+                                    line(ui, RichText::new(row.artist.clone()).weak());
+                                }
+                                for key in &badges {
+                                    ui.label(RichText::new(tr(key)).weak());
+                                }
+                            });
+                        }
+                    });
+                });
+
+                if !wrap {
+                    for (key, act) in &actions {
+                        if button(ui, Variant::Quiet, tr(key)).clicked() {
+                            action = Some(*act);
+                        }
+                    }
+                }
+
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(duration_width, ROW_HEIGHT),
+                        Layout::right_to_left(Align::Center),
+                        |ui| {
+                            ui.add(Label::new(theme::mono_text(position.to_string())));
+                        },
+                    );
+                });
+            },
+        );
+
+        if wrap {
+            content_ui.add_space(spacing);
+            content_ui.horizontal(|ui| {
+                ui.add_space(ARTWORK_SIZE + spacing);
+                for (key, act) in &actions {
+                    if button(ui, Variant::Quiet, tr(key)).clicked() {
+                        action = Some(*act);
+                    }
+                }
+            });
+        }
+
+        if row.is_current {
+            ui.painter().line_segment(
+                [rect.left_top(), rect.left_bottom()],
+                theme::controls::nav_indicator(roles),
+            );
+        }
+    }
+
+    ui.ctx().accesskit_node_builder(response.id, |b| {
+        b.set_role(Role::ListItem);
+        b.set_label(name.clone());
+    });
+
+    action
 }
 
 /// Draw `count` rows of `row_height` inside a vertical scroll area, calling

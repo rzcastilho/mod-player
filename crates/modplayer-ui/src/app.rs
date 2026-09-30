@@ -657,10 +657,11 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
     /// independent of the launch gate (`settings::show`'s "Test output
     /// device" hands one back regardless of confirmation state). Returns
     /// the `section_memory::ViewKey` of whichever memory-backed view was
-    /// drawn this frame (020-shell-navigation-and-gates, US3), or `None`
-    /// for the Device Check preview and Now Playing (which has none,
-    /// research.md R5) — the caller (`App::ui`) hands this straight to
-    /// `SectionMemory::end_frame`.
+    /// drawn this frame (020-shell-navigation-and-gates, US3; Now Playing's
+    /// own `ViewKey::NowPlaying`, added by 021-transport-bar-and-panel-
+    /// layout, research R2, follows this same pattern), or `None` only for
+    /// the Device Check preview — the caller (`App::ui`) hands this
+    /// straight to `SectionMemory::end_frame`.
     fn show_main(&mut self, ui: &mut Ui) -> Option<section_memory::ViewKey> {
         if let Some(mut screen) = self.device_check.take() {
             if !screen.show(ui, &mut self.controller) {
@@ -697,9 +698,9 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
                     &mut self.controller,
                     &mut self.artwork,
                     &mut self.waveform,
-                    self.section_memory.epoch(),
+                    &mut self.section_memory,
                 );
-                None
+                Some(section_memory::ViewKey::NowPlaying)
             }
             // 009 US4 (T106, contracts/ui-plugins.md §2): a 500 ms repaint
             // request keeps the live CPU/memory gauges moving while the

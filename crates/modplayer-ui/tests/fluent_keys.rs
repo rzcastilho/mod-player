@@ -110,7 +110,6 @@ const PLAYBACK_KEYS: &[&str] = &[
     "queue-repeat-off",
     "queue-repeat-one",
     "queue-repeat-all",
-    "queue-current",
     "queue-badge-play-next",
     "queue-badge-unavailable",
     "queue-move-up",
@@ -118,6 +117,9 @@ const PLAYBACK_KEYS: &[&str] = &[
     "queue-play-next",
     "queue-remove",
     "queue-empty",
+    // 021-transport-bar-and-panel-layout (contract Q5): the current row's
+    // leading glyph, a shape rather than colour alone.
+    "queue-playing-glyph",
     // Stream/session/subscription notifications and their actions.
     "transfer-request-failed",
     "stream-reconnect-warning",
@@ -168,7 +170,27 @@ const PLAYBACK_KEYS: &[&str] = &[
     // name.
     "marker-role-point",
     "markers-rename",
+    // 023-markers-panel-structure (contract P10): the three group
+    // headings' bare labels, the name-cell placeholder, and the four
+    // always-visible row-action accessible names/tooltips — en-US's
+    // value for each ignores the `$count` the code always passes (see
+    // `markers-group-heading` below for the templated whole).
+    "markers-group-loop",
+    "markers-group-points",
+    "markers-group-cues",
+    "markers-name-placeholder",
+    "markers-jump",
+    "markers-nudge-earlier",
+    "markers-nudge-later",
+    "markers-remove",
+    "markers-palette",
 ];
+
+/// 021-transport-bar-and-panel-layout (contract Q7, Q11): the Queue row's
+/// `Role::ListItem` accessible name, templated with `$title`/`$artist` and
+/// a `$has_artist` Fluent selector (`"yes"`/anything-else). Replaces the
+/// removed `queue-current` prefix key.
+const QUEUE_ROW_NAME_ARG_KEYS: &[&str] = &["queue-row-name", "queue-row-name-current"];
 
 /// Now Playing / queue / transfer-banner keys that take a Fluent
 /// placeholder — resolved via `tr_args` with a stand-in value.
@@ -178,6 +200,9 @@ const PLAYBACK_ARG_KEYS: &[&str] = &[
     "now-playing-album",
     "queue-row",
     "banner-playing-elsewhere",
+    // 021-transport-bar-and-panel-layout (contract B4): the pinned
+    // transport bar's identity group AccessKit label.
+    "now-playing-bar-identity",
 ];
 
 /// 005-now-playing-waveform's waveform-detail-window key: templated with
@@ -209,8 +234,16 @@ const PLAYBACK_DEFAULT_NAME_ARG_KEYS: &[&str] = &["marker-default-name"];
 const PLAYBACK_INDEX_ARG_KEYS: &[&str] = &["markers-color"];
 
 /// 006 US4's `marker-role-cue`: templated with `$slot` (contracts/
-/// ui-markers.md §3/§4 — the cue glyph/row role label).
-const PLAYBACK_SLOT_ARG_KEYS: &[&str] = &["marker-role-cue"];
+/// ui-markers.md §3/§4 — the cue glyph/row role label). 023-markers-
+/// panel-structure adds `markers-cue-empty`, the empty cue-slot row's
+/// own `$slot`-templated text (contract P8).
+const PLAYBACK_SLOT_ARG_KEYS: &[&str] = &["marker-role-cue", "markers-cue-empty"];
+
+/// 023-markers-panel-structure's `markers-group-heading` (contract P2,
+/// research R4): the group heading's accessible name, templated with
+/// both `$label` and `$count` — the only key this feature adds that is
+/// built from the whole, not the bare per-group label above.
+const PLAYBACK_GROUP_HEADING_ARG_KEYS: &[&str] = &["markers-group-heading"];
 
 /// Settings › Playback (device name) keys added by
 /// 003-streaming-playback-and-queue (T062/T063/T064; contracts/ui-
@@ -322,6 +355,11 @@ const CONTROLS_ARG_KEYS: &[&str] = &[
     "controls-conflict-with-host",
     "controls-conflict-with-plugin",
     "controls-plugin-group",
+    // 021-transport-bar-and-panel-layout (contract C1):
+    // `widgets::controls::collapsible_panel_card`'s header disclosure
+    // button accessible name.
+    "panel-collapse",
+    "panel-expand",
 ];
 
 /// `effects.ftl` keys added by 008 Phase 4 (US2), Phase 5 (US3) and
@@ -379,6 +417,20 @@ const EFFECTS_KEYS: &[&str] = &[
     "effects-rms",
     "effects-spectrum",
     "effects-auto-bypassed",
+    // 024-effect-chain-rows-and-meters (contracts/fluent-strings.md "New
+    // keys"): the header CPU-figure hover hint, the reorder handle's hover
+    // hint, the empty-chain explanation/primary-action labels, and the
+    // spectrum's tick/reference-line labels — all resolved via plain `tr`.
+    "effects-chain-cpu-hint",
+    "effects-reorder-handle-hint",
+    "effects-empty-explanation",
+    "effects-empty-add",
+    "effects-spectrum-tick-100",
+    "effects-spectrum-tick-1k",
+    "effects-spectrum-tick-10k",
+    "effects-spectrum-ref-0db",
+    "effects-spectrum-ref-minus30",
+    "effects-spectrum-ref-minus60",
 ];
 
 /// `effects.ftl` keys templated with `{ $pct }` — resolved via `tr_args`.
@@ -388,6 +440,32 @@ const EFFECTS_PCT_ARG_KEYS: &[&str] = &["effects-chain-cpu", "effects-cpu"];
 /// `tr_args` (008 Phase 6, contracts/ui-effect-chain.md §2's overload
 /// counter).
 const EFFECTS_COUNT_ARG_KEYS: &[&str] = &["effects-overloads"];
+
+/// 024-effect-chain-rows-and-meters (contract R2.4): the reorder handle's
+/// AccessKit name, templated with `{ $kind }`/`{ $position }`.
+const EFFECTS_KIND_POSITION_ARG_KEYS: &[&str] = &["effects-reorder-handle-node"];
+
+/// 024-effect-chain-rows-and-meters (contracts/fluent-strings.md): this
+/// feature's 3 changed keys and 11 new keys — every one must be defined
+/// with the same id in both `locales/en-US/effects.ftl` and
+/// `locales/pt-BR/effects.ftl` (FR-015, NFR-7.1). Checked below by
+/// `effects_024_keys_have_en_us_and_pt_br_parity`.
+const EFFECTS_024_FEATURE_KEYS: &[&str] = &[
+    "effects-chain-cpu",
+    "effects-overloads",
+    "effects-cpu",
+    "effects-chain-cpu-hint",
+    "effects-reorder-handle-node",
+    "effects-reorder-handle-hint",
+    "effects-empty-explanation",
+    "effects-empty-add",
+    "effects-spectrum-tick-100",
+    "effects-spectrum-tick-1k",
+    "effects-spectrum-tick-10k",
+    "effects-spectrum-ref-0db",
+    "effects-spectrum-ref-minus30",
+    "effects-spectrum-ref-minus60",
+];
 
 /// `effects.ftl` notification keys (008, data-model.md §6): `{ $node }`,
 /// `effect-chain-over-budget` also `{ $owner }` — resolved via
@@ -932,6 +1010,29 @@ fn every_shell_nav_and_notification_key_resolves() {
         );
     }
 
+    // 021-transport-bar-and-panel-layout: both the `$has_artist` selector
+    // arms resolve, and the resolved text names the given title.
+    for key in QUEUE_ROW_NAME_ARG_KEYS {
+        for has_artist in ["yes", "no"] {
+            let resolved = tr_args(
+                key,
+                &[
+                    ("title", "Example Track".to_string()),
+                    ("artist", "Example Artist".to_string()),
+                    ("has_artist", has_artist.to_string()),
+                ],
+            );
+            assert_ne!(
+                &resolved, key,
+                "Fluent key `{key}` is missing from locales/en-US/playback.ftl (tr_args() fell back to the raw key, has_artist={has_artist})"
+            );
+            assert!(
+                resolved.contains("Example Track"),
+                "`{key}` resolved to `{resolved}`, which doesn't name the track (has_artist={has_artist})"
+            );
+        }
+    }
+
     for key in PLAYBACK_WINDOW_ARG_KEYS {
         let resolved = tr_args(
             key,
@@ -998,6 +1099,24 @@ fn every_shell_nav_and_notification_key_resolves() {
         );
     }
 
+    // 023-markers-panel-structure (contract P2): `markers-group-heading`
+    // resolves and actually names both the group label and its count —
+    // e.g. "Points, 2" for `(label = "Points", count = "2")`.
+    for key in PLAYBACK_GROUP_HEADING_ARG_KEYS {
+        let resolved = tr_args(
+            key,
+            &[("label", "Points".to_string()), ("count", "2".to_string())],
+        );
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/playback.ftl (tr_args() fell back to the raw key)"
+        );
+        assert!(
+            resolved.contains("Points") && resolved.contains('2'),
+            "`{key}` resolved to `{resolved}`, which doesn't name both the label and the count"
+        );
+    }
+
     for key in CONTROLS_KEYS {
         let resolved = tr(key);
         assert_ne!(
@@ -1014,6 +1133,7 @@ fn every_shell_nav_and_notification_key_resolves() {
                 ("action", "Play/pause".to_string()),
                 ("other", "Stop".to_string()),
                 ("plugin", "Fixture".to_string()),
+                ("panel", "Effect chain".to_string()),
             ],
         );
         assert_ne!(
@@ -1065,6 +1185,23 @@ fn every_shell_nav_and_notification_key_resolves() {
         assert_ne!(
             &resolved, key,
             "Fluent key `{key}` is missing from locales/en-US/effects.ftl (tr_args() fell back to the raw key)"
+        );
+    }
+
+    // 024-effect-chain-rows-and-meters (contract R2.4): the reorder handle's
+    // name names both the node kind and its 1-based position.
+    for key in EFFECTS_KIND_POSITION_ARG_KEYS {
+        let resolved = tr_args(
+            key,
+            &[("kind", "Gain".to_string()), ("position", "1".to_string())],
+        );
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/effects.ftl (tr_args() fell back to the raw key)"
+        );
+        assert!(
+            resolved.contains("Gain") && resolved.contains('1'),
+            "`{key}` resolved to `{resolved}`, which doesn't name both the kind and the position"
         );
     }
 
@@ -1192,6 +1329,7 @@ fn no_unused_keys_in_playback_and_settings_ftl() {
         .chain(ACCOUNT_KEYS)
         .chain(PLAYBACK_KEYS)
         .chain(PLAYBACK_ARG_KEYS)
+        .chain(QUEUE_ROW_NAME_ARG_KEYS)
         .chain(PLAYBACK_WINDOW_ARG_KEYS)
         .chain(PLAYBACK_TIME_ARG_KEYS)
         .chain(PLAYBACK_COUNT_ARG_KEYS)
@@ -1199,12 +1337,14 @@ fn no_unused_keys_in_playback_and_settings_ftl() {
         .chain(PLAYBACK_DEFAULT_NAME_ARG_KEYS)
         .chain(PLAYBACK_INDEX_ARG_KEYS)
         .chain(PLAYBACK_SLOT_ARG_KEYS)
+        .chain(PLAYBACK_GROUP_HEADING_ARG_KEYS)
         .chain(PLAYBACK_SETTINGS_KEYS)
         .chain(CONTROLS_KEYS)
         .chain(CONTROLS_ARG_KEYS)
         .chain(EFFECTS_KEYS)
         .chain(EFFECTS_PCT_ARG_KEYS)
         .chain(EFFECTS_COUNT_ARG_KEYS)
+        .chain(EFFECTS_KIND_POSITION_ARG_KEYS)
         .chain(EFFECTS_NODE_ARG_KEYS)
         .chain(EFFECTS_NODE_OWNER_ARG_KEYS)
         .chain(EFFECTS_NO_ARG_NOTIFICATION_KEYS)
@@ -1362,6 +1502,51 @@ fn device_lost_and_missing_wording_names_both_devices() {
         assert!(
             resolved.contains("MacBook Pro Speakers"),
             "`{key}` resolved to `{resolved}`, which doesn't name the fallback device"
+        );
+    }
+}
+
+/// T046 (Phase 7, contract Q7): `queue-current` — the old "Now playing:"
+/// prefix key — is gone, replaced by `queue-row-name-current`'s own
+/// "Now playing, …" wording (contract Q11). Pins the removal: neither
+/// resolves to a real string nor is still defined in `playback.ftl`.
+#[test]
+fn queue_current_key_was_removed() {
+    let resolved = tr("queue-current");
+    assert_eq!(
+        &resolved, "queue-current",
+        "`queue-current` still resolves to a real string — it was expected removed by \
+         021-transport-bar-and-panel-layout (contract Q7), replaced by `queue-row-name-current`"
+    );
+
+    let playback_ftl = include_str!("../../../locales/en-US/playback.ftl");
+    assert!(
+        !defined_keys(playback_ftl).contains("queue-current"),
+        "`queue-current` is still defined in playback.ftl — remove it with the old prefix wiring"
+    );
+}
+
+/// 024-effect-chain-rows-and-meters (contracts/fluent-strings.md, FR-015,
+/// NFR-7.1): every one of this feature's 3 changed and 11 new
+/// `effects.ftl` keys is defined with the same id in both
+/// `locales/en-US/effects.ftl` and `locales/pt-BR/effects.ftl` — the pt-BR
+/// bundle is additive-only translation parity, not yet a locale the app
+/// switches to (`tr`/`tr_args` still resolve against en-US, `i18n.rs`).
+#[test]
+fn effects_024_keys_have_en_us_and_pt_br_parity() {
+    let en_us_ftl = include_str!("../../../locales/en-US/effects.ftl");
+    let pt_br_ftl = include_str!("../../../locales/pt-BR/effects.ftl");
+    let en_us_keys = defined_keys(en_us_ftl);
+    let pt_br_keys = defined_keys(pt_br_ftl);
+
+    for key in EFFECTS_024_FEATURE_KEYS {
+        assert!(
+            en_us_keys.contains(key),
+            "`{key}` is missing from locales/en-US/effects.ftl"
+        );
+        assert!(
+            pt_br_keys.contains(key),
+            "`{key}` is missing from locales/pt-BR/effects.ftl"
         );
     }
 }

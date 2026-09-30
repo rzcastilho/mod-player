@@ -54,11 +54,14 @@ impl StoreState {
 }
 
 /// One folded min/max peak, quantised to `i8` (contracts/decoded-store.md
-/// §1, rule 6): `round(clamp(sample, -1, 1) * 127)`.
+/// §1, rule 6): `round(clamp(sample, -1, 1) * 127)`; plus the bucket's
+/// average energy (022-waveform-legibility, contracts/analysis-rms.md AR1):
+/// `round(clamp(sqrt((Σl²+Σr²)/(2n)), 0, 1) * 127)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PeakBucket {
     pub min: i8,
     pub max: i8,
+    pub rms: u8,
 }
 
 /// One `CHUNK_FRAMES`-sized slot. `samples` is allocated lazily (on first
@@ -332,6 +335,12 @@ impl DecodedStore {
             let end = (start + bucket_frames).min(len);
             let mut min_v: i8 = 127;
             let mut max_v: i8 = -127;
+            // Stack accumulator only (AR1: no allocation beyond what
+            // exists today) — sum of squared samples over both channels,
+            // in `f64` to keep the running sum accurate across a
+            // multi-thousand-frame bucket.
+            let mut sum_sq: f64 = 0.0;
+            let mut n: u64 = 0;
             let mut frame = start;
             let mut fully_covered = true;
             while frame < end {
@@ -341,6 +350,8 @@ impl DecodedStore {
                         let qr = quantise(r);
                         min_v = min_v.min(ql).min(qr);
                         max_v = max_v.max(ql).max(qr);
+                        sum_sq += f64::from(l) * f64::from(l) + f64::from(r) * f64::from(r);
+                        n += 1;
                     }
                     None => {
                         fully_covered = false;
@@ -355,6 +366,7 @@ impl DecodedStore {
             out[written] = PeakBucket {
                 min: min_v,
                 max: max_v,
+                rms: quantise_rms(sum_sq, n),
             };
             written += 1;
             start = end;
@@ -371,6 +383,22 @@ fn quantise(sample: f32) -> i8 {
     // `scaled` is always in `[-127.0, 127.0]` by construction (the clamp
     // above), so this cast never truncates a value outside `i8`'s range.
     scaled as i8
+}
+
+/// `round(clamp(sqrt(sum_sq / (2n)), 0, 1) * 127)` (022-waveform-legibility,
+/// contracts/analysis-rms.md AR1). `n == 0` (never reached by `fold_peaks`,
+/// which only emits fully-covered, non-empty buckets) yields `0` rather
+/// than dividing by zero.
+fn quantise_rms(sum_sq: f64, n: u64) -> u8 {
+    if n == 0 {
+        return 0;
+    }
+    let mean_sq = sum_sq / (2.0 * n as f64);
+    let rms = mean_sq.sqrt().clamp(0.0, 1.0);
+    // `rms` is always in `[0.0, 1.0]` by construction (the clamp above), so
+    // `rms * 127.0` is always in `[0.0, 127.0]` and this cast never
+    // truncates a value outside `u8`'s range.
+    (rms * 127.0).round() as u8
 }
 
 impl fmt::Debug for DecodedStore {

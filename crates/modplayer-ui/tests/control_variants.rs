@@ -530,13 +530,23 @@ fn disabled_controls_show_no_feedback() {
     );
 }
 
-/// **B5** (contract control-variants.md): `Variant::Primary` is applied
-/// to exactly one call site in all of `src/**` — `welcome-acknowledge`
-/// (`welcome.rs`) — so the app has exactly one primary button (data-model
-/// §9.1). `theme/controls.rs` and `widgets/controls.rs` are excluded as
-/// the definition/host files, exactly as B6 excludes them.
+/// **B5** (contract control-variants.md), extended by
+/// 024-effect-chain-rows-and-meters (spec.md: "\"Primary action\" ...
+/// means the `primary` button variant already defined by
+/// 015-control-variants (filled accent, at most one per view)"):
+/// `Variant::Primary` is applied to exactly three call sites in all of
+/// `src/**` — `welcome-acknowledge` (`welcome.rs`), and the effect chain
+/// panel's two *mutually exclusive* empty-state controls,
+/// `effects-empty-add` and `effects-add` (both `effects_view.rs`,
+/// `show_empty_state`/`show_revealed_add_row`) — never both drawn in the
+/// same frame (contracts/ui-effect-chain-rows.md R4.4: exactly one Primary
+/// control is visible in the panel in every state). So every *view* still
+/// has at most one primary button on screen at once, the rule this test
+/// pins; it is no longer exactly one call site app-wide. `theme/
+/// controls.rs` and `widgets/controls.rs` are excluded as the definition/
+/// host files, exactly as B6 excludes them.
 #[test]
-fn welcome_has_exactly_one_primary() {
+fn primary_sites_match_the_one_per_view_rule() {
     let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let non_call_site_files = ["theme/controls.rs", "widgets/controls.rs"];
 
@@ -557,35 +567,54 @@ fn welcome_has_exactly_one_primary() {
         }
     }
 
+    let expected: &[(&str, &str)] = &[
+        ("welcome.rs", "welcome-acknowledge"),
+        ("effects_view.rs", "effects-empty-add"),
+        ("effects_view.rs", "effects-add"),
+    ];
     assert_eq!(
         primary_sites.len(),
-        1,
-        "expected exactly one Variant::Primary call site in src/**, found {}: {primary_sites:?}",
+        expected.len(),
+        "expected exactly {} Variant::Primary call site(s) in src/**, found {}: {primary_sites:?}",
+        expected.len(),
         primary_sites.len()
     );
-    let (rel, _idx, line) = &primary_sites[0];
-    assert_eq!(
-        rel, "welcome.rs",
-        "the one Variant::Primary site must be welcome.rs, found {rel}"
-    );
-    assert!(
-        line.contains("\"welcome-acknowledge\""),
-        "welcome.rs's Variant::Primary site must be welcome-acknowledge, found: {line}"
-    );
+    for (file, key) in expected {
+        let tr_key = format!("\"{key}\"");
+        assert!(
+            primary_sites
+                .iter()
+                .any(|(rel, _idx, line)| rel == file && line.contains(&tr_key)),
+            "expected a Variant::Primary call site in {file} for `{key}`, found {primary_sites:?}"
+        );
+    }
 }
 
 /// **B7** (contract control-variants.md): `Variant::Quiet` is applied to
 /// exactly the four Queue row actions (`queue-move-up`, `queue-move-down`,
-/// `queue-play-next`, `queue-remove`) in `queue_view.rs`, and
-/// `queue-remove` is never paired with `Variant::Destructive` (FR-004) —
-/// a queue removal stays trivially reversible, not destructive.
+/// `queue-play-next`, `queue-remove`), and `queue-remove` is never paired
+/// with `Variant::Destructive` (FR-004) — a queue removal stays trivially
+/// reversible, not destructive.
 ///
 /// 020-shell-navigation-and-gates (US2, T025, contracts/settings-category-
 /// row.md R7-R9) adds exactly one more `Variant::Quiet` call site: the
 /// Settings category row's "More" overflow button in
-/// `settings/category_row.rs`. B7 itself (queue_view.rs's four sites) is
-/// unchanged; this test's allow-list is widened to name both files rather
-/// than pin `queue_view.rs` as the only one.
+/// `settings/category_row.rs`.
+///
+/// 021-transport-bar-and-panel-layout (contract Q8, research R8) moves the
+/// four actions from four literal `queue_view.rs` call sites into
+/// `rows::queue_row`'s shared `queue_row_actions` table plus two loops (the
+/// single-line and wrapped-to-a-second-line layouts, contract Q3) — so the
+/// per-key literal-line check below moves from `queue_view.rs` to
+/// `rows.rs`, and the `Variant::Quiet` site count drops from five to
+/// three (two loops + category_row.rs's "More").
+///
+/// 023-markers-panel-structure (Phase 4, US2, research R6) adds exactly
+/// two more `Variant::Quiet` call sites in `markers.rs`: the row name
+/// cell (`show_name_cell`, or its "Add name" placeholder) and the shared
+/// row-action button (`show_row_action` — jump, nudge earlier, nudge
+/// later, remove all call through this one site) — raising the count
+/// from three to five.
 #[test]
 fn queue_row_actions_are_quiet() {
     let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -596,8 +625,10 @@ fn queue_row_actions_are_quiet() {
         "queue-play-next",
         "queue-remove",
     ];
-    let expected_site_count = expected_keys.len() + 1; // + settings/category_row.rs's "More".
-    let allowed_files = ["queue_view.rs", "settings/category_row.rs"];
+    // Two `rows.rs` loops (single-line, wrapped) + category_row.rs's
+    // "More" + markers.rs's name cell + markers.rs's shared row action.
+    let expected_site_count = 5;
+    let allowed_files = ["rows.rs", "settings/category_row.rs", "markers.rs"];
 
     let mut quiet_sites = Vec::new();
     for path in walk_src_rs_files() {
@@ -629,21 +660,13 @@ fn queue_row_actions_are_quiet() {
         );
     }
 
-    let contents = fs::read_to_string(src_root.join("queue_view.rs"))
-        .unwrap_or_else(|e| panic!("failed to read queue_view.rs: {e}"));
+    let contents = fs::read_to_string(src_root.join("rows.rs"))
+        .unwrap_or_else(|e| panic!("failed to read rows.rs: {e}"));
     for key in expected_keys {
         let tr_key = format!("\"{key}\"");
-        let key_lines = lines_containing(&contents, &tr_key);
         assert!(
-            !key_lines.is_empty(),
-            "queue_view.rs: expected a call site for tr(\"{key}\")"
-        );
-        let on_a_quiet_line = key_lines
-            .iter()
-            .any(|(_, line)| line.contains("Variant::Quiet"));
-        assert!(
-            on_a_quiet_line,
-            "queue_view.rs: \"{key}\" is never paired with Variant::Quiet on the same line"
+            !lines_containing(&contents, &tr_key).is_empty(),
+            "rows.rs: expected a `queue_row_actions` entry for \"{key}\""
         );
     }
 

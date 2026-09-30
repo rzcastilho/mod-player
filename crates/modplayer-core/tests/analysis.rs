@@ -95,6 +95,7 @@ fn cache_hit_publishes_complete_without_a_store() {
                 .map(|i| PeakBucket {
                     min: -((i % 100) as i8),
                     max: (i % 100) as i8,
+                    rms: (i % 100) as u8,
                 })
                 .collect(),
         )],
@@ -172,12 +173,19 @@ fn ladder_levels_fold_by_eight_and_present_bits_follow() {
 // -- data-model.md §6: .mpwf round-trip / truncation properties ------------
 
 fn level_strategy(frames_per_bucket: u32, bucket_count: usize) -> impl Strategy<Value = PeakLevel> {
-    prop::collection::vec(any::<(i8, i8)>(), bucket_count).prop_map(move |pairs| {
-        let buckets = pairs
+    prop::collection::vec(any::<(i8, i8, u8)>(), bucket_count).prop_map(move |triples| {
+        let buckets = triples
             .into_iter()
-            .map(|(a, b)| {
+            .map(|(a, b, r)| {
                 let (min, max) = if a <= b { (a, b) } else { (b, a) };
-                PeakBucket { min, max }
+                // `rms` is a validated `0..=127` field (data-model.md §2.1
+                // V4); mask any arbitrary `u8` down into that range so this
+                // strategy always produces encodable/decodable peaks.
+                PeakBucket {
+                    min,
+                    max,
+                    rms: r % 128,
+                }
             })
             .collect::<Vec<_>>();
         PeakLevel::full(frames_per_bucket, buckets)
@@ -213,6 +221,226 @@ fn peaks_strategy() -> impl Strategy<Value = (WaveformPeaks, TrackId)> {
             };
             (peaks, track)
         })
+}
+
+// -- data-model.md §2.1 / contracts/analysis-rms.md AR3-AR5: RMS8 section --
+
+/// AR3/AR4: a fresh entry's `RMS8` section round-trips its `rms` values
+/// byte-for-byte through encode/decode, distinct from the entry's
+/// `min`/`max` (`WAVE`) values.
+#[test]
+fn cache_round_trips_rms8_section() {
+    let id = track("spotify:track:rms8-roundtrip");
+    let len_frames = 128u64 * 40;
+    let peaks = WaveformPeaks {
+        sample_rate: 44_100,
+        len_frames,
+        levels: vec![PeakLevel::full(
+            128,
+            (0..len_frames.div_ceil(128))
+                .map(|i| PeakBucket {
+                    min: -10,
+                    max: 10,
+                    rms: (i % 128) as u8,
+                })
+                .collect(),
+        )],
+    };
+    let bytes = cache::encode(&peaks, &id);
+    let decoded = cache::decode(&bytes, &id, len_frames).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(decoded, peaks, "RMS8 section must round-trip exactly");
+}
+
+/// AR3/V1: an entry written under the old `ANALYZER_VERSION == 1` format
+/// (`WAVE` only, no `RMS8`) is rejected as `VersionMismatch` — never
+/// partially decoded.
+#[test]
+fn decode_rejects_v1_entry_without_rms8() {
+    let id = track("spotify:track:v1-entry");
+    let len_frames = 128u64 * 40;
+    let peaks = WaveformPeaks {
+        sample_rate: 44_100,
+        len_frames,
+        levels: vec![PeakLevel::full(
+            128,
+            (0..len_frames.div_ceil(128))
+                .map(|_| PeakBucket {
+                    min: -5,
+                    max: 5,
+                    rms: 5,
+                })
+                .collect(),
+        )],
+    };
+    let mut bytes = cache::encode(&peaks, &id);
+    // analyzer_version is the u32 right after magic(4) + format_version(4).
+    bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+    assert!(matches!(
+        cache::decode(&bytes, &id, len_frames),
+        Err(cache::CacheError::VersionMismatch)
+    ));
+}
+
+/// V2: a `WAVE`-only entry (current `ANALYZER_VERSION`, no `RMS8` section)
+/// is `Malformed`, never silently decoded without RMS data.
+#[test]
+fn decode_rejects_missing_rms8_section() {
+    let id = track("spotify:track:missing-rms8");
+    let len_frames = 128u64 * 40;
+    let peaks = WaveformPeaks {
+        sample_rate: 44_100,
+        len_frames,
+        levels: vec![PeakLevel::full(
+            128,
+            (0..len_frames.div_ceil(128))
+                .map(|_| PeakBucket {
+                    min: -5,
+                    max: 5,
+                    rms: 5,
+                })
+                .collect(),
+        )],
+    };
+    let full_bytes = cache::encode(&peaks, &id);
+    let wave_only = strip_rms8_section(&full_bytes);
+    assert!(matches!(
+        cache::decode(&wave_only, &id, len_frames),
+        Err(cache::CacheError::Malformed)
+    ));
+}
+
+/// V3: an `RMS8` section whose level count (or any level's `fpb`/`n`)
+/// disagrees with `WAVE`'s is `Malformed`.
+#[test]
+fn decode_rejects_rms8_level_count_mismatch_with_wave() {
+    let id = track("spotify:track:rms8-mismatch");
+    let len_frames = 128u64 * 40;
+    let peaks = WaveformPeaks {
+        sample_rate: 44_100,
+        len_frames,
+        levels: vec![PeakLevel::full(
+            128,
+            (0..len_frames.div_ceil(128))
+                .map(|_| PeakBucket {
+                    min: -5,
+                    max: 5,
+                    rms: 5,
+                })
+                .collect(),
+        )],
+    };
+    let bytes = cache::encode(&peaks, &id);
+    let corrupted = corrupt_rms8_level_count(&bytes);
+    assert!(matches!(
+        cache::decode(&corrupted, &id, len_frames),
+        Err(cache::CacheError::Malformed)
+    ));
+}
+
+/// V4: any `rms > 127` byte in the `RMS8` section is `Malformed`.
+#[test]
+fn decode_rejects_rms_value_over_127() {
+    let id = track("spotify:track:rms-overflow");
+    let len_frames = 128u64 * 40;
+    let peaks = WaveformPeaks {
+        sample_rate: 44_100,
+        len_frames,
+        levels: vec![PeakLevel::full(
+            128,
+            (0..len_frames.div_ceil(128))
+                .map(|_| PeakBucket {
+                    min: -5,
+                    max: 5,
+                    rms: 5,
+                })
+                .collect(),
+        )],
+    };
+    let bytes = cache::encode(&peaks, &id);
+    let corrupted = corrupt_first_rms8_byte(&bytes, 200);
+    assert!(matches!(
+        cache::decode(&corrupted, &id, len_frames),
+        Err(cache::CacheError::Malformed)
+    ));
+}
+
+/// Rewrites `section_count` to `1` and truncates off the `RMS8` section
+/// entirely, leaving a byte-valid `WAVE`-only v2 entry (AR4's writer
+/// layout: `WAVE` is always section 0).
+fn strip_rms8_section(bytes: &[u8]) -> Vec<u8> {
+    let mut pos = 12usize; // magic + format_version + analyzer_version
+    let id_len = u16::from_le_bytes(
+        bytes[pos..pos + 2]
+            .try_into()
+            .unwrap_or_else(|_| panic!("truncated id_len")),
+    ) as usize;
+    pos += 2 + id_len + 4 + 8; // + id + sample_rate + len_frames
+    let section_count_pos = pos;
+    pos += 4; // section_count
+    // First section: tag(4) + byte_len(8) + payload.
+    pos += 4;
+    let wave_byte_len = u64::from_le_bytes(
+        bytes[pos..pos + 8]
+            .try_into()
+            .unwrap_or_else(|_| panic!("truncated byte_len")),
+    ) as usize;
+    pos += 8 + wave_byte_len;
+
+    let mut out = bytes[..pos].to_vec();
+    out[section_count_pos..section_count_pos + 4].copy_from_slice(&1u32.to_le_bytes());
+    out
+}
+
+/// Finds the `RMS8` section's `level_count` field and increments it by one
+/// (still `Malformed`-detectable since it no longer matches `WAVE`'s level
+/// count nor the remaining payload length).
+fn corrupt_rms8_level_count(bytes: &[u8]) -> Vec<u8> {
+    let rms8_payload_start = rms8_payload_offset(bytes);
+    let mut out = bytes.to_vec();
+    let level_count = u32::from_le_bytes(
+        out[rms8_payload_start..rms8_payload_start + 4]
+            .try_into()
+            .unwrap_or_else(|_| panic!("truncated RMS8 level_count")),
+    );
+    out[rms8_payload_start..rms8_payload_start + 4]
+        .copy_from_slice(&(level_count + 1).to_le_bytes());
+    out
+}
+
+/// Overwrites the first `rms` byte of the `RMS8` section's first level with
+/// `value`.
+fn corrupt_first_rms8_byte(bytes: &[u8], value: u8) -> Vec<u8> {
+    let rms8_payload_start = rms8_payload_offset(bytes);
+    let mut out = bytes.to_vec();
+    // level_count(4) + fpb(4) + n(4) then the first rms byte.
+    let first_rms_byte = rms8_payload_start + 4 + 4 + 4;
+    out[first_rms_byte] = value;
+    out
+}
+
+/// Byte offset of the `RMS8` section's payload (just past its tag + 8-byte
+/// `byte_len`), assuming the writer's fixed layout: `WAVE` then `RMS8`
+/// (AR4).
+fn rms8_payload_offset(bytes: &[u8]) -> usize {
+    let mut pos = 12usize;
+    let id_len = u16::from_le_bytes(
+        bytes[pos..pos + 2]
+            .try_into()
+            .unwrap_or_else(|_| panic!("truncated id_len")),
+    ) as usize;
+    pos += 2 + id_len + 4 + 8;
+    pos += 4; // section_count
+    // WAVE section: tag(4) + byte_len(8) + payload.
+    pos += 4;
+    let wave_byte_len = u64::from_le_bytes(
+        bytes[pos..pos + 8]
+            .try_into()
+            .unwrap_or_else(|_| panic!("truncated byte_len")),
+    ) as usize;
+    pos += 8 + wave_byte_len;
+    // RMS8 section: tag(4) + byte_len(8) then payload starts.
+    pos += 4 + 8;
+    pos
 }
 
 // -- US3 (Phase 5): progressive-fill timing/behaviour guarantees ----------
@@ -415,7 +643,11 @@ fn stale_analyzer_version_is_unlinked_and_recomputed() {
         levels: vec![PeakLevel::full(
             128,
             (0..frames.div_ceil(128))
-                .map(|_| PeakBucket { min: -5, max: 5 })
+                .map(|_| PeakBucket {
+                    min: -5,
+                    max: 5,
+                    rms: 5,
+                })
                 .collect(),
         )],
     };
@@ -456,10 +688,11 @@ fn stale_analyzer_version_is_unlinked_and_recomputed() {
 }
 
 #[test]
-fn only_wave_section_is_written() {
-    // FR-004: this slice writes only a WAVE section — no beat-grid, key or
-    // loudness sections, even though the format's unknown-section-skip
-    // rule (data-model.md §6) allows them to be added later.
+fn only_wave_and_rms8_sections_are_written() {
+    // FR-004, updated by 022-waveform-legibility's AR4: this slice writes
+    // exactly `WAVE` then `RMS8` — no beat-grid, key or loudness sections,
+    // even though the format's unknown-section-skip rule (data-model.md
+    // §6) allows them to be added later.
     let dir = temp_dir("only-wave-section");
     let paths = AnalysisPaths::with_dir(&dir);
     let id = track("spotify:track:only-wave");
@@ -494,49 +727,63 @@ fn only_wave_section_is_written() {
     );
     pos += 4;
     assert_eq!(
-        section_count, 1,
-        "only the WAVE section must be written (FR-004)"
+        section_count, 2,
+        "exactly WAVE and RMS8 must be written (FR-004, AR4)"
     );
     assert_eq!(&bytes[pos..pos + 4], b"WAVE");
+    pos += 4;
+    let wave_byte_len = u64::from_le_bytes(
+        bytes[pos..pos + 8]
+            .try_into()
+            .unwrap_or_else(|_| panic!("truncated byte_len")),
+    ) as usize;
+    pos += 8 + wave_byte_len;
+    assert_eq!(&bytes[pos..pos + 4], b"RMS8");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// FR-013/AR5: a complete 10-minute entry (now `WAVE` + `RMS8`, both
+/// sections) stays at or under 1 048 576 bytes, at both supported sample
+/// rates (44.1 kHz, ~709 KB expected; 48 kHz, ~771 KB expected).
 #[test]
-fn ten_minute_entry_fits_one_megabyte() {
-    // FR-006: a 10-minute track's cache entry stays comfortably under
-    // 1 MiB (research/plan.md put the real figure at ~472 KB).
-    let id = track("spotify:track:ten-minutes");
-    let sample_rate = 44_100u32;
-    let len_frames = u64::from(sample_rate) * 600; // 10 minutes
+fn ten_minute_entry_fits_budget_at_both_rates() {
+    fn entry_for_rate(sample_rate: u32) -> (TrackId, Vec<u8>) {
+        let id = track(&format!("spotify:track:ten-minutes-{sample_rate}"));
+        let len_frames = u64::from(sample_rate) * 600; // 10 minutes
 
-    let levels = WaveformPeaks::LADDER
-        .iter()
-        .copied()
-        .filter(|&fpb| len_frames.div_ceil(u64::from(fpb)) >= 2)
-        .map(|fpb| {
-            let count = len_frames.div_ceil(u64::from(fpb)) as usize;
-            let buckets = (0..count)
-                .map(|_| PeakBucket {
-                    min: -100,
-                    max: 100,
-                })
-                .collect();
-            PeakLevel::full(fpb, buckets)
-        })
-        .collect();
-    let peaks = WaveformPeaks {
-        sample_rate,
-        len_frames,
-        levels,
-    };
+        let levels = WaveformPeaks::LADDER
+            .iter()
+            .copied()
+            .filter(|&fpb| len_frames.div_ceil(u64::from(fpb)) >= 2)
+            .map(|fpb| {
+                let count = len_frames.div_ceil(u64::from(fpb)) as usize;
+                let buckets = (0..count)
+                    .map(|_| PeakBucket {
+                        min: -100,
+                        max: 100,
+                        rms: 90,
+                    })
+                    .collect();
+                PeakLevel::full(fpb, buckets)
+            })
+            .collect();
+        let peaks = WaveformPeaks {
+            sample_rate,
+            len_frames,
+            levels,
+        };
+        (id.clone(), cache::encode(&peaks, &id))
+    }
 
-    let bytes = cache::encode(&peaks, &id);
-    assert!(
-        bytes.len() < 1_000_000,
-        "10-minute entry is {} bytes, expected < 1 MiB (FR-006)",
-        bytes.len()
-    );
+    for sample_rate in [44_100u32, 48_000u32] {
+        let (_, bytes) = entry_for_rate(sample_rate);
+        assert!(
+            bytes.len() <= 1_048_576,
+            "10-minute entry at {sample_rate} Hz is {} bytes, expected <= 1 048 576 (AR5)",
+            bytes.len()
+        );
+    }
 }
 
 #[test]

@@ -63,6 +63,28 @@ pub fn overlay_color(token: OverlayColor, visuals: &Visuals) -> Color32 {
 /// difference (2.0 vs 1.5 px, research R8) is not swamped.
 pub const MARKER_OUTLINE_WIDTH: f32 = 1.0;
 
+/// Loop-region shading constants (022-waveform-legibility, FR-004/FR-005,
+/// data-model.md §3.2, WL4): the only place these literals appear (005's
+/// "no colour/paint literal outside `theme/**`" rule extended to alpha/
+/// spacing/width values a region-shading test pins).
+///
+/// `LOOP_ARMED_FILL_ALPHA`/`LOOP_HATCH_ALPHA`/`LOOP_HATCH_SPACING` are the
+/// 006 values, unchanged — only moved here from inline literals in
+/// `markers::paint_overlay`.
+pub const LOOP_ARMED_FILL_ALPHA: f32 = 0.25;
+/// See [`LOOP_ARMED_FILL_ALPHA`].
+pub const LOOP_HATCH_ALPHA: f32 = 0.6;
+/// See [`LOOP_ARMED_FILL_ALPHA`].
+pub const LOOP_HATCH_SPACING: f32 = 8.0;
+/// The idle (unarmed) region's fill alpha (FR-005: at most half of
+/// [`LOOP_ARMED_FILL_ALPHA`], pinned below at compile time so the two
+/// constants can never drift apart into violating FR-005).
+pub const LOOP_IDLE_FILL_ALPHA: f32 = 0.10;
+/// The idle region's outline stroke width (FR-005).
+pub const LOOP_OUTLINE_WIDTH: f32 = 1.0;
+
+const _: () = assert!(LOOP_IDLE_FILL_ALPHA <= LOOP_ARMED_FILL_ALPHA / 2.0);
+
 /// FR-011/FR-012 (017-high-contrast-appearance): `Some` only in high
 /// contrast. The colour is the active theme's `text_primary` — its
 /// extreme luminance end, so it holds >= 7:1 against both waveform
@@ -94,6 +116,91 @@ pub fn overlay_outline(token: OverlayColor, visuals: &Visuals) -> Option<Stroke>
 pub fn casing_width(base: f32) -> f32 {
     base + 2.0 * MARKER_OUTLINE_WIDTH
 }
+
+/// A populated Markers panel row's "jump to marker" Quiet icon action
+/// (023-markers-panel-structure, research R6, contracts/ui-markers-
+/// panel.md P3 cell 6): `seek_frames(marker.position)`. `⌖` (POSITION
+/// INDICATOR), not the originally-proposed `↦`: `row_action_glyphs_
+/// covered_by_fonts` found `↦` absent from the app's proportional font
+/// (would draw as tofu), so this substitutes a covered glyph from the
+/// same "location/target" family, per research R6's own substitution
+/// rule.
+///
+/// # Examples
+///
+/// ```
+/// use modplayer_ui::theme::markers::ROW_ACTION_JUMP_GLYPH;
+///
+/// assert_eq!(ROW_ACTION_JUMP_GLYPH, "⌖");
+/// ```
+pub const ROW_ACTION_JUMP_GLYPH: &str = "⌖";
+
+/// A populated row's "nudge earlier" Quiet icon action (023-markers-
+/// panel-structure, research R6, contracts/ui-markers-panel.md P3 cell
+/// 7): `nudge_marker(id, -1, 1)`. `⏴` (LEFT-POINTING SMALL TRIANGLE),
+/// not the originally-proposed `◂`: also absent from the app's
+/// proportional font (`row_action_glyphs_covered_by_fonts`); substituted
+/// per research R6's rule, from the media-symbols family
+/// [`ROW_ACTION_NUDGE_LATER_GLYPH`]'s own `⏵` already draws from.
+///
+/// # Examples
+///
+/// ```
+/// use modplayer_ui::theme::markers::ROW_ACTION_NUDGE_EARLIER_GLYPH;
+///
+/// assert_eq!(ROW_ACTION_NUDGE_EARLIER_GLYPH, "⏴");
+/// ```
+pub const ROW_ACTION_NUDGE_EARLIER_GLYPH: &str = "⏴";
+
+/// A populated row's "nudge later" Quiet icon action (023-markers-panel-
+/// structure, research R6, contracts/ui-markers-panel.md P3 cell 8):
+/// `nudge_marker(id, 1, 1)`. `⏵` (BLACK RIGHT-POINTING SMALL TRIANGLE,
+/// the same glyph `widgets::controls::DISCLOSURE_CLOSED_GLYPH` already
+/// proves covered — a different control, reused only for its shape),
+/// not the originally-proposed `▸`: also absent from the app's
+/// proportional font; substituted per research R6's rule.
+///
+/// # Examples
+///
+/// ```
+/// use modplayer_ui::theme::markers::ROW_ACTION_NUDGE_LATER_GLYPH;
+///
+/// assert_eq!(ROW_ACTION_NUDGE_LATER_GLYPH, "⏵");
+/// ```
+pub const ROW_ACTION_NUDGE_LATER_GLYPH: &str = "⏵";
+
+/// A populated row's "remove marker" Quiet (**not** Destructive, spec
+/// Clarification 5) icon action (023-markers-panel-structure, research
+/// R6, contracts/ui-markers-panel.md P3 cell 9): `delete_marker(id)`.
+/// `×` (MULTIPLICATION SIGN), not the originally-proposed `✕`: also
+/// absent from the app's proportional font; substituted per research
+/// R6's rule, from the same "close/remove" family.
+///
+/// # Examples
+///
+/// ```
+/// use modplayer_ui::theme::markers::ROW_ACTION_REMOVE_GLYPH;
+///
+/// assert_eq!(ROW_ACTION_REMOVE_GLYPH, "×");
+/// ```
+pub const ROW_ACTION_REMOVE_GLYPH: &str = "×";
+
+/// The swatch popover's "current colour" mark (023-markers-panel-
+/// structure, contracts/ui-markers-panel.md P4), painted in
+/// [`crate::theme::mono_font_id`]. `✔` (HEAVY CHECK MARK), not the
+/// originally-shipped `✓`: `palette_current_glyph_covered_by_mono_font`
+/// found `✓` absent from the monospace font (it drew as tofu in the
+/// manual walk); substituted per research R6's rule, from the same
+/// check-mark family.
+///
+/// # Examples
+///
+/// ```
+/// use modplayer_ui::theme::markers::PALETTE_CURRENT_GLYPH;
+///
+/// assert_eq!(PALETTE_CURRENT_GLYPH, "✔");
+/// ```
+pub const PALETTE_CURRENT_GLYPH: &str = "✔";
 
 /// 011-plugin-ui-contributions (O12), outlined per O10
 /// (017-high-contrast-appearance): the six host-drawn glyphs a plugin's

@@ -21,7 +21,7 @@ use modplayer_audio_source::SourceHost;
 use modplayer_core::actions::{
     ActionId, ActionRegistry, ActionSource, Chord, HostAction, KeyName, Mods, ScopeState,
 };
-use modplayer_core::{Intent, PlaybackController};
+use modplayer_core::{Intent, NowPlayingPanel, PlaybackController};
 
 use crate::markers;
 use crate::now_playing;
@@ -467,11 +467,11 @@ pub fn invoke<B: OutputBackend, H: SourceHost>(
     waveform: &mut WaveformState,
     // 016-list-row-and-panel-components (research R9, contract P7): the
     // three panel toggles below moved from an egui-memory flag (keyed on
-    // `ctx`) to a `controller`-persisted one, so this parameter has no
-    // remaining reader. `invoke`'s own signature stays unchanged —
-    // `dispatch_and_invoke` and every call site still pass it — in case a
-    // future host action needs it again.
-    _ctx: &Context,
+    // `ctx`) to a `controller`-persisted one. 021-transport-bar-and-panel-
+    // layout (contract R5, research R6) gives this parameter a reader
+    // again: `Toggle*` below calls `now_playing::request_reveal` through
+    // it when a toggle function reports the panel just turned on.
+    ctx: &Context,
 ) {
     let action = match inv.action {
         ActionId::Host(action) => action,
@@ -535,7 +535,16 @@ pub fn invoke<B: OutputBackend, H: SourceHost>(
         HostAction::NavNowPlaying => shell.section = Section::NowPlaying,
         HostAction::NavPlugins => shell.section = Section::Plugins,
         HostAction::NavSettings => shell.section = Section::Settings,
-        HostAction::ToggleQueue => now_playing::toggle_queue_panel(controller),
+        // 021-transport-bar-and-panel-layout (contract R5, research R6):
+        // the reveal request expires unconsumed if Now Playing isn't the
+        // shown section this pass (or the next), so no extra section
+        // check is needed here — the same "flag flips, no reveal" existing
+        // behaviour falls out of the request's own two-pass window.
+        HostAction::ToggleQueue => {
+            if now_playing::toggle_queue_panel(controller) {
+                now_playing::request_reveal(ctx, NowPlayingPanel::Queue);
+            }
+        }
         HostAction::FocusSearch => {
             shell.section = Section::Search;
             shell.focus_search_requested = true;
@@ -548,11 +557,15 @@ pub fn invoke<B: OutputBackend, H: SourceHost>(
         HostAction::TempoStepDown => controller.tempo_step(-1),
         // 008, contracts/ui-effect-chain.md §5.
         HostAction::ToggleEffectChain => {
-            crate::effects_view::toggle_effect_chain_panel(controller);
+            if crate::effects_view::toggle_effect_chain_panel(controller) {
+                now_playing::request_reveal(ctx, NowPlayingPanel::EffectChain);
+            }
         }
         // 010-transport-focus, contracts/ui-transport-panel.md §1.
         HostAction::ToggleTransportPanel => {
-            crate::transport_view::toggle_transport_panel(controller);
+            if crate::transport_view::toggle_transport_panel(controller) {
+                now_playing::request_reveal(ctx, NowPlayingPanel::Transport);
+            }
         }
     }
 }

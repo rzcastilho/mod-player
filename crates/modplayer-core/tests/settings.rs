@@ -721,6 +721,7 @@ proptest! {
     // `settings/model.rs`'s own unit tests.
     #[test]
     fn now_playing_panels_round_trip_proptest(
+        markers_open in any::<bool>(),
         effect_chain_open in any::<bool>(),
         transport_open in any::<bool>(),
         queue_open in any::<bool>(),
@@ -729,6 +730,7 @@ proptest! {
         let store = store_in(&dir);
         let settings = AudioSettings {
             now_playing_panels: NowPlayingPanels {
+                markers_open,
                 effect_chain_open,
                 transport_open,
                 queue_open,

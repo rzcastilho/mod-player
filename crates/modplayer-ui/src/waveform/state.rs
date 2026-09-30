@@ -256,6 +256,31 @@ pub struct MarkerDrag {
     pub origin_detail: DetailWindow,
 }
 
+/// Which control [`WaveformState::panel_focus`] targets once consumed
+/// (023-markers-panel-structure, data-model.md §5): a populated row's
+/// swatch (its first tab stop), or the "New loop region" button. Set by
+/// `markers::panel`'s `PanelIntent::Remove` handling (research R11) and
+/// consumed on the next `panel` call — unreachable until 023 Phase 3
+/// (US1/US2) wires `markers::panel` to read and clear it.
+///
+/// # Examples
+///
+/// ```
+/// use modplayer_ui::waveform::PanelFocus;
+///
+/// let focus = PanelFocus::NewLoopRegion;
+/// assert!(matches!(focus, PanelFocus::NewLoopRegion));
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PanelFocus {
+    /// Focus that row's swatch; falls back per research R11 if the row's
+    /// marker no longer exists next frame.
+    Row(MarkerId),
+    /// Focus the "New loop region" button.
+    #[default]
+    NewLoopRegion,
+}
+
 /// Session waveform state, owned by `App` for as long as it runs
 /// (data-model.md §5.2, extended by 006 data-model.md §3).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -286,6 +311,35 @@ pub struct WaveformState {
     /// under the panel header), a Fluent key or `None`. Cleared on the
     /// next successful `I`/`O`/`L`/`M`/`1-8`/`Shift+1-8` action.
     pub marker_status: Option<&'static str>,
+    /// Set by `PanelIntent::OpenRename` (023-markers-panel-structure,
+    /// data-model.md §5, research R9): the panel's rename `TextEdit`
+    /// calls `request_focus()` exactly once while this is `true`, then
+    /// clears it — every earlier frame calling `request_focus()`
+    /// unconditionally would make click-away-to-commit impossible.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use modplayer_ui::waveform::WaveformState;
+    ///
+    /// let state = WaveformState::default();
+    /// assert!(!state.rename_focus_pending);
+    /// ```
+    pub rename_focus_pending: bool,
+    /// Set by `PanelIntent::Remove` (023-markers-panel-structure,
+    /// data-model.md §4-5, research R11): a one-shot focus target
+    /// consumed on the next `panel` call, whose target control calls
+    /// `request_focus()` and clears this field.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use modplayer_ui::waveform::WaveformState;
+    ///
+    /// let state = WaveformState::default();
+    /// assert_eq!(state.panel_focus, None);
+    /// ```
+    pub panel_focus: Option<PanelFocus>,
 }
 
 impl WaveformState {

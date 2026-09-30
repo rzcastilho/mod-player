@@ -16,11 +16,14 @@ use super::coords::TimeSpace;
 
 /// One pixel column's paint decision (contracts/ui-waveform.md §4): the
 /// buckets overlapping that pixel's frame range are either all present
-/// (`Present`, a `min..max` bar) or not (`Placeholder`) — "no special
-/// case" for a multi-gap store, research R10.
+/// (`Present`, a `min..max` bar plus an `rms` average) or not
+/// (`Placeholder`) — "no special case" for a multi-gap store, research
+/// R10. `rms` is the max of the column's buckets' `rms` (022-waveform-
+/// legibility, R6; data-model.md §4), the same fold `min`/`max` already
+/// use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnPaint {
-    Present { min: i8, max: i8 },
+    Present { min: i8, max: i8, rms: u8 },
     Placeholder,
 }
 
@@ -58,14 +61,17 @@ pub fn waveform_columns(
             if (bucket_from..bucket_to).all(|index| level.is_present(index)) {
                 let mut min_v = i8::MAX;
                 let mut max_v = i8::MIN;
+                let mut rms_v = 0u8;
                 for index in bucket_from..bucket_to {
                     let bucket = level.buckets[index];
                     min_v = min_v.min(bucket.min);
                     max_v = max_v.max(bucket.max);
+                    rms_v = rms_v.max(bucket.rms);
                 }
                 ColumnPaint::Present {
                     min: min_v,
                     max: max_v,
+                    rms: rms_v,
                 }
             } else {
                 ColumnPaint::Placeholder
@@ -89,6 +95,11 @@ pub struct WaveformPaint<'a> {
     /// on the overview (contracts/ui-waveform.md §4); `None` for the
     /// detail view itself, which has no highlight of its own.
     pub highlight: Option<Range<u64>>,
+    /// `true` while a 005 seek-drag or 006 marker-drag is in progress
+    /// (022-waveform-legibility, contracts/ui-waveform-legibility.md WL5,
+    /// FR-009): the hover scrub indicator is skipped this frame, on both
+    /// views, regardless of the pointer's own position.
+    pub hover_suppressed: bool,
 }
 
 /// Paint one waveform widget's whole rect (contracts/ui-waveform.md §4):
@@ -124,7 +135,7 @@ pub fn paint(painter: &Painter, space: &TimeSpace, visuals: &Visuals, input: &Wa
     } else if let Some(peaks) = input.peaks {
         let width = rect.width().round().max(0.0) as usize;
         let columns = waveform_columns(space, peaks, width);
-        paint_columns(painter, rect, visuals, &columns);
+        paint_columns(painter, rect, space, visuals, input.playhead, &columns);
     } else {
         // `Pending` (no snapshot yet): the whole area is placeholder.
         paint_placeholder_band(painter, rect, visuals);
@@ -145,10 +156,16 @@ pub fn paint(painter: &Painter, space: &TimeSpace, visuals: &Visuals, input: &Wa
     }
 }
 
-/// Draw the playhead line, if any (006, research R16, contracts/
-/// ui-markers.md §5): split out of [`paint`] so the caller can run the
-/// `overlays` hook (marker lines, the loop-region span) *between* the
-/// peaks/highlight and the playhead — the playhead always paints on top.
+/// Draw the playhead line, if any (022-waveform-legibility, contracts/
+/// ui-waveform-legibility.md WL3, FR-003, FR-019): split out of [`paint`]
+/// so the caller can run the `overlays` hook (marker lines, the
+/// loop-region span) *between* the peaks/highlight and the playhead — the
+/// playhead always paints on top. Two strokes, casing then core, rather
+/// than 005/006's single `strong_text_color` line: because one of
+/// `playhead_core`/`playhead_casing` is near-black and the other
+/// near-white in every appearance, at least one always clears ≥ 3:1
+/// against any backdrop (data-model.md §6, SC-001) — a same-colour single
+/// stroke could not guarantee that over every fill/backdrop combination.
 pub fn playhead(painter: &Painter, space: &TimeSpace, playhead: Option<u64>, visuals: &Visuals) {
     let rect = space.rect;
     if rect.width() <= 0.0 || rect.height() <= 0.0 {
@@ -156,27 +173,57 @@ pub fn playhead(painter: &Painter, space: &TimeSpace, playhead: Option<u64>, vis
     }
     if let Some(frame) = playhead {
         let x = space.x_of(frame);
-        // Strong text colour (near-black on light, near-white on dark),
-        // not the bars' own `selection.bg_fill`: the playhead has to read
-        // *over* a dense column of peaks, where a same-colour line simply
-        // disappears (maintainer request, 2026-09-19 manual walk).
+        let points = [pos2(x, rect.top()), pos2(x, rect.bottom())];
+        let tokens = theme::waveform_roles(theme::roles(visuals));
         painter.line_segment(
-            [pos2(x, rect.top()), pos2(x, rect.bottom())],
-            Stroke::new(1.5, visuals.strong_text_color()),
+            points,
+            Stroke::new(
+                theme::waveform::PLAYHEAD_CASING_WIDTH,
+                tokens.playhead_casing,
+            ),
+        );
+        painter.line_segment(
+            points,
+            Stroke::new(theme::waveform::PLAYHEAD_CORE_WIDTH, tokens.playhead_core),
         );
     }
 }
 
-fn paint_columns(painter: &Painter, rect: Rect, visuals: &Visuals, columns: &[ColumnPaint]) {
+/// Paint every column (022-waveform-legibility, contracts/
+/// ui-waveform-legibility.md WL2, FR-001, FR-002, R6/R7): each `Present`
+/// column draws an outer peak bar and, when tall enough, an inner ±RMS
+/// average band clipped to it — in `played_*` tones left of the displayed
+/// `playhead` (drag-preview-aware: this is `WaveformPaint::playhead`,
+/// whatever value the caller already resolved for the frame) or
+/// `unplayed_*` tones at/right of it. `Placeholder` columns are unchanged
+/// (005) and carry no played/unplayed treatment.
+fn paint_columns(
+    painter: &Painter,
+    rect: Rect,
+    space: &TimeSpace,
+    visuals: &Visuals,
+    playhead: Option<u64>,
+    columns: &[ColumnPaint],
+) {
     let mid_y = rect.center().y;
     let half_height = rect.height() / 2.0;
-    let bar_color = visuals.selection.bg_fill;
+    let tokens = theme::waveform_roles(theme::roles(visuals));
+    // WL2: "Played iff `playhead` is `Some(p)` and `col_left + 0.5 <
+    // space.x_of(p)`; else unplayed" — precompute the pixel boundary once
+    // rather than re-mapping frame-to-x per column.
+    let playhead_x = playhead.map(|frame| space.x_of(frame));
 
     for (col, decision) in columns.iter().enumerate() {
         let x0 = rect.left() + col as f32;
         let x1 = x0 + 1.0;
         match decision {
-            ColumnPaint::Present { min, max } => {
+            ColumnPaint::Present { min, max, rms } => {
+                let played = playhead_x.is_some_and(|px| x0 + 0.5 < px);
+                let (peak_color, average_color) = if played {
+                    (tokens.played_peak, tokens.played_average)
+                } else {
+                    (tokens.unplayed_peak, tokens.unplayed_average)
+                };
                 let min_f = f32::from(*min) / 127.0;
                 let max_f = f32::from(*max) / 127.0;
                 let (low, high) = if min_f <= max_f {
@@ -196,8 +243,24 @@ fn paint_columns(painter: &Painter, rect: Rect, visuals: &Visuals, columns: &[Co
                 painter.rect_filled(
                     Rect::from_min_max(Pos2::new(x0, y_top), Pos2::new(x1, y_bottom)),
                     0.0,
-                    bar_color,
+                    peak_color,
                 );
+
+                // Average band: `[mid - rms*h, mid + rms*h] ∩ peak rect`,
+                // drawn only if the clipped result is at least 1px tall
+                // (WL2).
+                let rms_f = f32::from(*rms) / 127.0;
+                if rms_f > 0.0 {
+                    let band_top = (mid_y - rms_f * half_height).max(y_top);
+                    let band_bottom = (mid_y + rms_f * half_height).min(y_bottom);
+                    if band_bottom - band_top >= 1.0 {
+                        painter.rect_filled(
+                            Rect::from_min_max(Pos2::new(x0, band_top), Pos2::new(x1, band_bottom)),
+                            0.0,
+                            average_color,
+                        );
+                    }
+                }
             }
             ColumnPaint::Placeholder => {
                 paint_placeholder_column(painter, x0, x1, rect, visuals);
@@ -252,6 +315,7 @@ mod tests {
             .map(|i| PeakBucket {
                 min: -i as i8,
                 max: i as i8,
+                rms: i as u8,
             })
             .collect();
         // Leave a gap: buckets 40..60 not present.
