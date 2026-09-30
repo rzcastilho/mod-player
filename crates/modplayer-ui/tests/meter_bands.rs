@@ -19,7 +19,7 @@ use modplayer_core::LevelPair;
 use modplayer_ui::theme;
 use modplayer_ui::theme::Roles;
 use modplayer_ui::theme::controls::{self, BAND_WARNING_DB, CEILING_MARK_WIDTH, SCALE_MARK_WIDTH};
-use modplayer_ui::widgets::chain_meters::level_pair;
+use modplayer_ui::widgets::chain_meters::{level_pair, spectrum};
 use modplayer_ui::widgets::peak_meter::{SCALE_MAX_DB, SCALE_MIN_DB, peak_meter};
 
 /// A position tolerance for float comparisons on painted geometry.
@@ -321,6 +321,69 @@ fn rms_bands_and_is_not_dimmed() {
         "the danger segment must be in the RMS (right) half: {:?}, half starts at {}",
         danger[0],
         rect.left() + half
+    );
+}
+
+// -----------------------------------------------------------------
+// T024 (024-effect-chain-rows-and-meters, US2, contract S2): the
+// spectrum's own positive/−6 dBFS/warning/0 dBFS/danger convention
+// replaces the old single `selection.bg_fill` colour.
+// -----------------------------------------------------------------
+
+/// **S2**: `spectrum` no longer reads `selection.bg_fill` at all, and its
+/// bars paint in the same `positive`/`warning`/`danger` role colours the
+/// peak meter and level pair already use — one band per convention,
+/// driven by four representative linear magnitudes (silent, positive-
+/// only, positive+warning, positive+warning+danger-cap).
+#[test]
+fn spectrum_bars_use_band_colors_not_selection_bg_fill() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/widgets/chain_meters.rs");
+    let contents = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+    let start = contents
+        .find("pub fn spectrum")
+        .unwrap_or_else(|| panic!("expected a spectrum function"));
+    let spectrum_code = strip_line_comments(&contents[start..]);
+    assert!(
+        !spectrum_code.contains("selection.bg_fill"),
+        "spectrum must not read selection.bg_fill any more (S2)"
+    );
+
+    let bands = [0.0005_f32, 0.1, 0.7, 1.5];
+    let ctx = Context::default();
+    theme::apply_tokens(&ctx);
+    let mut roles_used = None;
+    let output = ctx.run_ui(RawInput::default(), |ui| {
+        roles_used = Some(*theme::roles(ui.visuals()));
+        spectrum(ui, &bands);
+    });
+    let shapes = output.shapes.clone();
+    output.drop_without_applying_deltas();
+    let roles = roles_used.unwrap_or_else(|| panic!("spectrum must run its closure"));
+
+    let positive = fill_rects(
+        &shapes,
+        controls::band_color(&roles, controls::Band::Positive),
+    );
+    let warning = fill_rects(
+        &shapes,
+        controls::band_color(&roles, controls::Band::Warning),
+    );
+    let danger = fill_rects(
+        &shapes,
+        controls::band_color(&roles, controls::Band::Danger),
+    );
+    assert!(
+        !positive.is_empty(),
+        "expected at least one positive-band bar segment"
+    );
+    assert!(
+        !warning.is_empty(),
+        "expected at least one warning-band bar segment"
+    );
+    assert!(
+        !danger.is_empty(),
+        "expected at least one danger-band bar segment (>= 0 dBFS)"
     );
 }
 

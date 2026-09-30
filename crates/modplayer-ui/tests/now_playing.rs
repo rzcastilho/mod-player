@@ -23,6 +23,7 @@ use modplayer_core::plugins::PluginId;
 use modplayer_core::settings::SettingsStore;
 use modplayer_core::transport::Intent;
 use modplayer_core::{NotRegisteredReason, NowPlayingPanel, PlaybackController, tr, tr_args};
+use modplayer_effects::catalog::NodeKind;
 use modplayer_engine::{BufferPreset, DeviceId, FrameCount, SampleRate};
 use modplayer_ui::artwork::{ArtworkCache, ArtworkState};
 use modplayer_ui::waveform::{DetailWindow, DragOrigin, DragPreview, TimeSpace, WaveformState};
@@ -1934,6 +1935,68 @@ fn render_panel_frame<
     PanelFrame { nodes, shapes }
 }
 
+/// Like [`render_panel_frame`], but laid out the way `app.rs` lays out the
+/// main screen — the shell's nav rail `Panel::left` first, then Now
+/// Playing inside a `CentralPanel` — so a layout test sees the real,
+/// narrower centre column rather than the whole window width.
+fn render_shell_frame<
+    B: modplayer_audio_io::OutputBackend,
+    H: modplayer_audio_source::SourceHost,
+>(
+    ctx: &Context,
+    controller: &mut PlaybackController<B, H>,
+    artwork: &mut ArtworkCache,
+    waveform: &mut WaveformState,
+    input: RawInput,
+) -> PanelFrame {
+    ctx.enable_accesskit();
+    let mut shell = Shell::default();
+    let mut output = ctx.run_ui(input, |ui| {
+        modplayer_ui::shell::show_chrome(
+            ui,
+            modplayer_ui::shell::Chrome {
+                rail: true,
+                gate: None,
+            },
+            &mut shell,
+        );
+        egui::CentralPanel::default().show(ui, |ui| {
+            modplayer_ui::now_playing::show(
+                ui,
+                controller,
+                artwork,
+                waveform,
+                &mut modplayer_ui::section_memory::SectionMemory::default(),
+            );
+        });
+    });
+    let update = output
+        .platform_output
+        .accesskit_update
+        .take()
+        .expect("accesskit_update should be populated once enabled");
+    let shapes: Vec<egui::Shape> = output.shapes.iter().map(|c| c.shape.clone()).collect();
+    output.drop_without_applying_deltas();
+
+    let nodes = update
+        .nodes
+        .iter()
+        .map(|(_, node)| PanelNode {
+            role: node.role(),
+            label: node.label().map(str::to_string),
+            value: node.value().map(str::to_string),
+            bounds: node.bounds().map(|b| {
+                Rect::from_min_max(
+                    Pos2::new(b.x0 as f32, b.y0 as f32),
+                    Pos2::new(b.x1 as f32, b.y1 as f32),
+                )
+            }),
+            toggled: node.toggled(),
+        })
+        .collect();
+    PanelFrame { nodes, shapes }
+}
+
 /// Every `Shape::Rect` filled with `roles.surface_raised`, `radius::MD`
 /// cornered and **stroked** — one per open `panel_card` (contract C2/C5).
 /// `roles.surface_raised` alone isn't enough of a signal: `theme/style.rs`
@@ -2382,7 +2445,8 @@ fn a_closed_panel_contributes_a_header_only_card() {
 
 /// C13 (contracts/panel-card.md, FR-023/FR-024, Edge Case): at a 960×640
 /// viewport with Effect Chain/Transport/Queue all open, the master-volume
-/// row, the peak meter and the Queue card all stay inside the viewport —
+/// row, the peak meter and the Queue card's heading all stay inside the
+/// viewport (narrowed from the whole card by 024, see below) —
 /// `effects_panel_reserved_height` must book at least the old 140.0 plus
 /// the new card insets, so the 2026-09-19 clipping defect cannot recur.
 #[test]
@@ -2430,17 +2494,89 @@ fn reserved_height_keeps_volume_meter_and_queue_card_in_a_960x640_viewport() {
         "peak meter must stay inside the viewport: {peak_meter:?}"
     );
 
+    // 024-effect-chain-rows-and-meters (T042): narrowed from "the whole
+    // Queue card" to "the Queue card's heading". Since 021 (contract S1)
+    // every card lives in one scroll region, so the card's body may run
+    // below the fold; 024's empty-chain explanation (contract R4.2) and
+    // spectrum tick strip (contract S5) push its bottom edge ~15 px past
+    // 640. The clipping defect this test pins — volume row and peak meter
+    // pushed off-screen — stays guarded above, unchanged.
     let queue_heading = find_panel_node(&frame.nodes, Role::Heading, &tr("queue-panel-title"))
         .and_then(|node| node.bounds)
         .expect("the Queue panel heading must render");
-    let queue_card = card_rects(&frame.shapes)
-        .into_iter()
-        .find(|rect| rect.y_range().contains(queue_heading.min.y))
-        .expect("expected a card rect containing the Queue heading");
     assert!(
-        viewport.contains_rect(queue_card),
-        "the Queue card must stay inside the viewport: {queue_card:?}"
+        viewport.contains_rect(queue_heading),
+        "the Queue card's heading must stay inside the viewport: {queue_heading:?}"
     );
+}
+
+/// 024-effect-chain-rows-and-meters contract R5 (T043 manual walk, M8):
+/// at a 960×640 window — nav rail and all, as `app.rs` draws it — the
+/// widest node kinds' controls stay inside the window horizontally, and so
+/// does every panel card. Rendering `effects_view::show` alone across the
+/// full 960 pt (`tests/effects_view.rs::rows_fit_panel_at_960_px`) cannot
+/// catch a zone that only overflows the real, ~740 pt centre column.
+#[test]
+fn effect_rows_fit_the_real_centre_column_at_960x640() {
+    let (mut controller, _handle, _dirs) = active_controller("r5-centre-column");
+    controller.set_now_playing_panel_open(NowPlayingPanel::EffectChain, true);
+    for kind in [NodeKind::Gain, NodeKind::Equalizer, NodeKind::StereoTools] {
+        controller.chain_add_node(kind).expect("add node");
+    }
+
+    let ctx = fresh_ctx();
+    let mut artwork = ArtworkCache::new();
+    let mut waveform = WaveformState::default();
+    let viewport = Rect::from_min_size(Pos2::ZERO, egui::vec2(960.0, 640.0));
+    let input = RawInput {
+        screen_rect: Some(viewport),
+        ..Default::default()
+    };
+    // Zone widths are measured one frame and used the next (data-model
+    // §4.1), so let the rows settle before asserting.
+    for _ in 0..3 {
+        render_shell_frame(
+            &ctx,
+            &mut controller,
+            &mut artwork,
+            &mut waveform,
+            input.clone(),
+        );
+    }
+    let frame = render_shell_frame(&ctx, &mut controller, &mut artwork, &mut waveform, input);
+
+    let phase_invert = tr("effects-param-phase-invert");
+    assert!(
+        frame
+            .nodes
+            .iter()
+            .any(|node| node.accessible_name() == Some(phase_invert.as_str())),
+        "sanity: the Stereo tools row's controls must render"
+    );
+    let overflowing: Vec<_> = frame
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            let bounds = node.bounds?;
+            (bounds.max.x > viewport.max.x + 0.5).then(|| {
+                (
+                    node.role,
+                    node.accessible_name().map(str::to_string),
+                    bounds,
+                )
+            })
+        })
+        .collect();
+    assert!(
+        overflowing.is_empty(),
+        "nodes run past the window's right edge: {overflowing:#?}"
+    );
+    for card in card_rects(&frame.shapes) {
+        assert!(
+            card.max.x <= viewport.max.x + 0.5,
+            "a panel card runs past the window's right edge: {card:?}"
+        );
+    }
 }
 
 /// P3 (contracts/panel-card.md, FR-019, US3 Scenario 5): a click on the
@@ -2969,7 +3105,6 @@ fn scroll_region_has_no_separator_and_cards_are_xl_spaced() {
     for src in [
         include_str!("../src/now_playing.rs"),
         include_str!("../src/markers.rs"),
-        include_str!("../src/effects_view.rs"),
         include_str!("../src/transport_view.rs"),
         include_str!("../src/queue_view.rs"),
     ] {
@@ -2978,6 +3113,22 @@ fn scroll_region_has_no_separator_and_cards_are_xl_spaced() {
             "the scroll region must use `space::XL` gaps, not a `Separator`/hairline (contract S3)"
         );
     }
+    // 024-effect-chain-rows-and-meters (research R2): `effects_view.rs`
+    // now draws exactly one `ui.separator()` — a vertical rule *inside*
+    // one node's row, separating that row's own identity/state/
+    // parameters/actions zones, never a hairline between panel cards.
+    // Contract S3's real guard is the rendered card-gap assertion below
+    // (untouched by anything drawn inside a card's own body); this scan
+    // is narrowed to allow exactly that one recorded call site, not
+    // dropped — any *other* separator in this file still fails here.
+    assert_eq!(
+        include_str!("../src/effects_view.rs")
+            .matches(".separator(")
+            .count(),
+        1,
+        "expected exactly the one recorded row-zone `ui.separator()` in effects_view.rs \
+         (contract S3)"
+    );
 
     let (mut controller, _handle, _dirs) = active_controller("s3-xl-gaps");
     controller.queue_replace(vec![track("a", 200_000)]);

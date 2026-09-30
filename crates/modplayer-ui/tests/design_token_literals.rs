@@ -390,7 +390,19 @@ fn no_colour_or_font_literals_outside_theme() {
 
 /// U3: no `ui.separator()` / `Separator::default()` anywhere under
 /// `crates/modplayer-ui/src/**` (panel-to-panel separation uses spacing
-/// tokens instead — research R20).
+/// tokens instead — research R20) — **except** the one deliberate,
+/// recorded exception below.
+///
+/// **024-effect-chain-rows-and-meters (research R2):** the Effect Chain
+/// row's own zones (identity/state/parameters/actions) are separated by a
+/// vertical `ui.separator()` plus `theme::space::LG` — a distinct use case
+/// from R20's "panel-to-panel" rule (this separates *zones inside one
+/// row*, not panels), chosen because "spacing only" already failed
+/// SC-001 on dense rows (research R2's own rejected alternative). Baseline
+/// raised 0 → 1 for this one named call site; any *other* new hit is still
+/// a regression.
+const EXPECTED_SEPARATOR_HITS: usize = 1;
+
 #[test]
 fn no_separator_between_panels() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -421,14 +433,21 @@ fn no_separator_between_panels() {
         }
     }
 
-    if !hits.is_empty() {
+    if hits.len() != EXPECTED_SEPARATOR_HITS {
         let report: Vec<String> = hits.iter().map(Hit::to_string).collect();
         panic!(
-            "expected zero ui.separator() sites, found {}:\n{}",
+            "expected exactly {} ui.separator() site(s) (the recorded 024 row-zone exception), \
+             found {}:\n{}",
+            EXPECTED_SEPARATOR_HITS,
             hits.len(),
             report.join("\n"),
         );
     }
+    assert!(
+        hits.iter().all(|hit| hit.path.ends_with("effects_view.rs")),
+        "the one recorded ui.separator() exception is effects_view.rs's row-zone separator; \
+         any hit elsewhere is a new, unreviewed one: {hits:?}"
+    );
 }
 
 /// T015 (US3, Phase 5): `notifications.rs`'s new severity-colour/accent-bar

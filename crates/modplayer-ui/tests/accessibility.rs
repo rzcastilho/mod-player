@@ -305,6 +305,24 @@ fn find_one<'a>(nodes: &'a [AccessNode], role: Role, name: &str) -> &'a AccessNo
     matches[0]
 }
 
+/// Every node of `role` whose accessible name *starts with* `prefix`
+/// (024-effect-chain-rows-and-meters, research R4): the reorder handle's
+/// name now carries the node's kind/position after the shared `"Reorder"`
+/// prefix, so per-row handle lookups match on prefix instead of the old
+/// exact `"Reorder"` name (mirrors `tests/effects_view.rs`'s own
+/// `find_all_prefix`).
+fn find_all_prefix<'a>(nodes: &'a [AccessNode], role: Role, prefix: &str) -> Vec<&'a AccessNode> {
+    nodes
+        .iter()
+        .filter(|node| {
+            node.role == role
+                && node
+                    .accessible_name()
+                    .is_some_and(|name| name.starts_with(prefix))
+        })
+        .collect()
+}
+
 #[test]
 fn transport_controls_expose_accessible_names() {
     let (mut controller, _handle, _dir) = active_controller("transport");
@@ -481,8 +499,11 @@ fn effect_chain_controls_expose_accessible_names_and_states() {
         modplayer_ui::effects_view::show(ui, &mut controller, &mut true);
     });
 
+    // 024-effect-chain-rows-and-meters (contract R2.4): the handle's
+    // accessible name now carries the node's kind and position, so it is
+    // found by the still-shared `"Reorder"` prefix, not an exact match.
     assert_eq!(
-        find_all(&nodes, Role::Button, &tr("effects-reorder-handle")).len(),
+        find_all_prefix(&nodes, Role::Button, &tr("effects-reorder-handle")).len(),
         2,
         "every row must have a named, focusable drag handle"
     );
@@ -676,6 +697,83 @@ fn effect_chain_meters_spectrum_and_overload_controls_expose_accessible_names() 
         &tr_args("effects-overloads", &[("count", "2".to_string())]),
     );
     find_one(&nodes, Role::Label, &tr("effects-auto-bypassed"));
+}
+
+/// 024-effect-chain-rows-and-meters (US2, contract H1/H5, FR-006,
+/// T025): the header's whole-chain CPU figure and each row's own CPU
+/// figure both read as budget-relative, real `Role::Label` nodes —
+/// `fluent_keys.rs` already pins that the strings *resolve*; this pins
+/// that the widgets actually render them, right-padded, at idle (0 %).
+#[test]
+fn effect_chain_header_and_row_cpu_figures_are_budget_labeled() {
+    let (mut controller, _handle, _dir) = active_controller("effect-chain-cpu-budget-a11y");
+    let _ = controller
+        .chain_add_node(NodeKind::Gain)
+        .unwrap_or_else(|_| unreachable!());
+
+    let nodes = render_nodes(|ui| {
+        modplayer_ui::effects_view::show(ui, &mut controller, &mut true);
+    });
+
+    let header = find_one(
+        &nodes,
+        Role::Label,
+        &tr_args("effects-chain-cpu", &[("pct", "  0".to_string())]),
+    );
+    assert!(!header.disabled, "{header:?}");
+
+    let row = find_one(
+        &nodes,
+        Role::Label,
+        &tr_args("effects-cpu", &[("pct", "  0".to_string())]),
+    );
+    assert!(!row.disabled, "{row:?}");
+}
+
+/// 024-effect-chain-rows-and-meters (US2, contract S8, T032): the
+/// spectrum's gutter/reference-lines/tick-strip/band-segmentation redraw
+/// must leave its own AccessKit name/value exactly as before — role
+/// `ProgressIndicator`, name `"{effects-spectrum}, 64"`, value the peak
+/// band's centre frequency (or none while silent).
+#[test]
+fn spectrum_accesskit_name_and_value_are_unchanged_by_the_redraw() {
+    let (mut controller, _handle, _dir) = active_controller("spectrum-a11y-s8");
+    let expected_name = format!("{}, 64", tr("effects-spectrum"));
+
+    let nodes = render_nodes(|ui| {
+        modplayer_ui::effects_view::show(ui, &mut controller, &mut true);
+    });
+    let silent = nodes
+        .iter()
+        .find(|n| {
+            n.role == Role::ProgressIndicator && n.label.as_deref() == Some(expected_name.as_str())
+        })
+        .unwrap_or_else(|| panic!("spectrum widget not found: {nodes:?}"));
+    assert!(
+        silent.value.is_none(),
+        "a silent spectrum must carry no value: {silent:?}"
+    );
+
+    let mut bands = [0.0f32; 64];
+    bands[40] = 0.9;
+    controller.shared().set_spectrum(&bands, 1);
+    let nodes = render_nodes(|ui| {
+        modplayer_ui::effects_view::show(ui, &mut controller, &mut true);
+    });
+    let driven = nodes
+        .iter()
+        .find(|n| {
+            n.role == Role::ProgressIndicator && n.label.as_deref() == Some(expected_name.as_str())
+        })
+        .unwrap_or_else(|| panic!("spectrum widget not found: {nodes:?}"));
+    let value = driven
+        .value
+        .as_deref()
+        .expect("a driven spectrum must carry a peak-frequency value");
+    assert!(
+        value.ends_with("Hz"),
+        "expected a Hz/kHz peak-frequency value, got `{value}`: {driven:?}"
+    );
 }
 
 #[test]

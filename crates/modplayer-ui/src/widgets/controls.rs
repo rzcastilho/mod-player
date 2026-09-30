@@ -91,6 +91,25 @@ pub fn switch(ui: &mut Ui, kind: SwitchKind, on: &mut bool, label: &str) -> Resp
     let roles = tokens::roles(ui.visuals());
     let metrics = controls::switch_metrics();
 
+    // Inside a wrapping layout (`horizontal_wrapped`), start a fresh row
+    // first when the whole switch would cross the row's right edge: egui
+    // can't wrap the nested `horizontal` below on its own, since it doesn't
+    // know that block's width up front (024 contract R5, T043 M8 — a Stereo
+    // tools row's last switch ran past the window). Same measure as
+    // `now_playing::wrap_switch_before`: track + item spacing + label galley.
+    if ui.layout().main_wrap && ui.cursor().min.x > ui.max_rect().left() {
+        let galley = egui::WidgetText::from(label).into_galley(
+            ui,
+            None,
+            f32::INFINITY,
+            egui::TextStyle::Body,
+        );
+        let width = metrics.track.x + ui.spacing().item_spacing.x + galley.size().x;
+        if ui.cursor().min.x + width > ui.max_rect().right() {
+            ui.end_row();
+        }
+    }
+
     // A dedicated id, read fresh every pass (research R4/R7): `ui.horizontal`
     // below registers its own (non-focusable, `Sense::hover`) widget rect
     // for its child `Ui`'s id, so re-using `inner.response.id` for the

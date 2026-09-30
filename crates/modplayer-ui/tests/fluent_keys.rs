@@ -417,6 +417,20 @@ const EFFECTS_KEYS: &[&str] = &[
     "effects-rms",
     "effects-spectrum",
     "effects-auto-bypassed",
+    // 024-effect-chain-rows-and-meters (contracts/fluent-strings.md "New
+    // keys"): the header CPU-figure hover hint, the reorder handle's hover
+    // hint, the empty-chain explanation/primary-action labels, and the
+    // spectrum's tick/reference-line labels — all resolved via plain `tr`.
+    "effects-chain-cpu-hint",
+    "effects-reorder-handle-hint",
+    "effects-empty-explanation",
+    "effects-empty-add",
+    "effects-spectrum-tick-100",
+    "effects-spectrum-tick-1k",
+    "effects-spectrum-tick-10k",
+    "effects-spectrum-ref-0db",
+    "effects-spectrum-ref-minus30",
+    "effects-spectrum-ref-minus60",
 ];
 
 /// `effects.ftl` keys templated with `{ $pct }` — resolved via `tr_args`.
@@ -426,6 +440,32 @@ const EFFECTS_PCT_ARG_KEYS: &[&str] = &["effects-chain-cpu", "effects-cpu"];
 /// `tr_args` (008 Phase 6, contracts/ui-effect-chain.md §2's overload
 /// counter).
 const EFFECTS_COUNT_ARG_KEYS: &[&str] = &["effects-overloads"];
+
+/// 024-effect-chain-rows-and-meters (contract R2.4): the reorder handle's
+/// AccessKit name, templated with `{ $kind }`/`{ $position }`.
+const EFFECTS_KIND_POSITION_ARG_KEYS: &[&str] = &["effects-reorder-handle-node"];
+
+/// 024-effect-chain-rows-and-meters (contracts/fluent-strings.md): this
+/// feature's 3 changed keys and 11 new keys — every one must be defined
+/// with the same id in both `locales/en-US/effects.ftl` and
+/// `locales/pt-BR/effects.ftl` (FR-015, NFR-7.1). Checked below by
+/// `effects_024_keys_have_en_us_and_pt_br_parity`.
+const EFFECTS_024_FEATURE_KEYS: &[&str] = &[
+    "effects-chain-cpu",
+    "effects-overloads",
+    "effects-cpu",
+    "effects-chain-cpu-hint",
+    "effects-reorder-handle-node",
+    "effects-reorder-handle-hint",
+    "effects-empty-explanation",
+    "effects-empty-add",
+    "effects-spectrum-tick-100",
+    "effects-spectrum-tick-1k",
+    "effects-spectrum-tick-10k",
+    "effects-spectrum-ref-0db",
+    "effects-spectrum-ref-minus30",
+    "effects-spectrum-ref-minus60",
+];
 
 /// `effects.ftl` notification keys (008, data-model.md §6): `{ $node }`,
 /// `effect-chain-over-budget` also `{ $owner }` — resolved via
@@ -1148,6 +1188,23 @@ fn every_shell_nav_and_notification_key_resolves() {
         );
     }
 
+    // 024-effect-chain-rows-and-meters (contract R2.4): the reorder handle's
+    // name names both the node kind and its 1-based position.
+    for key in EFFECTS_KIND_POSITION_ARG_KEYS {
+        let resolved = tr_args(
+            key,
+            &[("kind", "Gain".to_string()), ("position", "1".to_string())],
+        );
+        assert_ne!(
+            &resolved, key,
+            "Fluent key `{key}` is missing from locales/en-US/effects.ftl (tr_args() fell back to the raw key)"
+        );
+        assert!(
+            resolved.contains("Gain") && resolved.contains('1'),
+            "`{key}` resolved to `{resolved}`, which doesn't name both the kind and the position"
+        );
+    }
+
     for key in EFFECTS_NO_ARG_NOTIFICATION_KEYS {
         let resolved = tr(key);
         assert_ne!(
@@ -1287,6 +1344,7 @@ fn no_unused_keys_in_playback_and_settings_ftl() {
         .chain(EFFECTS_KEYS)
         .chain(EFFECTS_PCT_ARG_KEYS)
         .chain(EFFECTS_COUNT_ARG_KEYS)
+        .chain(EFFECTS_KIND_POSITION_ARG_KEYS)
         .chain(EFFECTS_NODE_ARG_KEYS)
         .chain(EFFECTS_NODE_OWNER_ARG_KEYS)
         .chain(EFFECTS_NO_ARG_NOTIFICATION_KEYS)
@@ -1466,6 +1524,31 @@ fn queue_current_key_was_removed() {
         !defined_keys(playback_ftl).contains("queue-current"),
         "`queue-current` is still defined in playback.ftl — remove it with the old prefix wiring"
     );
+}
+
+/// 024-effect-chain-rows-and-meters (contracts/fluent-strings.md, FR-015,
+/// NFR-7.1): every one of this feature's 3 changed and 11 new
+/// `effects.ftl` keys is defined with the same id in both
+/// `locales/en-US/effects.ftl` and `locales/pt-BR/effects.ftl` — the pt-BR
+/// bundle is additive-only translation parity, not yet a locale the app
+/// switches to (`tr`/`tr_args` still resolve against en-US, `i18n.rs`).
+#[test]
+fn effects_024_keys_have_en_us_and_pt_br_parity() {
+    let en_us_ftl = include_str!("../../../locales/en-US/effects.ftl");
+    let pt_br_ftl = include_str!("../../../locales/pt-BR/effects.ftl");
+    let en_us_keys = defined_keys(en_us_ftl);
+    let pt_br_keys = defined_keys(pt_br_ftl);
+
+    for key in EFFECTS_024_FEATURE_KEYS {
+        assert!(
+            en_us_keys.contains(key),
+            "`{key}` is missing from locales/en-US/effects.ftl"
+        );
+        assert!(
+            pt_br_keys.contains(key),
+            "`{key}` is missing from locales/pt-BR/effects.ftl"
+        );
+    }
 }
 
 #[test]

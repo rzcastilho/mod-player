@@ -530,13 +530,23 @@ fn disabled_controls_show_no_feedback() {
     );
 }
 
-/// **B5** (contract control-variants.md): `Variant::Primary` is applied
-/// to exactly one call site in all of `src/**` — `welcome-acknowledge`
-/// (`welcome.rs`) — so the app has exactly one primary button (data-model
-/// §9.1). `theme/controls.rs` and `widgets/controls.rs` are excluded as
-/// the definition/host files, exactly as B6 excludes them.
+/// **B5** (contract control-variants.md), extended by
+/// 024-effect-chain-rows-and-meters (spec.md: "\"Primary action\" ...
+/// means the `primary` button variant already defined by
+/// 015-control-variants (filled accent, at most one per view)"):
+/// `Variant::Primary` is applied to exactly three call sites in all of
+/// `src/**` — `welcome-acknowledge` (`welcome.rs`), and the effect chain
+/// panel's two *mutually exclusive* empty-state controls,
+/// `effects-empty-add` and `effects-add` (both `effects_view.rs`,
+/// `show_empty_state`/`show_revealed_add_row`) — never both drawn in the
+/// same frame (contracts/ui-effect-chain-rows.md R4.4: exactly one Primary
+/// control is visible in the panel in every state). So every *view* still
+/// has at most one primary button on screen at once, the rule this test
+/// pins; it is no longer exactly one call site app-wide. `theme/
+/// controls.rs` and `widgets/controls.rs` are excluded as the definition/
+/// host files, exactly as B6 excludes them.
 #[test]
-fn welcome_has_exactly_one_primary() {
+fn primary_sites_match_the_one_per_view_rule() {
     let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let non_call_site_files = ["theme/controls.rs", "widgets/controls.rs"];
 
@@ -557,21 +567,27 @@ fn welcome_has_exactly_one_primary() {
         }
     }
 
+    let expected: &[(&str, &str)] = &[
+        ("welcome.rs", "welcome-acknowledge"),
+        ("effects_view.rs", "effects-empty-add"),
+        ("effects_view.rs", "effects-add"),
+    ];
     assert_eq!(
         primary_sites.len(),
-        1,
-        "expected exactly one Variant::Primary call site in src/**, found {}: {primary_sites:?}",
+        expected.len(),
+        "expected exactly {} Variant::Primary call site(s) in src/**, found {}: {primary_sites:?}",
+        expected.len(),
         primary_sites.len()
     );
-    let (rel, _idx, line) = &primary_sites[0];
-    assert_eq!(
-        rel, "welcome.rs",
-        "the one Variant::Primary site must be welcome.rs, found {rel}"
-    );
-    assert!(
-        line.contains("\"welcome-acknowledge\""),
-        "welcome.rs's Variant::Primary site must be welcome-acknowledge, found: {line}"
-    );
+    for (file, key) in expected {
+        let tr_key = format!("\"{key}\"");
+        assert!(
+            primary_sites
+                .iter()
+                .any(|(rel, _idx, line)| rel == file && line.contains(&tr_key)),
+            "expected a Variant::Primary call site in {file} for `{key}`, found {primary_sites:?}"
+        );
+    }
 }
 
 /// **B7** (contract control-variants.md): `Variant::Quiet` is applied to

@@ -8,13 +8,13 @@
 
 effects-toggle = Effects
 effects-panel-title = Effect chain
-effects-chain-cpu = Chain CPU load: { $pct } %
+effects-chain-cpu = Chain CPU: { $pct } % of real-time budget
 effects-add-node = Add node…
 effects-add = Add
 effects-remove = Remove
 effects-bypass = Bypass
 effects-reorder-handle = Reorder
-effects-cpu = CPU { $pct } %
+effects-cpu = { $pct } % of budget
 effects-mode-note = Quality mode auto-switched
 effects-chain-full = Chain is full — remove a node first
 effects-owner-host = host
@@ -62,7 +62,7 @@ effects-filter-low-pass = Low-pass
 ## but its string landed here, alongside the rest of this feature's
 ## notifications).
 
-effects-overloads = Overloads: { $count }
+effects-overloads = Budget overruns: { $count }
 effects-over-budget-badge = Effect chain over budget
 effects-pre = Pre-chain level
 effects-post = Post-chain level
@@ -73,3 +73,18 @@ effects-auto-bypassed = Auto-bypassed (over budget)
 effect-chain-over-budget = Effect chain over budget: { $node } ({ $owner }) is the costliest node
 effect-chain-auto-bypassed = { $node } was auto-bypassed to keep audio playing (over budget)
 effects-no-time-stretch = Add a Time Stretch node to change tempo with the + / - keys
+
+## 024-effect-chain-rows-and-meters: four-zone rows (US1), budget-labeled
+## header/meters/spectrum axis (US2), and the empty-chain explanation (US3).
+
+effects-chain-cpu-hint = Share of each audio callback's time spent in the effect chain; an overrun is counted when it stays above 90 % or exceeds 100 %.
+effects-reorder-handle-node = Reorder { $kind }, position { $position }
+effects-reorder-handle-hint = Drag to reorder, or focus and press the Up or Down arrow key
+effects-empty-explanation = Effect nodes process the audio on its way to your speakers — shift pitch, change tempo, shape tone or set level. Nodes run top to bottom in the order you add them.
+effects-empty-add = Add effect node
+effects-spectrum-tick-100 = 100
+effects-spectrum-tick-1k = 1k
+effects-spectrum-tick-10k = 10k
+effects-spectrum-ref-0db = 0 dB
+effects-spectrum-ref-minus30 = −30
+effects-spectrum-ref-minus60 = −60

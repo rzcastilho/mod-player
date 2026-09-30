@@ -8,7 +8,8 @@
 //! frame and hands the values in (data-model.md §2.5).
 
 use egui::{
-    CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, WidgetInfo, WidgetType, pos2,
+    Align2, CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, WidgetInfo, WidgetType,
+    pos2,
 };
 use modplayer_core::{LevelPair, tr};
 
@@ -24,12 +25,18 @@ fn to_db(amplitude: f32) -> f32 {
     }
 }
 
+/// Always 8 characters — `" -inf dB"` … `"  0.0 dB"` (data-model.md §4.2,
+/// contract L1): a right-aligned 5-character magnitude (`{:>5.1}`, or
+/// `-inf` padded to the same width) plus the constant `" dB"` suffix, so a
+/// level-pair readout's width never shifts as the value crosses zero or
+/// drops to silence.
 fn format_db(db: f32) -> String {
-    if db.is_finite() {
-        format!("{db:.1} dB")
+    let magnitude = if db.is_finite() {
+        format!("{db:.1}")
     } else {
-        "-inf dB".to_string()
-    }
+        "-inf".to_string()
+    };
+    format!("{magnitude:>5} dB")
 }
 
 fn fraction_of(db: f32) -> f32 {
@@ -231,27 +238,260 @@ fn spectrum_bar_height(value: f32) -> f32 {
     ((db - SPECTRUM_FLOOR_DB) / -SPECTRUM_FLOOR_DB).clamp(0.0, 1.0)
 }
 
-/// The post-chain 64-band spectrum (contracts/ui-effect-chain.md §2): a
-/// log-frequency bar display, 20 Hz–20 kHz. `bands` is linear magnitude,
-/// 0..1 (data-model.md §2.5), drawn on a 60 dB log scale.
+// ---------------------------------------------------------------------
+// Spectrum axis model (024-effect-chain-rows-and-meters, data-model.md
+// §4.3/§4.4, contracts/ui-chain-meters.md §S): the dB gutter's reference
+// lines, the frequency tick strip, and the bars' band segmentation — all
+// pure, unit-tested helpers `spectrum` alone calls.
+// ---------------------------------------------------------------------
+
+/// The bars' existing log-frequency mapping bounds (unchanged) — shared
+/// with [`freq_to_frac`] so the tick strip lines up with the bars.
+const SPECTRUM_MIN_HZ: f32 = 20.0;
+const SPECTRUM_MAX_HZ: f32 = 20_000.0;
+
+/// Labeled ticks (contract S5): `(hz, fluent key)` — every tick's text
+/// comes from Fluent (FR-015), never a literal at the paint site.
+const MAJOR_TICKS_HZ: [(f32, &str); 3] = [
+    (100.0, "effects-spectrum-tick-100"),
+    (1_000.0, "effects-spectrum-tick-1k"),
+    (10_000.0, "effects-spectrum-tick-10k"),
+];
+
+/// Unlabeled ticks (contract S5): a shorter mark, no text.
+const MINOR_TICKS_HZ: [f32; 5] = [50.0, 200.0, 500.0, 2_000.0, 5_000.0];
+
+/// The three dBFS reference lines (contract S3), each paired with its
+/// gutter Fluent key (contract S4).
+const REFERENCE_DB: [(f32, &str); 3] = [
+    (0.0, "effects-spectrum-ref-0db"),
+    (-30.0, "effects-spectrum-ref-minus30"),
+    (-60.0, "effects-spectrum-ref-minus60"),
+];
+
+/// A frequency in Hz as a 0..1 x-fraction of the plot (data-model.md
+/// §4.3): `log10(hz / 20) / log10(1000)`, clamped — `freq_to_frac(100) ≈
+/// 0.233`, `(1_000) ≈ 0.566`, `(10_000) ≈ 0.900`. Shared by the bars'
+/// existing mapping and the tick strip, so both agree exactly.
+fn freq_to_frac(hz: f32) -> f32 {
+    let span = (SPECTRUM_MAX_HZ / SPECTRUM_MIN_HZ).log10();
+    ((hz / SPECTRUM_MIN_HZ).max(f32::MIN_POSITIVE).log10() / span).clamp(0.0, 1.0)
+}
+
+/// A dBFS value as a 0..1 y-fraction of the plot, `1.0` at the top
+/// (data-model.md §4.3): the inverse of the bars' own height rule, over
+/// the same [`SPECTRUM_FLOOR_DB`]..0 range — `db_to_frac(0) == 1.0`,
+/// `(-30) == 0.5`, `(-60) == 0.0`.
+fn db_to_frac(db: f32) -> f32 {
+    ((db - SPECTRUM_FLOOR_DB) / -SPECTRUM_FLOOR_DB).clamp(0.0, 1.0)
+}
+
+/// Each major tick's label span (contract S6), centred on
+/// `freq_to_frac(hz) * plot_width` and clamped to stay inside the plot
+/// and clear of the previous label — assigned left to right (frequency
+/// only ever increases across [`MAJOR_TICKS_HZ`]), so no two spans can
+/// overlap by construction (data-model.md §4.3).
+fn tick_label_spans(plot_width: f32, label_widths: [f32; 3]) -> [(f32, f32); 3] {
+    let mut spans = [(0.0_f32, 0.0_f32); 3];
+    let mut min_left = 0.0_f32;
+    for (i, &(hz, _)) in MAJOR_TICKS_HZ.iter().enumerate() {
+        let width = label_widths[i].max(0.0);
+        let max_left = (plot_width - width).max(min_left);
+        let center = freq_to_frac(hz) * plot_width;
+        let left = (center - width / 2.0).clamp(min_left, max_left);
+        let right = left + width;
+        spans[i] = (left, right);
+        min_left = right;
+    }
+    spans
+}
+
+/// A bar's colour segmentation (data-model.md §4.4): fractions of the
+/// plot height (`0.0` at the floor, `1.0` at 0 dBFS), boundaries reused
+/// from `controls::BAND_WARNING_DB`/`SCALE_MAX_DB`. Only the first `usize`
+/// entries of the returned array are meaningful — `0` (silent, `value <=`
+/// the floor), `1` (positive only), `2` (positive + warning), or `3`
+/// (positive + warning + a danger cap, drawn by the caller as a fixed
+/// pixel strip rather than the returned fraction — contract S2).
+fn spectrum_segments(value: f32) -> ([(Band, f32, f32); 3], usize) {
+    let height = spectrum_bar_height(value);
+    if height <= 0.0 {
+        return ([(Band::Positive, 0.0, 0.0); 3], 0);
+    }
+
+    let warn_start = spectrum_bar_height(10f32.powf(controls::BAND_WARNING_DB / 20.0));
+    let danger_start = spectrum_bar_height(10f32.powf(SCALE_MAX_DB / 20.0));
+
+    if height <= warn_start {
+        return (
+            [
+                (Band::Positive, 0.0, height),
+                (Band::Positive, 0.0, 0.0),
+                (Band::Positive, 0.0, 0.0),
+            ],
+            1,
+        );
+    }
+    if height < danger_start {
+        return (
+            [
+                (Band::Positive, 0.0, warn_start),
+                (Band::Warning, warn_start, height),
+                (Band::Positive, 0.0, 0.0),
+            ],
+            2,
+        );
+    }
+    (
+        [
+            (Band::Positive, 0.0, warn_start),
+            (Band::Warning, warn_start, danger_start),
+            (Band::Danger, danger_start, danger_start),
+        ],
+        3,
+    )
+}
+
+/// A text's rendered width in the `mono` role, measured without painting
+/// it (mirrors `waveform/mod.rs`'s own `hover_label_galley_size`): summing
+/// glyph advances avoids `Painter::layout_no_wrap`'s throwaway fill colour,
+/// which this crate's literal scan does not allow outside `theme/**`
+/// (FR-018a).
+fn text_width(ui: &Ui, font_id: &egui::FontId, text: &str) -> f32 {
+    ui.ctx()
+        .fonts_mut(|fonts| text.chars().map(|c| fonts.glyph_width(font_id, c)).sum())
+}
+
+/// The post-chain 64-band spectrum (contracts/ui-effect-chain.md §2,
+/// 024-effect-chain-rows-and-meters contracts/ui-chain-meters.md §S): a
+/// log-frequency bar display, 20 Hz–20 kHz, `bands` linear magnitude 0..1
+/// (data-model.md §2.5), drawn on a 60 dB log scale — now with a left dB
+/// gutter (0/−30/−60 reference lines), a bottom frequency tick strip
+/// (100/1k/10k major, five unlabeled minor ticks), and positive/warning/
+/// danger bar segmentation in place of the flat `selection.bg_fill`.
 pub fn spectrum(ui: &mut Ui, bands: &[f32]) {
     let n = bands.len().max(1);
-    let size = Vec2::new(ui.available_width().clamp(160.0, 420.0), 40.0);
+    let outer_width = ui.available_width().clamp(160.0, 420.0);
+    let plot_height = 40.0;
+    let tick_strip_height = 12.0;
+    let gutter_pad = theme::space::XS;
+
+    let roles = theme::roles(ui.visuals());
+    let font_id = theme::mono_font_id();
+    let ref_labels: [String; 3] = [
+        tr(REFERENCE_DB[0].1),
+        tr(REFERENCE_DB[1].1),
+        tr(REFERENCE_DB[2].1),
+    ];
+    let gutter_width = ref_labels
+        .iter()
+        .map(|text| text_width(ui, &font_id, text))
+        .fold(0.0_f32, f32::max)
+        + gutter_pad * 2.0;
+
+    let size = Vec2::new(outer_width, plot_height + tick_strip_height);
     let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
 
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
-        let bar_w = rect.width() / n as f32;
+        let mark_color = controls::mark_color(roles, false);
+        let plot_rect = Rect::from_min_max(
+            pos2((rect.left() + gutter_width).min(rect.right()), rect.top()),
+            pos2(rect.right(), rect.top() + plot_height),
+        );
+        let tick_top = plot_rect.bottom();
+
+        // Bars (S1/S2/S9): same x/height mapping as before, coloured by
+        // `spectrum_segments` instead of a single flat fill.
+        let bar_w = plot_rect.width() / n as f32;
         for (i, &value) in bands.iter().enumerate() {
-            let h = rect.height() * spectrum_bar_height(value);
-            let x0 = rect.left() + i as f32 * bar_w;
+            let x0 = plot_rect.left() + i as f32 * bar_w;
             let bar_rect = Rect::from_min_max(
-                pos2(x0, rect.bottom() - h),
-                pos2(x0 + (bar_w * 0.9).max(1.0), rect.bottom()),
+                pos2(x0, plot_rect.top()),
+                pos2(x0 + (bar_w * 0.9).max(1.0), plot_rect.bottom()),
             );
-            painter.rect_filled(bar_rect, 0.0, ui.visuals().selection.bg_fill);
+            let (segments, count) = spectrum_segments(value);
+            for &(band, start, end) in segments.iter().take(count) {
+                if band == Band::Danger {
+                    let cap = 3.0_f32.min(plot_rect.height());
+                    let danger_rect = Rect::from_min_max(
+                        pos2(bar_rect.left(), plot_rect.top()),
+                        pos2(bar_rect.right(), plot_rect.top() + cap),
+                    );
+                    painter.rect_filled(danger_rect, 0.0, controls::band_color(roles, band));
+                } else {
+                    let seg_rect = Rect::from_min_max(
+                        pos2(
+                            bar_rect.left(),
+                            plot_rect.bottom() - end * plot_rect.height(),
+                        ),
+                        pos2(
+                            bar_rect.right(),
+                            plot_rect.bottom() - start * plot_rect.height(),
+                        ),
+                    );
+                    painter.rect_filled(seg_rect, 0.0, controls::band_color(roles, band));
+                }
+            }
         }
-        painter.rect_stroke(rect, 0.0, ui.visuals().window_stroke, StrokeKind::Outside);
+
+        // Reference lines + gutter labels (S3/S4), painted after the bars.
+        for (&(db, _), label) in REFERENCE_DB.iter().zip(ref_labels.iter()) {
+            let y = plot_rect.bottom() - db_to_frac(db) * plot_rect.height();
+            painter.line_segment(
+                [pos2(plot_rect.left(), y), pos2(plot_rect.right(), y)],
+                Stroke::new(controls::SCALE_MARK_WIDTH, mark_color),
+            );
+            painter.text(
+                pos2(plot_rect.left() - gutter_pad, y),
+                Align2::RIGHT_CENTER,
+                label,
+                theme::mono_font_id(),
+                mark_color,
+            );
+        }
+
+        // Frequency tick strip (S5): major ticks labeled, minor unlabeled.
+        let tick_labels: [String; 3] = [
+            tr(MAJOR_TICKS_HZ[0].1),
+            tr(MAJOR_TICKS_HZ[1].1),
+            tr(MAJOR_TICKS_HZ[2].1),
+        ];
+        let label_widths = [
+            text_width(ui, &font_id, &tick_labels[0]),
+            text_width(ui, &font_id, &tick_labels[1]),
+            text_width(ui, &font_id, &tick_labels[2]),
+        ];
+        let spans = tick_label_spans(plot_rect.width(), label_widths);
+        for (i, &(hz, _)) in MAJOR_TICKS_HZ.iter().enumerate() {
+            let x = plot_rect.left() + freq_to_frac(hz) * plot_rect.width();
+            painter.line_segment(
+                [pos2(x, tick_top), pos2(x, tick_top + 4.0)],
+                Stroke::new(controls::SCALE_MARK_WIDTH, mark_color),
+            );
+            let (left, _right) = spans[i];
+            painter.text(
+                pos2(plot_rect.left() + left, tick_top + 4.0),
+                Align2::LEFT_TOP,
+                &tick_labels[i],
+                theme::mono_font_id(),
+                mark_color,
+            );
+        }
+        for &hz in &MINOR_TICKS_HZ {
+            let x = plot_rect.left() + freq_to_frac(hz) * plot_rect.width();
+            painter.line_segment(
+                [pos2(x, tick_top), pos2(x, tick_top + 2.0)],
+                Stroke::new(controls::SCALE_MARK_WIDTH, mark_color),
+            );
+        }
+
+        painter.rect_stroke(
+            plot_rect,
+            0.0,
+            ui.visuals().window_stroke,
+            StrokeKind::Outside,
+        );
     }
 
     let (peak_band, &peak_value) = bands
@@ -320,5 +560,106 @@ mod tests {
         assert_eq!(spectrum_bar_height(0.001), 0.0);
         assert_eq!(spectrum_bar_height(0.0), 0.0);
         assert_eq!(spectrum_bar_height(4.0), 1.0);
+    }
+
+    // -------------------------------------------------------------
+    // T021 (US2, data-model.md §4.2, contract L1): `format_db` is always
+    // 8 characters, from silence to full scale.
+    // -------------------------------------------------------------
+    #[test]
+    fn format_db_is_fixed_width() {
+        for db in [f32::NEG_INFINITY, -60.0, -12.3, -6.0, 0.0] {
+            let text = format_db(db);
+            assert_eq!(
+                text.chars().count(),
+                8,
+                "format_db({db}) = `{text}`, expected exactly 8 characters"
+            );
+        }
+        // Pinning the exact contract examples, not just the width.
+        assert_eq!(format_db(f32::NEG_INFINITY), " -inf dB");
+        assert_eq!(format_db(-60.0), "-60.0 dB");
+        assert_eq!(format_db(-12.3), "-12.3 dB");
+        assert_eq!(format_db(-6.0), " -6.0 dB");
+        assert_eq!(format_db(0.0), "  0.0 dB");
+    }
+
+    // -------------------------------------------------------------
+    // T022 (US2, data-model.md §4.3, contract S5/S6): the spectrum's
+    // frequency/dB axis helpers.
+    // -------------------------------------------------------------
+    #[test]
+    fn freq_to_frac_matches_bar_mapping() {
+        assert!((freq_to_frac(100.0) - 0.233).abs() < 0.01);
+        assert!((freq_to_frac(1_000.0) - 0.566).abs() < 0.01);
+        assert!((freq_to_frac(10_000.0) - 0.900).abs() < 0.01);
+        // Clamped at the ends.
+        assert_eq!(freq_to_frac(SPECTRUM_MIN_HZ), 0.0);
+        assert_eq!(freq_to_frac(SPECTRUM_MAX_HZ), 1.0);
+    }
+
+    #[test]
+    fn db_to_frac_inverts_bar_height() {
+        assert_eq!(db_to_frac(0.0), 1.0);
+        assert!((db_to_frac(-30.0) - 0.5).abs() < 1e-6);
+        assert_eq!(db_to_frac(-60.0), 0.0);
+    }
+
+    #[test]
+    fn tick_label_spans_never_overlap_160_to_420() {
+        // Representative widths for "100"/"1k"/"10k" at the mono role —
+        // the invariant holds for any label widths that fit the plot, so
+        // this exercises the shape the real strip actually draws.
+        let label_widths = [24.0, 16.0, 24.0];
+        let mut width = 160.0_f32;
+        while width <= 420.0 {
+            let spans = tick_label_spans(width, label_widths);
+            for span in &spans {
+                assert!(
+                    span.0 >= 0.0 && span.1 <= width && span.0 <= span.1,
+                    "span {span:?} escapes [0, {width}]"
+                );
+            }
+            for pair in spans[..].windows(2) {
+                assert!(
+                    pair[0].1 <= pair[1].0 + 1e-3,
+                    "spans overlap at plot_width={width}: {spans:?}"
+                );
+            }
+            width += 10.0;
+        }
+    }
+
+    // -------------------------------------------------------------
+    // T023 (US2, data-model.md §4.4, contract S2): the bars' band
+    // segmentation.
+    // -------------------------------------------------------------
+    #[test]
+    fn spectrum_segments_band_boundaries() {
+        let (segments, count) = spectrum_segments(0.001);
+        assert_eq!(
+            count, 0,
+            "at/below the floor: no segments, got {segments:?}"
+        );
+
+        let (segments, count) = spectrum_segments(0.1);
+        assert_eq!(count, 1, "below -6 dBFS: positive only");
+        assert_eq!(segments[0].0, Band::Positive);
+        assert_eq!(segments[0].1, 0.0);
+        assert!((segments[0].2 - 0.667).abs() < 0.01);
+
+        let (segments, count) = spectrum_segments(0.7);
+        assert_eq!(count, 2, "between -6 and 0 dBFS: positive + warning");
+        assert_eq!(segments[0].0, Band::Positive);
+        assert!((segments[0].2 - 0.9).abs() < 1e-3);
+        assert_eq!(segments[1].0, Band::Warning);
+        assert!((segments[1].1 - 0.9).abs() < 1e-3);
+        assert!((segments[1].2 - 0.948).abs() < 0.01);
+
+        let (segments, count) = spectrum_segments(1.5);
+        assert_eq!(count, 3, "at/above 0 dBFS: positive + warning + danger cap");
+        assert_eq!(segments[0].0, Band::Positive);
+        assert_eq!(segments[1].0, Band::Warning);
+        assert_eq!(segments[2].0, Band::Danger);
     }
 }
