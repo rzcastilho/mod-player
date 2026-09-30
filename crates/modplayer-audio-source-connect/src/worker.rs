@@ -12,7 +12,9 @@
 //! move-only, so it cannot be rebuilt on every reconnect. Session drops —
 //! `Retry` or an unexpected end — instead rebuild `Session` + `Spirc` and
 //! call `Player::set_session` to re-point the existing player, matching
-//! how librespot's own CLI handles session loss.
+//! how librespot's own CLI handles session loss. For the same reason a
+//! `Deregister` parks the thread (session torn down, `Player` kept) until
+//! the next `Initialize` rather than exiting it (#31).
 //!
 //! Scope note (US1): a single automatic backoff-and-reconnect loop covers
 //! an unexpected session end; the richer session-loss / transient-health
@@ -198,9 +200,12 @@ fn run(
     {
         Ok(runtime) => runtime,
         Err(_) => {
-            let _ = event_tx.send(SourceEvent::Health(SourceHealth::Unavailable {
-                client_update_required: false,
-            }));
+            report_health(
+                &event_tx,
+                SourceHealth::Unavailable {
+                    client_update_required: false,
+                },
+            );
             return;
         }
     };
@@ -247,11 +252,23 @@ fn run(
             Ok(token) => token,
             Err(_) => {
                 let delay = backoff.next_delay();
-                let _ = event_tx.send(SourceEvent::Health(SourceHealth::Transient {
-                    since: Instant::now(),
-                    next_retry_in: delay,
-                }));
-                if !wait_for_retry_or_shutdown(&cmd_rx, &event_tx, &config.tmp_dir, delay) {
+                report_health(
+                    &event_tx,
+                    SourceHealth::Transient {
+                        since: Instant::now(),
+                        next_retry_in: delay,
+                    },
+                );
+                let outcome =
+                    wait_for_retry_or_shutdown(&cmd_rx, &event_tx, &config.tmp_dir, delay);
+                if !resolve_wait(
+                    outcome,
+                    &cmd_rx,
+                    &config.tmp_dir,
+                    &mut pending_program,
+                    &mut device_name,
+                    &mut backoff,
+                ) {
                     return;
                 }
                 continue;
@@ -274,9 +291,12 @@ fn run(
                 // The producer was already consumed by an earlier attempt
                 // that failed before reaching this point — cannot build a
                 // player without it; nothing more this worker can do.
-                let _ = event_tx.send(SourceEvent::Health(SourceHealth::Unavailable {
-                    client_update_required: false,
-                }));
+                report_health(
+                    &event_tx,
+                    SourceHealth::Unavailable {
+                        client_update_required: false,
+                    },
+                );
                 return;
             };
             let player_config = PlayerConfig {
@@ -337,14 +357,22 @@ fn run(
                     health::Classification::Health(outcome) => {
                         let health =
                             health::to_source_health(outcome, Instant::now(), backoff.next_delay());
-                        let _ = event_tx.send(SourceEvent::Health(health));
+                        report_health(&event_tx, health);
                     }
                 }
-                if !wait_for_retry_or_shutdown(
+                let outcome = wait_for_retry_or_shutdown(
                     &cmd_rx,
                     &event_tx,
                     &config.tmp_dir,
                     backoff.next_delay(),
+                );
+                if !resolve_wait(
+                    outcome,
+                    &cmd_rx,
+                    &config.tmp_dir,
+                    &mut pending_program,
+                    &mut device_name,
+                    &mut backoff,
                 ) {
                     return;
                 }
@@ -353,9 +381,7 @@ fn run(
         };
 
         backoff.reset();
-        let _ = event_tx.send(SourceEvent::Registered {
-            device_name: device_name.clone(),
-        });
+        announce_session(&event_tx, &device_name);
 
         // T084 (research R6): whether the *current* track is inside
         // librespot's 30 s-before-end preload window, so a `LoadProgram`
@@ -379,6 +405,14 @@ fn run(
         }
 
         let ended = Arc::new(AtomicBool::new(false));
+        // #31: this session's player-event task forwards only while the
+        // session is live. `Player` (and its event channel) outlives the
+        // session — across reconnects, and now across a parked
+        // `Deregister` whose runtime stays up — so without this the old
+        // task would keep forwarding: the teardown's own
+        // `SessionDisconnected` surfaced as `BecameInactive` after
+        // `Deregistered`, and every reconnect stacked another forwarder.
+        let session_live = Arc::new(AtomicBool::new(true));
         {
             let ended = Arc::clone(&ended);
             runtime.spawn(async move {
@@ -398,6 +432,7 @@ fn run(
             let preload_window_open = Arc::clone(&preload_window_open);
             let mapper = Arc::clone(&mapper);
             let decode_ahead = Arc::clone(&decode_ahead);
+            let session_live = Arc::clone(&session_live);
             let session_for_decode = session.clone();
             let runtime_handle = runtime.handle().clone();
             runtime.spawn(async move {
@@ -438,6 +473,9 @@ fn run(
                                 Ok(Some(event)) => event,
                                 Ok(None) => break,
                                 Err(_) => {
+                                    if !session_live.load(Ordering::Acquire) {
+                                        break;
+                                    }
                                     // No `TrackChanged` arrived in time:
                                     // this activation has no known context.
                                     awaiting_transfer_context = None;
@@ -457,6 +495,9 @@ fn run(
                             None => break,
                         },
                     };
+                    if !session_live.load(Ordering::Acquire) {
+                        break;
+                    }
 
                     if matches!(event, PlayerEvent::SessionConnected { .. }) {
                         if transfer_requested.swap(false, Ordering::AcqRel) {
@@ -597,6 +638,7 @@ fn run(
             &event_tx,
             &catalog_semaphore,
         );
+        session_live.store(false, Ordering::Release);
         drain_retired(&mut retired_rx);
 
         match outcome {
@@ -609,7 +651,18 @@ fn run(
                 let _ = spirc.disconnect(true);
                 let _ = spirc.shutdown();
                 let _ = event_tx.send(SourceEvent::Deregistered);
-                return;
+                // #31: park rather than exit — `Player` (and the ring
+                // producer it owns) survives, so the next `Initialize`
+                // (sign-in after sign-out/revoke, tier restored) can
+                // re-register in-process instead of being a no-op against
+                // a dead thread.
+                match park_until_initialize(&cmd_rx, &config.tmp_dir, &mut pending_program) {
+                    Parked::Resume { device_name: name } => {
+                        device_name = name;
+                        backoff.reset();
+                    }
+                    Parked::Exit => return,
+                }
             }
             SessionOutcome::Retry => {
                 let _ = spirc.shutdown();
@@ -617,11 +670,23 @@ fn run(
             }
             SessionOutcome::UnexpectedEnd => {
                 let delay = backoff.next_delay();
-                let _ = event_tx.send(SourceEvent::Health(SourceHealth::Transient {
-                    since: Instant::now(),
-                    next_retry_in: delay,
-                }));
-                if !wait_for_retry_or_shutdown(&cmd_rx, &event_tx, &config.tmp_dir, delay) {
+                report_health(
+                    &event_tx,
+                    SourceHealth::Transient {
+                        since: Instant::now(),
+                        next_retry_in: delay,
+                    },
+                );
+                let outcome =
+                    wait_for_retry_or_shutdown(&cmd_rx, &event_tx, &config.tmp_dir, delay);
+                if !resolve_wait(
+                    outcome,
+                    &cmd_rx,
+                    &config.tmp_dir,
+                    &mut pending_program,
+                    &mut device_name,
+                    &mut backoff,
+                ) {
                     return;
                 }
             }
@@ -634,33 +699,133 @@ fn run(
     }
 }
 
+/// A session was established: report recovery *before* registration
+/// (#31). Every failure path reports `Health(Transient|Unavailable)`, so
+/// without this `Ok` the host would mirror the last failure forever —
+/// `is_online()` stays false (Library/Search "offline") and the 30 s
+/// reconnect warning fires even though librespot authenticated.
+fn announce_session(event_tx: &Sender<SourceEvent>, device_name: &str) {
+    report_health(event_tx, SourceHealth::Ok);
+    log::info!("connect worker: registered Connect device");
+    let _ = event_tx.send(SourceEvent::Registered {
+        device_name: device_name.to_string(),
+    });
+}
+
+/// Send a `Health` event, logging it at `info` (#31: the transition must
+/// be visible in the app log).
+fn report_health(event_tx: &Sender<SourceEvent>, health: SourceHealth) {
+    log::info!("connect worker: health {health:?}");
+    let _ = event_tx.send(SourceEvent::Health(health));
+}
+
+/// How [`wait_for_retry_or_shutdown`] ended.
+#[derive(Debug, PartialEq, Eq)]
+enum WaitOutcome {
+    /// Backoff elapsed (or `Retry` arrived): reconnect now.
+    Retry,
+    /// `Shutdown`, or the command channel closed: exit the worker.
+    Exit,
+    /// `Deregister` arrived: stop reconnecting and park (#31).
+    Deregistered,
+}
+
 /// While disconnected (credential/connect failure), keep draining
 /// commands so `Shutdown` is honoured promptly instead of only after a
-/// full backoff sleep; returns `false` when the worker should exit.
+/// full backoff sleep.
 fn wait_for_retry_or_shutdown(
     cmd_rx: &Receiver<SourceCommand>,
     event_tx: &Sender<SourceEvent>,
     tmp_dir: &std::path::Path,
     delay: Duration,
-) -> bool {
+) -> WaitOutcome {
     let deadline = Instant::now() + delay;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return true;
+            return WaitOutcome::Retry;
         }
         match cmd_rx.recv_timeout(remaining.min(Duration::from_millis(200))) {
             Ok(SourceCommand::Shutdown) => {
                 crate::tmp::purge(tmp_dir);
-                return false;
+                return WaitOutcome::Exit;
             }
             Ok(SourceCommand::Deregister) => {
+                // #31: this used to report `Deregistered` and keep
+                // retrying — re-registering a signed-out account on the
+                // next successful connect.
                 let _ = event_tx.send(SourceEvent::Deregistered);
+                return WaitOutcome::Deregistered;
             }
-            Ok(SourceCommand::Retry) => return true,
+            Ok(SourceCommand::Retry) => return WaitOutcome::Retry,
             Ok(_) => {}
             Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return false,
+            Err(RecvTimeoutError::Disconnected) => return WaitOutcome::Exit,
+        }
+    }
+}
+
+/// Act on a [`WaitOutcome`]; returns `false` when the worker should exit.
+/// A `Deregistered` outcome parks until the next `Initialize`, adopting
+/// its device name and restarting the backoff.
+fn resolve_wait(
+    outcome: WaitOutcome,
+    cmd_rx: &Receiver<SourceCommand>,
+    tmp_dir: &std::path::Path,
+    pending_program: &mut Option<Program>,
+    device_name: &mut String,
+    backoff: &mut Backoff,
+) -> bool {
+    match outcome {
+        WaitOutcome::Retry => true,
+        WaitOutcome::Exit => false,
+        WaitOutcome::Deregistered => {
+            match park_until_initialize(cmd_rx, tmp_dir, pending_program) {
+                Parked::Resume { device_name: name } => {
+                    *device_name = name;
+                    backoff.reset();
+                    true
+                }
+                Parked::Exit => false,
+            }
+        }
+    }
+}
+
+/// How [`park_until_initialize`] ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Parked {
+    /// `Initialize` arrived: re-register under `device_name`.
+    Resume { device_name: String },
+    /// `Shutdown`, or the command channel closed.
+    Exit,
+}
+
+/// Deregistered (#31): hold the worker — and the `Player` whose ring
+/// producer cannot be rebuilt — idle until the host sends `Initialize`
+/// again (`ConnectSource::handle_initialize` forwards it to a live
+/// worker). A `LoadProgram` sent meanwhile is kept for the next session,
+/// like the one carried across a restart; everything else is moot while
+/// no session exists.
+fn park_until_initialize(
+    cmd_rx: &Receiver<SourceCommand>,
+    tmp_dir: &std::path::Path,
+    pending_program: &mut Option<Program>,
+) -> Parked {
+    log::info!("connect worker: deregistered, parked until Initialize");
+    loop {
+        match cmd_rx.recv() {
+            Ok(SourceCommand::Initialize { device_name, .. }) => {
+                log::info!("connect worker: Initialize while parked, re-registering");
+                return Parked::Resume { device_name };
+            }
+            Ok(SourceCommand::Shutdown) => {
+                crate::tmp::purge(tmp_dir);
+                return Parked::Exit;
+            }
+            Ok(SourceCommand::LoadProgram(program)) => *pending_program = Some(program),
+            Ok(_) => {}
+            Err(_) => return Parked::Exit,
         }
     }
 }
@@ -1026,5 +1191,123 @@ fn build_session_config(config: &WorkerConfig) -> SessionConfig {
         device_id: config.device_id.clone(),
         tmp_dir: config.tmp_dir.clone(),
         ..SessionConfig::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn missing_tmp_dir() -> PathBuf {
+        std::env::temp_dir().join("modplayer-worker-test-never-created")
+    }
+
+    fn program(generation: u64) -> Program {
+        Program {
+            order: Vec::new(),
+            cursor_index: 0,
+            position_ms: 0,
+            start_playing: false,
+            repeat_all: false,
+            repeat_one: false,
+            generation,
+        }
+    }
+
+    fn initialize(name: &str) -> SourceCommand {
+        SourceCommand::Initialize {
+            device_name: name.to_string(),
+            device_id: "0".repeat(32),
+        }
+    }
+
+    #[test]
+    fn announce_session_reports_health_ok_before_registered() {
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        announce_session(&event_tx, "Den");
+        let events: Vec<SourceEvent> = event_rx.try_iter().collect();
+        assert!(matches!(
+            events.as_slice(),
+            [
+                SourceEvent::Health(SourceHealth::Ok),
+                SourceEvent::Registered { device_name },
+            ] if device_name == "Den"
+        ));
+    }
+
+    #[test]
+    fn park_resumes_on_initialize_and_keeps_a_program_sent_meanwhile() {
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
+        let _ = cmd_tx.send(SourceCommand::Play);
+        let _ = cmd_tx.send(SourceCommand::LoadProgram(program(7)));
+        let _ = cmd_tx.send(initialize("Kitchen"));
+        let mut pending = None;
+        let parked = park_until_initialize(&cmd_rx, &missing_tmp_dir(), &mut pending);
+        assert_eq!(
+            parked,
+            Parked::Resume {
+                device_name: "Kitchen".to_string()
+            }
+        );
+        assert_eq!(pending.map(|p| p.generation), Some(7));
+    }
+
+    #[test]
+    fn park_exits_on_shutdown() {
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
+        let _ = cmd_tx.send(SourceCommand::Shutdown);
+        let mut pending = None;
+        assert_eq!(
+            park_until_initialize(&cmd_rx, &missing_tmp_dir(), &mut pending),
+            Parked::Exit
+        );
+    }
+
+    #[test]
+    fn park_exits_when_the_host_drops_the_channel() {
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<SourceCommand>();
+        drop(cmd_tx);
+        let mut pending = None;
+        assert_eq!(
+            park_until_initialize(&cmd_rx, &missing_tmp_dir(), &mut pending),
+            Parked::Exit
+        );
+    }
+
+    #[test]
+    fn deregister_during_backoff_stops_retrying() {
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let _ = cmd_tx.send(SourceCommand::Deregister);
+        let outcome = wait_for_retry_or_shutdown(
+            &cmd_rx,
+            &event_tx,
+            &missing_tmp_dir(),
+            Duration::from_secs(60),
+        );
+        assert_eq!(outcome, WaitOutcome::Deregistered);
+        assert!(matches!(
+            event_rx.try_iter().collect::<Vec<_>>().as_slice(),
+            [SourceEvent::Deregistered]
+        ));
+    }
+
+    #[test]
+    fn resolve_wait_after_deregister_adopts_the_new_device_name() {
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
+        let _ = cmd_tx.send(initialize("Office"));
+        let mut pending = None;
+        let mut device_name = "Old".to_string();
+        let mut backoff = Backoff::new();
+        let _ = backoff.next_delay();
+        assert!(resolve_wait(
+            WaitOutcome::Deregistered,
+            &cmd_rx,
+            &missing_tmp_dir(),
+            &mut pending,
+            &mut device_name,
+            &mut backoff,
+        ));
+        assert_eq!(device_name, "Office");
     }
 }

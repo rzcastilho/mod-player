@@ -1067,6 +1067,26 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
             )
     }
 
+    /// #31: log every `health`/`active` transition at `info`, so a stuck
+    /// "offline" (`is_online()`) is diagnosable from the app log. Called
+    /// after each place that writes either field: `dispatch` (the
+    /// reducer) and `set_playback_permitted`/`clear_for_sign_out` (which
+    /// set `active` directly).
+    fn log_link_transition(&self, before_health: &SourceHealth, before_active: &ActiveState) {
+        if *before_health != self.transport_state.health {
+            log::info!(
+                "source link: health {before_health:?} -> {:?}",
+                self.transport_state.health
+            );
+        }
+        if *before_active != self.transport_state.active {
+            log::info!(
+                "source link: active {before_active:?} -> {:?}",
+                self.transport_state.active
+            );
+        }
+    }
+
     /// The injected wall clock's current reading (design note 6);
     /// `Instant::now()` in production. Timers that consult it (5 s
     /// transfer, 30 s transient) land with US3/US4.
@@ -1484,6 +1504,8 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
     /// queue.md §1): `true` sends `Initialize` once; `false` sends
     /// `Deregister` once and disables transport with `reason` inline.
     pub fn set_playback_permitted(&mut self, permitted: bool, reason: Option<NotRegisteredReason>) {
+        let before_health = self.transport_state.health.clone();
+        let before_active = self.transport_state.active.clone();
         if permitted {
             if !self.registered_or_pending {
                 self.registered_or_pending = true;
@@ -1501,6 +1523,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
                 reason: reason.unwrap_or(NotRegisteredReason::Unknown),
             };
         }
+        self.log_link_transition(&before_health, &before_active);
     }
 
     /// Ask the source to tear down and re-run `Initialize` after
@@ -1536,6 +1559,8 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         // survives sign-out untouched.
         self.plugins.clear_track_state_for_sign_out();
         self.plugin_last_track = None;
+        let before_health = self.transport_state.health.clone();
+        let before_active = self.transport_state.active.clone();
         if self.registered_or_pending {
             self.registered_or_pending = false;
             self.source_host.command(SourceCommand::Deregister);
@@ -1543,6 +1568,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         self.transport_state.active = ActiveState::NotRegistered {
             reason: NotRegisteredReason::SignedOut,
         };
+        self.log_link_transition(&before_health, &before_active);
         // 004-search-and-library-browse, design note 8: search, the
         // library index, play log and their persisted files are cleared
         // along with everything else on sign-out.
@@ -4209,9 +4235,12 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         if matches!(&input, Input::Seek { .. }) {
             self.plugins.playback_snapshot().bump_position_epoch();
         }
+        let before_health = self.transport_state.health.clone();
+        let before_active = self.transport_state.active.clone();
         let (new_state, effects) =
             transport::reduce(std::mem::take(&mut self.transport_state), input);
         self.transport_state = new_state;
+        self.log_link_transition(&before_health, &before_active);
         // Applied *after* `apply_effects`: a transfer-in
         // (`Effect::Queue(AdoptTransferContext)`) sets the queue's
         // `current()` as an *effect* of this same `reduce` call, not before

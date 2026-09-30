@@ -165,11 +165,19 @@ impl ConnectSource {
     pub const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
     fn handle_initialize(&mut self, device_name: String, device_id: String) {
-        if self.worker.is_some() {
-            return;
-        }
         self.device_name = device_name;
         self.device_id = device_id;
+        if let Some(worker) = &self.worker {
+            // #31: a worker outlives `Deregister` (parked, still owning
+            // the move-only ring producer inside its `Player`), so a
+            // re-`Initialize` after sign-out/revoke/downgrade is forwarded
+            // to re-register it; a connected worker treats it as a no-op.
+            worker.send(SourceCommand::Initialize {
+                device_name: self.device_name.clone(),
+                device_id: self.device_id.clone(),
+            });
+            return;
+        }
         let (Some(sample_tx), Some(marker_tx), Some(retired_rx)) = (
             self.pending_sample_tx.take(),
             self.pending_marker_tx.take(),
