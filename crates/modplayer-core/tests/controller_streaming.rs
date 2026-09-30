@@ -1312,3 +1312,83 @@ fn connectivity_is_offline_while_not_registered() {
         "a signed-out (NotRegistered) controller must derive Offline"
     );
 }
+
+/// #31: a sign-in whose first connect attempt failed (`Transient`) must
+/// come online once the source reports the recovered session — the Connect
+/// worker's `Health(Ok)` ahead of `Registered` — with no relaunch, and the
+/// 30 s reconnect warning raised meanwhile must clear.
+#[test]
+fn sign_in_after_a_transient_first_attempt_comes_online_without_relaunch() {
+    let (mut controller, handle, _dir) = ready_controller();
+    let (clock, offset_ms) = fake_clock();
+    controller.set_clock(clock);
+
+    handle.health(SourceHealth::Transient {
+        since: std::time::Instant::now(),
+        next_retry_in: Duration::from_secs(1),
+    });
+    controller.set_playback_permitted(true, None);
+    controller.tick();
+    assert!(
+        controller.search().offline(),
+        "Transient health keeps search offline even once registered"
+    );
+
+    offset_ms.store(30_100, Ordering::SeqCst);
+    controller.tick();
+    assert!(
+        controller
+            .notifications()
+            .visible()
+            .any(|n| n.message_key == "stream-reconnect-warning")
+    );
+
+    handle.health(SourceHealth::Ok);
+    handle.emit(SourceEvent::Registered {
+        device_name: "ModPlayer".to_string(),
+    });
+    controller.tick();
+    assert!(!controller.search().offline());
+    assert_eq!(
+        controller.library_status().connectivity,
+        Connectivity::Online
+    );
+    assert!(
+        !controller
+            .notifications()
+            .visible()
+            .any(|n| n.message_key == "stream-reconnect-warning"),
+        "the reconnect warning must clear once the session is back"
+    );
+}
+
+/// #31: sign out (or revoke) then sign in again in the same process must
+/// re-send `Initialize` and come back online — no relaunch.
+#[test]
+fn sign_in_after_sign_out_reinitializes_and_comes_online_without_relaunch() {
+    let (mut controller, handle, _dir) = ready_controller();
+    controller.set_playback_permitted(true, None);
+    controller.tick();
+    assert!(!controller.search().offline());
+
+    controller.clear_for_sign_out();
+    controller.set_playback_permitted(false, Some(NotRegisteredReason::SignedOut));
+    controller.tick();
+    assert!(controller.search().offline());
+
+    controller.set_playback_permitted(true, None);
+    controller.tick();
+
+    let initializes = handle
+        .record_commands()
+        .iter()
+        .filter(|cmd| matches!(cmd, SourceCommand::Initialize { .. }))
+        .count();
+    assert_eq!(initializes, 2, "sign-in must re-send Initialize");
+    assert!(matches!(controller.active_state(), ActiveState::Active));
+    assert!(!controller.search().offline());
+    assert_eq!(
+        controller.library_status().connectivity,
+        Connectivity::Online
+    );
+}

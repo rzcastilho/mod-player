@@ -25,6 +25,9 @@ base64.workspace = true
 tokio.workspace = true
 rtrb.workspace = true
 thiserror.workspace = true
+# #31: health/registration transitions logged at `info` so a stuck
+# "offline" state is diagnosable from the app log.
+log.workspace = true
 getrandom.workspace = true
 # 004-search-and-library-browse: parses the mercury `searchview` JSON body
 # (research R2/R13) — already a workspace dependency (`modplayer-core`'s
