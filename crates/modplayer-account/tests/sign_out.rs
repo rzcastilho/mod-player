@@ -10,25 +10,18 @@
 
 mod common;
 
-use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
 use common::{drain_until, drive_callback, fresh_fixture, profile, token_set};
 use modplayer_account::fake_auth::ScriptedCall;
-use modplayer_account::{AccountEvent, CredentialStore, LoadOutcome, SessionState, Tier};
+use modplayer_account::{AccountEvent, LoadOutcome, SessionState, Tier};
 use modplayer_secure_store::{EntryName, SecureStore};
 
 /// Register the two account-scoped stores this slice defines
-/// (`registry.rs` T080, `state_store.rs` T081), mirroring how production
-/// wiring would register them before `launch()`.
+/// (`registry.rs` T080, `state_store.rs` T081) through the same
+/// `register_default_stores` the binary calls before `launch()`.
 fn register_signout_stores(fixture: &mut common::Fixture) {
-    let state_store = fixture.service.state_store().clone();
-    fixture
-        .service
-        .register_store(Box::new(CredentialStore::new(
-            fixture.secure.clone() as Arc<dyn SecureStore>
-        )));
-    fixture.service.register_store(Box::new(state_store));
+    fixture.service.register_default_stores();
 }
 
 /// Drive a fixture from fresh to `Active` with a Premium tier, exactly like
@@ -151,4 +144,53 @@ fn sign_out_abandons_in_flight_work() {
     }
     assert!(fixture.service.account().is_none());
     assert_eq!(fixture.service.tier(), Tier::Unknown);
+}
+
+/// Issue #34: the binary wires the service with `register_default_stores`
+/// only. Signing out through that wiring must list the categories up
+/// front, delete the credential and `account.toml`, and leave a relaunched
+/// service (same secure store, same config dir) signed out.
+#[test]
+fn sign_out_with_default_wiring_survives_relaunch() {
+    let mut fixture = fresh_fixture("sign-out-default-wiring");
+    fixture.service.register_default_stores();
+    assert_eq!(
+        fixture.service.signout_categories(),
+        vec![
+            "signout-category-credential",
+            "signout-category-account-details",
+        ]
+    );
+    sign_in_to_active(&mut fixture);
+    let dir = fixture
+        .service
+        .state_store()
+        .path()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+
+    let events = fixture.service.sign_out();
+    assert!(matches!(
+        events.first(),
+        Some(AccountEvent::SignedOut { categories }) if categories.len() == 2
+    ));
+    assert!(
+        fixture
+            .secure
+            .get(EntryName::SessionCredential)
+            .unwrap()
+            .is_none()
+    );
+
+    let mut relaunched = common::service_with(
+        fixture.secure.clone(),
+        &fixture.auth,
+        fixture.clock.clone(),
+        dir,
+    );
+    relaunched.register_default_stores();
+    relaunched.launch();
+    assert_eq!(relaunched.state(), &SessionState::SignedOut { note: None });
+    assert!(relaunched.account().is_none());
 }

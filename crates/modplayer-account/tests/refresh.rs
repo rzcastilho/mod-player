@@ -7,7 +7,6 @@
 
 mod common;
 
-use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
 use common::{
@@ -16,8 +15,7 @@ use common::{
 };
 use modplayer_account::fake_auth::ScriptedCall;
 use modplayer_account::{
-    AccountEvent, AccountService, AuthError, CredentialStore, LoggedCall, SessionState, SignInNote,
-    Tier,
+    AccountEvent, AccountService, AuthError, LoggedCall, SessionState, SignInNote, Tier,
 };
 use modplayer_secure_store::{EntryName, SecureStore};
 
@@ -169,13 +167,7 @@ fn expiry_without_refresh_enters_expired_and_retains_credential() {
 #[test]
 fn invalid_grant_takes_revocation_path() {
     let mut fixture = fresh_fixture("invalid-grant-revocation");
-    fixture
-        .service
-        .register_store(Box::new(CredentialStore::new(
-            fixture.secure.clone() as Arc<dyn SecureStore>
-        )));
-    let state_store = fixture.service.state_store().clone();
-    fixture.service.register_store(Box::new(state_store));
+    fixture.service.register_default_stores();
 
     fixture
         .auth
