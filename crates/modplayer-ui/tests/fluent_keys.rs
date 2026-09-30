@@ -759,7 +759,6 @@ const DEVICE_NAMED_KEYS: &[&str] = &[
 /// seeded in Foundational (T027) and are not repeated here.
 const SEARCH_KEYS: &[&str] = &[
     "nav-search",
-    "search-placeholder",
     "search-offline",
     "search-group-tracks",
     "search-group-albums",
@@ -1670,6 +1669,104 @@ fn library_025_keys_have_en_us_and_pt_br_parity() {
         assert!(
             pt_br_keys.contains(key),
             "`{key}` is missing from locales/pt-BR/library.ftl"
+        );
+        assert_eq!(
+            placeholders_of(en_us_ftl, key),
+            placeholders_of(pt_br_ftl, key),
+            "`{key}` placeholders differ between en-US and pt-BR"
+        );
+    }
+}
+
+/// 026 (FR-012a, NFR-7.1): new plain search keys.
+const SEARCH_026_PLAIN_KEYS: &[&str] = &[
+    "search-field-label",
+    "search-hint",
+    "search-clear",
+    "search-in-flight",
+    "search-stale",
+    "search-rate-limited",
+];
+
+/// 026: new search keys taking placeholders, with their arg names.
+const SEARCH_026_ARG_KEYS: &[(&str, &[&str])] = &[
+    ("search-result-count", &["count"]),
+    ("search-group-header", &["group", "count"]),
+];
+
+/// 026 (T003): existing keys that gain a pt-BR value.
+const SEARCH_026_EXISTING_KEYS: &[&str] = &[
+    "search-offline",
+    "search-no-results",
+    "search-group-tracks",
+    "search-group-albums",
+    "search-group-artists",
+    "search-group-playlists",
+    "search-show-more",
+];
+
+/// 026 (FR-012a, NFR-7.1): every new key resolves, and the count keys pluralise.
+#[test]
+fn search_026_keys_resolve_and_pluralise() {
+    for key in SEARCH_026_PLAIN_KEYS {
+        assert_ne!(
+            &tr(key),
+            key,
+            "`{key}` missing from locales/en-US/library.ftl"
+        );
+    }
+    for (key, args) in SEARCH_026_ARG_KEYS {
+        let owned: Vec<(&str, String)> = args
+            .iter()
+            .map(|a| {
+                (
+                    *a,
+                    if *a == "group" {
+                        "Tracks".into()
+                    } else {
+                        "3".to_string()
+                    },
+                )
+            })
+            .collect();
+        assert_ne!(&tr_args(key, &owned), key, "`{key}` missing");
+    }
+    let count = |key: &str, n: &str| {
+        let mut a = vec![("count", n.to_string())];
+        if key == "search-group-header" {
+            a.push(("group", "Tracks".to_string()));
+        }
+        // Drop Fluent's bidi isolation marks around placeables.
+        tr_args(key, &a).replace(['\u{2068}', '\u{2069}'], "")
+    };
+    assert!(count("search-result-count", "1").contains("1 result"));
+    assert!(!count("search-result-count", "1").contains("results"));
+    assert!(count("search-result-count", "25").contains("25 results"));
+    assert!(count("search-group-header", "1").contains("Tracks, 1 result"));
+    assert!(count("search-group-header", "20").contains("Tracks, 20 results"));
+}
+
+/// 026 (FR-012a, NFR-7.1): en-US/pt-BR parity with identical placeholders,
+/// including the seven existing keys given pt-BR values.
+#[test]
+fn search_026_keys_have_en_us_and_pt_br_parity() {
+    let en_us_ftl = include_str!("../../../locales/en-US/library.ftl");
+    let pt_br_ftl = include_str!("../../../locales/pt-BR/library.ftl");
+    let en_us_keys = defined_keys(en_us_ftl);
+    let pt_br_keys = defined_keys(pt_br_ftl);
+    let all = SEARCH_026_PLAIN_KEYS
+        .iter()
+        .copied()
+        .chain(SEARCH_026_ARG_KEYS.iter().map(|(k, _)| *k))
+        .chain(SEARCH_026_EXISTING_KEYS.iter().copied());
+    for key in all {
+        assert!(
+            en_us_keys.contains(key),
+            "`{key}` missing from en-US library.ftl"
+        );
+        assert!(
+            pt_br_keys.contains(key),
+            "`{key}` missing from pt-BR library.ftl"
         );
         assert_eq!(
             placeholders_of(en_us_ftl, key),

@@ -1048,14 +1048,22 @@ fn search_and_settle(
 }
 
 #[test]
-fn search_box_exposes_a_text_input_labelled_search() {
+fn search_box_exposes_a_text_input_named_by_search_field_label() {
     let (mut controller, _handle, _dir) = active_controller("search-box");
     let mut artwork = modplayer_ui::artwork::ArtworkCache::new();
     let mut focus = false;
     let mut state = modplayer_ui::search_view::SearchViewState::default();
+    let mut memory = modplayer_ui::section_memory::SectionMemory::default();
 
     let nodes = render_nodes(|ui| {
-        modplayer_ui::search_view::show(ui, &mut controller, &mut artwork, &mut focus, &mut state);
+        modplayer_ui::search_view::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut focus,
+            &mut state,
+            &mut memory,
+        );
     });
 
     let text_inputs: Vec<_> = nodes.iter().filter(|n| n.role == Role::TextInput).collect();
@@ -1064,10 +1072,15 @@ fn search_box_exposes_a_text_input_labelled_search() {
         1,
         "expected exactly one Role::TextInput node, got {text_inputs:?}"
     );
+    assert_eq!(
+        text_inputs[0].label.as_deref(),
+        Some(tr("search-field-label").as_str()),
+        "the search box's accessible name must be `search-field-label` (026 F1): {:?}",
+        text_inputs[0]
+    );
     assert!(
-        text_inputs[0].labelled_by_something,
-        "the search box must be associated with its \"{}\" label: {:?}",
-        tr("search-placeholder"),
+        !text_inputs[0].labelled_by_something,
+        "the search box carries its own label, not a separate label node (026 F1): {:?}",
         text_inputs[0]
     );
 }
@@ -1080,11 +1093,29 @@ fn group_headers_expose_role_header_and_the_fixed_names() {
     let mut artwork = modplayer_ui::artwork::ArtworkCache::new();
     let mut focus = false;
     let mut state = modplayer_ui::search_view::SearchViewState::default();
+    let mut memory = modplayer_ui::section_memory::SectionMemory::default();
     let nodes = render_nodes(|ui| {
-        modplayer_ui::search_view::show(ui, &mut controller, &mut artwork, &mut focus, &mut state);
+        modplayer_ui::search_view::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut focus,
+            &mut state,
+            &mut memory,
+        );
     });
 
-    find_one(&nodes, Role::Header, &tr("search-group-tracks"));
+    find_one(
+        &nodes,
+        Role::Header,
+        &tr_args(
+            "search-group-header",
+            &[
+                ("group", tr("search-group-tracks")),
+                ("count", "2".to_string()),
+            ],
+        ),
+    );
     // Empty groups (Albums/Artists/Playlists) must not render a header at
     // all (contracts/ui-surface.md §2: "omitted when Empty/Unsupported/
     // Idle").
@@ -1101,8 +1132,16 @@ fn show_more_button_exposes_its_accessible_name_when_a_further_page_exists() {
     let mut artwork = modplayer_ui::artwork::ArtworkCache::new();
     let mut focus = false;
     let mut state = modplayer_ui::search_view::SearchViewState::default();
+    let mut memory = modplayer_ui::section_memory::SectionMemory::default();
     let nodes = render_nodes(|ui| {
-        modplayer_ui::search_view::show(ui, &mut controller, &mut artwork, &mut focus, &mut state);
+        modplayer_ui::search_view::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut focus,
+            &mut state,
+            &mut memory,
+        );
     });
 
     let expected = tr_args("search-show-more", &[("group", tr("search-group-tracks"))]);
@@ -1118,8 +1157,16 @@ fn each_row_exposes_a_list_item_and_an_actions_button() {
     let mut artwork = modplayer_ui::artwork::ArtworkCache::new();
     let mut focus = false;
     let mut state = modplayer_ui::search_view::SearchViewState::default();
+    let mut memory = modplayer_ui::section_memory::SectionMemory::default();
     let nodes = render_nodes(|ui| {
-        modplayer_ui::search_view::show(ui, &mut controller, &mut artwork, &mut focus, &mut state);
+        modplayer_ui::search_view::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut focus,
+            &mut state,
+            &mut memory,
+        );
     });
 
     let row_name = "Track 0 — Artist";

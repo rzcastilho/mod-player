@@ -68,14 +68,53 @@ pub fn classify_http_status(status: u16, retry_after_ms: Option<u32>) -> Catalog
 /// `MODPLAYER_CONNECT_FORCE_UNAVAILABLE` — so unsetting it and retrying
 /// recovers without restarting the app; compiled out of release builds
 /// (`debug_assertions`) so it can never fire for a real user.
+///
+/// The value `paged-once` is handled by [`force_rate_limited_search`]
+/// instead and does not rate-limit library or track-list commands.
 #[cfg(debug_assertions)]
 pub fn force_rate_limited() -> bool {
-    std::env::var_os("MODPLAYER_CATALOG_FORCE_429").is_some()
+    std::env::var_os("MODPLAYER_CATALOG_FORCE_429").is_some_and(|v| v != PAGED_ONCE)
 }
 
 #[cfg(not(debug_assertions))]
 pub fn force_rate_limited() -> bool {
     false
+}
+
+/// Search-command variant of [`force_rate_limited`] (contracts/search-
+/// status.md D1, research R12): with `MODPLAYER_CATALOG_FORCE_429=paged-once`
+/// only the first command with `offset > 0` in the process is rate-limited,
+/// so stale rows → automatic retry → recovery can be driven live.
+#[cfg(debug_assertions)]
+pub fn force_rate_limited_search(offset: u32) -> bool {
+    static PAGED_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let value = std::env::var_os("MODPLAYER_CATALOG_FORCE_429");
+    force_429_decision(value.as_deref(), offset, &PAGED_SEEN)
+}
+
+#[cfg(not(debug_assertions))]
+pub fn force_rate_limited_search(_offset: u32) -> bool {
+    false
+}
+
+#[cfg(debug_assertions)]
+const PAGED_ONCE: &str = "paged-once";
+
+/// Decision for the debug-only toggle on a search command: `paged-once`
+/// rate-limits only the first command with `offset > 0`, any other set
+/// value rate-limits everything, unset rate-limits nothing.
+#[cfg(debug_assertions)]
+fn force_429_decision(
+    value: Option<&std::ffi::OsStr>,
+    offset: u32,
+    paged_seen: &std::sync::atomic::AtomicBool,
+) -> bool {
+    use std::sync::atomic::Ordering;
+    match value {
+        None => false,
+        Some(v) if v == PAGED_ONCE => offset > 0 && !paged_seen.swap(true, Ordering::Relaxed),
+        Some(_) => true,
+    }
 }
 
 #[cfg(test)]
@@ -132,5 +171,34 @@ mod tests {
             classify_http_status(400, None),
             CatalogError::Unavailable(_)
         ));
+    }
+
+    #[cfg(debug_assertions)]
+    mod force_429 {
+        use std::ffi::OsStr;
+        use std::sync::atomic::AtomicBool;
+
+        use super::super::force_429_decision;
+
+        /// D1: `paged-once` fires for the first `offset > 0` only.
+        #[test]
+        fn paged_once_limits_only_first_paged_command() {
+            let seen = AtomicBool::new(false);
+            let v = Some(OsStr::new("paged-once"));
+            assert!(!force_429_decision(v, 0, &seen), "offset 0 dispatches");
+            assert!(force_429_decision(v, 20, &seen), "first paged limited");
+            assert!(!force_429_decision(v, 20, &seen), "later paged dispatch");
+            assert!(!force_429_decision(v, 0, &seen));
+        }
+
+        /// D1: any other value limits everything; unset limits nothing.
+        #[test]
+        fn other_values_limit_everything() {
+            let seen = AtomicBool::new(false);
+            for offset in [0, 20, 20] {
+                assert!(force_429_decision(Some(OsStr::new("1")), offset, &seen));
+            }
+            assert!(!force_429_decision(None, 20, &seen));
+        }
     }
 }
