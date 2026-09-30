@@ -33,7 +33,7 @@ use crate::listener::{self, ListenerConfig, ListenerOutcome};
 use crate::pending::PendingAuthorization;
 use crate::pkce;
 use crate::refresh::{RefreshAction, RefreshReport, RefreshScheduler};
-use crate::registry::AccountScopedStore;
+use crate::registry::{AccountScopedStore, CredentialStore};
 use crate::session::{SessionState, SignInNote, Tier};
 use crate::state_store::{AccountStateStore, LoadOutcome, PersistedAccount};
 
@@ -241,6 +241,19 @@ impl AccountService {
     /// (contracts/account-session.md "Commands").
     pub fn register_store(&mut self, store: Box<dyn AccountScopedStore>) {
         self.registry.push(store);
+    }
+
+    /// Register the account-scoped stores this crate defines, in
+    /// confirmation-list order: the credential (`CredentialStore` over
+    /// this service's secure store), then `account.toml`
+    /// (`AccountStateStore`). The binary and the tests both wire the
+    /// service through this, so sign-out clears the same stores in
+    /// production as under test (FR-015, issue #34). Call before
+    /// `launch()`, and before any `register_store` a later slice adds.
+    pub fn register_default_stores(&mut self) {
+        self.register_store(Box::new(CredentialStore::new(Arc::clone(&self.secure))));
+        let state_store = self.state_store.clone();
+        self.register_store(Box::new(state_store));
     }
 
     /// Current session state.

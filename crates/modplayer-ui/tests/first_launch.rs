@@ -20,8 +20,7 @@ use modplayer_account::auth_service::REDIRECT_PATH;
 use modplayer_account::fake_auth::ScriptedCall;
 use modplayer_account::{
     AccountEvent, AccountService, AccountStateStore, AuthError, AuthorizationService, Clock,
-    CredentialStore, FakeAuthorizationService, FakeClock, LoadOutcome, Profile, SessionState, Tier,
-    TokenSet,
+    FakeAuthorizationService, FakeClock, LoadOutcome, Profile, SessionState, Tier, TokenSet,
 };
 use modplayer_audio_io::FakeBackend;
 use modplayer_audio_source_synthetic::SyntheticHost;
@@ -121,11 +120,7 @@ fn acknowledgement_survives_sign_out_and_revocation() {
         clock.clone() as Arc<dyn Clock>,
         dir.path().to_path_buf(),
     );
-    service.register_store(Box::new(CredentialStore::new(
-        secure.clone() as Arc<dyn SecureStore>
-    )));
-    let state_store = service.state_store().clone();
-    service.register_store(Box::new(state_store));
+    service.register_default_stores();
 
     // Sign in, then sign out: the disclosure acknowledgement must be
     // exactly as it was before.

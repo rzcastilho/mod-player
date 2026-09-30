@@ -124,6 +124,9 @@ fn main() -> anyhow::Result<()> {
     let auth_service: Arc<dyn AuthorizationService> = Arc::new(SpotifyAuthorizationService::new());
     let clock: Arc<dyn Clock> = Arc::new(SystemClock::new());
     let mut account = AccountService::new(secure_store, auth_service, clock, config_dir);
+    // Sign-out/revocation clear only registered stores; without this the
+    // credential and `account.toml` survive sign-out (issue #34).
+    account.register_default_stores();
     account.launch();
 
     // 018-window-sizing-and-responsive-dock (contract W3, FR-001/FR-002):
