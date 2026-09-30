@@ -6,7 +6,20 @@
 # renders through (rows.rs). Search/Library/detail-specific keys are added
 # by their own user-story phase (US1 T040, US2 T066) as those views land.
 
-search-placeholder = Search
+search-field-label = Search the catalog
+search-hint = Tracks, albums, artists, playlists
+search-clear = Clear search
+search-in-flight = Searching…
+search-result-count = { $count ->
+    [one] 1 result
+   *[other] { $count } results
+}
+search-group-header = { $group }, { $count ->
+    [one] 1 result
+   *[other] { $count } results
+}
+search-stale = Showing earlier results — search is busy, refreshing shortly
+search-rate-limited = Search is busy — retrying shortly
 search-offline = Search needs a connection — you're offline
 search-no-results = No results for “{ $query }” — check your spelling, or you might be offline.
 search-group-tracks = Tracks

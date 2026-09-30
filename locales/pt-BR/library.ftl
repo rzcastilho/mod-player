@@ -32,3 +32,28 @@ playlist-track-count = { $count ->
 }
 row-actions = Ações para { $name }
 playlist-no-tracks = Esta playlist não tem faixas
+
+## 026-search-results-structure (contracts/fluent-strings.md): pt-BR values
+## for the new search keys and the existing keys the Search view renders.
+
+search-field-label = Pesquisar no catálogo
+search-hint = Faixas, álbuns, artistas, playlists
+search-clear = Limpar pesquisa
+search-in-flight = Pesquisando…
+search-result-count = { $count ->
+    [one] 1 resultado
+   *[other] { $count } resultados
+}
+search-group-header = { $group }, { $count ->
+    [one] 1 resultado
+   *[other] { $count } resultados
+}
+search-stale = Mostrando resultados anteriores — a pesquisa está ocupada, atualizando em breve
+search-rate-limited = A pesquisa está ocupada — tentando novamente em breve
+search-offline = A pesquisa precisa de conexão — você está offline
+search-no-results = Nenhum resultado para “{ $query }” — verifique a ortografia ou talvez você esteja offline.
+search-group-tracks = Faixas
+search-group-albums = Álbuns
+search-group-artists = Artistas
+search-group-playlists = Playlists
+search-show-more = Mostrar mais { $group }

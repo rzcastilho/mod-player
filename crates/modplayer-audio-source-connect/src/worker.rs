@@ -989,7 +989,7 @@ fn command_loop(
                 // short-circuits every catalog command to the same
                 // `RateLimited` reply the real endpoint would give, without
                 // ever dispatching to the network.
-                if crate::catalog::force_rate_limited() {
+                if crate::catalog::force_rate_limited_search(offset) {
                     let _ = event_tx.send(SourceEvent::SearchResult {
                         request_id,
                         result: Err(CatalogError::RateLimited {
