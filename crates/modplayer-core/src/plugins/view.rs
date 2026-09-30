@@ -36,6 +36,17 @@ pub struct PluginRow {
     /// `None` unless `Active` (FR-023: rendered as "—" otherwise).
     pub cpu_pct_of_share: Option<f32>,
     pub memory_bytes: Option<u64>,
+    /// 027-plugins-list-as-table (R6): `Some(cause)` iff the plugin's
+    /// lifecycle is `Suspended { cause }`; `None` otherwise. Invariant:
+    /// `suspend_cause.is_some()` implies `health == Some(Health::Suspended)`.
+    pub suspend_cause: Option<SuspendCause>,
+    /// 027 (R7): the CPU share budget as a percentage of the window
+    /// (`share / window × 100`; 10.0 for `Budgets::DEFAULT`), `0.0` for a
+    /// zero window.
+    pub cpu_budget_pct: f32,
+    /// 027 (R7): the Luau heap cap in bytes (64 MiB for
+    /// `Budgets::DEFAULT`).
+    pub memory_budget_bytes: u64,
     /// Always `false` (FR-013: no uninstall control exists).
     pub can_uninstall: bool,
     /// 011-plugin-ui-contributions (FR-006, L6): one row per panel this
@@ -118,6 +129,18 @@ fn row(
         .flatten()
         .map(|gauges| gauges.used_bytes());
 
+    let suspend_cause = match &record.lifecycle {
+        Lifecycle::Suspended { cause } => Some(*cause),
+        _ => None,
+    };
+    let window_secs = record.budgets.window.as_secs_f32();
+    let cpu_budget_pct = if window_secs > 0.0 {
+        record.budgets.share.as_secs_f32() / window_secs * 100.0
+    } else {
+        0.0
+    };
+    let memory_budget_bytes = u64::try_from(record.budgets.memory).unwrap_or(u64::MAX);
+
     let panel_rows: Vec<PanelRowControl> = panels
         .for_plugin(record.id)
         .iter()
@@ -147,6 +170,9 @@ fn row(
         permissions: record.grants.granted().collect(),
         cpu_pct_of_share,
         memory_bytes,
+        suspend_cause,
+        cpu_budget_pct,
+        memory_budget_bytes,
         can_uninstall: false,
         panels: panel_rows,
     }
@@ -418,5 +444,100 @@ impl PluginSettingsView {
             .collect();
         views.sort_by_key(|view| view.name.to_lowercase());
         views
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::time::Duration;
+
+    use super::*;
+    use crate::plugins::host::PluginHost;
+
+    /// Run `f` on a mutable, valid bundled record (`PluginRecord` is not
+    /// `Clone`, so it stays inside its host).
+    fn with_valid_record<T>(f: impl FnOnce(&mut PluginRecord) -> T) -> T {
+        let mut host = PluginHost::discover(false);
+        let record = host
+            .records_mut()
+            .iter_mut()
+            .find(|r| r.manifest.is_ok())
+            .expect("a bundled plugin with a valid manifest exists");
+        f(record)
+    }
+
+    fn row_of(record: &PluginRecord) -> PluginRow {
+        row(
+            record,
+            Instant::now(),
+            &PanelRegistry::default(),
+            &BTreeMap::new(),
+        )
+    }
+
+    #[test]
+    fn suspended_lifecycle_carries_its_cause() {
+        for cause in [
+            SuspendCause::Hang,
+            SuspendCause::CpuShare,
+            SuspendCause::Memory,
+            SuspendCause::DidNotStart,
+        ] {
+            with_valid_record(|record| {
+                record.lifecycle = Lifecycle::Suspended { cause };
+                let r = row_of(record);
+                assert_eq!(r.suspend_cause, Some(cause));
+                assert_eq!(r.health, Some(Health::Suspended));
+            });
+        }
+    }
+
+    #[test]
+    fn non_suspended_lifecycle_has_no_cause() {
+        for lifecycle in [Lifecycle::Active, Lifecycle::Disabled, Lifecycle::Loading] {
+            with_valid_record(|record| {
+                record.lifecycle = lifecycle;
+                assert_eq!(row_of(record).suspend_cause, None);
+            });
+        }
+    }
+
+    #[test]
+    fn default_budgets_are_exposed_in_the_row() {
+        with_valid_record(|record| {
+            record.budgets = modplayer_capability_gateway::budgets::Budgets::DEFAULT;
+            let r = row_of(record);
+            assert!((r.cpu_budget_pct - 10.0).abs() < f32::EPSILON);
+            assert_eq!(r.memory_budget_bytes, 67_108_864);
+        });
+    }
+
+    #[test]
+    fn zero_window_yields_zero_cpu_budget() {
+        with_valid_record(|record| {
+            record.budgets.window = Duration::ZERO;
+            assert!(row_of(record).cpu_budget_pct.abs() < f32::EPSILON);
+        });
+    }
+
+    #[test]
+    fn suspend_cause_implies_suspended_health() {
+        for lifecycle in [
+            Lifecycle::Active,
+            Lifecycle::Disabled,
+            Lifecycle::Suspended {
+                cause: SuspendCause::Memory,
+            },
+        ] {
+            with_valid_record(|record| {
+                record.lifecycle = lifecycle;
+                let r = row_of(record);
+                if r.suspend_cause.is_some() {
+                    assert_eq!(r.health, Some(Health::Suspended));
+                }
+            });
+        }
     }
 }
