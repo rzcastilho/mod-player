@@ -1077,6 +1077,40 @@ fn downgrade_finishes_track_then_disables() {
     );
 }
 
+/// Issue #35: once the receiver registers again (the session is the tier
+/// authority), the earlier "no longer has Premium" warning is dismissed
+/// rather than lingering over a working device.
+#[test]
+fn registration_dismisses_subscription_downgraded() {
+    let (mut controller, handle, _dir) = ready_controller();
+    controller.set_playback_permitted(true, None);
+    controller.tick();
+
+    // Nothing playing → the downgrade finishes immediately (T22).
+    controller.on_tier_rejected();
+    controller.tick();
+    assert!(
+        controller
+            .notifications()
+            .visible()
+            .any(|n| n.message_key == "subscription-downgraded"),
+        "expected a subscription-downgraded notification"
+    );
+
+    handle.emit(SourceEvent::Registered {
+        device_name: "ModPlayer".to_string(),
+    });
+    controller.tick();
+
+    assert!(
+        !controller
+            .notifications()
+            .visible()
+            .any(|n| n.message_key == "subscription-downgraded"),
+        "a successful registration must dismiss the downgrade warning"
+    );
+}
+
 // "Play from account" over the session (spec Amendment 2026-09-16) was
 // retired in 004-search-and-library-browse (T061/T062) once the Library
 // view replaced it — its `request_account_tracks`/`take_account_tracks`

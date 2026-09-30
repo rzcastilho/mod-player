@@ -27,7 +27,7 @@ use modplayer_audio_source::SourceHost;
 use modplayer_core::actions::ScopeState;
 use modplayer_core::{
     ActiveState, GETTING_STARTED_TUTORIAL_URL, Intent, NotRegisteredReason, NotificationAction,
-    PlaybackController, STATUS_PAGE_URL, Severity, tr,
+    NotificationCenter, PlaybackController, STATUS_PAGE_URL, Severity, tr,
 };
 
 use crate::actions;
@@ -493,6 +493,9 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
             AccountEvent::Authorized => {
                 // The "Checking your account" sub-state renders directly
                 // from `SessionState::Checking`; no notification needed.
+                // A fresh sign-in resolves an earlier revocation/expiry, so
+                // their "sign in again" prompts no longer apply (issue #35).
+                dismiss_sign_in_prompts(self.controller.notifications_mut());
             }
             AccountEvent::TierChecked(tier) => {
                 match tier {
@@ -542,6 +545,7 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
                     &mut self.library_detail,
                     &mut self.search_view,
                     &mut self.settings,
+                    &mut self.sign_in,
                 );
                 let joined = categories
                     .iter()
@@ -582,6 +586,7 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
                     &mut self.library_detail,
                     &mut self.search_view,
                     &mut self.settings,
+                    &mut self.sign_in,
                 );
                 self.controller.notifications_mut().raise_with_action(
                     Severity::Critical,
@@ -831,6 +836,7 @@ pub fn reset_session_ui(
     library_detail: &mut Option<DetailTarget>,
     search_view: &mut search_view::SearchViewState,
     settings: &mut SettingsScreen,
+    sign_in: &mut SignInScreen,
 ) {
     memory.reset();
     *shell = Shell::default();
@@ -838,6 +844,20 @@ pub fn reset_session_ui(
     *library_detail = None;
     *search_view = search_view::SearchViewState::default();
     settings.reset_category();
+    // A tier result from the previous session (e.g. a `TierCheckFailed`
+    // that landed while the Library was showing) must not greet the next
+    // sign-in with "Couldn't verify your subscription" (issue #35).
+    *sign_in = SignInScreen::default();
+}
+
+/// Dismiss the "sign in again" prompts a successful sign-in resolves
+/// (`AccountEvent::Authorized`, issue #35): `session-revoked` and
+/// `session-expired` would otherwise stay up over a working session until
+/// dismissed by hand. A free function for the same headless-testability
+/// reason as `reset_session_ui`.
+pub fn dismiss_sign_in_prompts(notifications: &mut NotificationCenter) {
+    notifications.dismiss_by_key("session-revoked");
+    notifications.dismiss_by_key("session-expired");
 }
 
 /// `controller.set_playback_permitted(..)` from the account session's
@@ -947,5 +967,34 @@ mod permission_tests {
             ),
             Some(NotRegisteredReason::SubscriptionNotVerified)
         );
+    }
+}
+
+#[cfg(test)]
+mod sign_in_prompt_tests {
+    use super::dismiss_sign_in_prompts;
+    use modplayer_core::{NotificationAction, NotificationCenter, Severity};
+
+    /// Issue #35: a successful sign-in clears the revoked/expired prompts
+    /// and leaves unrelated notifications alone.
+    #[test]
+    fn dismisses_revoked_and_expired_only() {
+        let mut center = NotificationCenter::new();
+        center.raise_with_action(
+            Severity::Critical,
+            "session-revoked",
+            NotificationAction::SignIn,
+        );
+        center.raise_with_action(
+            Severity::Critical,
+            "session-expired",
+            NotificationAction::SignIn,
+        );
+        center.raise(Severity::Info, "signed-out");
+
+        dismiss_sign_in_prompts(&mut center);
+
+        let keys: Vec<_> = center.visible().map(|n| n.message_key).collect();
+        assert_eq!(keys, vec!["signed-out"]);
     }
 }

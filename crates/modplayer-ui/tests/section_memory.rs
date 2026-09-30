@@ -40,6 +40,7 @@ use modplayer_ui::search_view::SearchViewState;
 use modplayer_ui::section_memory::{LibraryViewKey, SectionMemory, ViewKey};
 use modplayer_ui::settings::SettingsScreen;
 use modplayer_ui::shell::Shell;
+use modplayer_ui::sign_in::{SignInScreen, TierResult};
 
 const ROW_HEIGHT: f32 = 20.0;
 const SCREEN_WIDTH: f32 = 800.0;
@@ -290,6 +291,9 @@ fn m4_reset_session_ui_clears_memory_and_every_listed_sub_view() {
     // `ALL[0]` and back is unit-tested in `settings/mod.rs` (private-field
     // access); this integration test only needs to see `reset_session_ui`
     // reach it, so a fresh screen (already on `ALL[0]`) is enough here.
+    // Issue #35: a tier result left over from the signed-in session.
+    let mut sign_in = SignInScreen::default();
+    sign_in.set_tier_result(TierResult::Unknown);
 
     reset_session_ui(
         &mut memory,
@@ -298,6 +302,7 @@ fn m4_reset_session_ui_clears_memory_and_every_listed_sub_view() {
         &mut library_detail,
         &mut search_view,
         &mut settings,
+        &mut sign_in,
     );
 
     assert_eq!(memory.epoch(), epoch_before + 1, "epoch must bump by 1");
@@ -309,6 +314,10 @@ fn m4_reset_session_ui_clears_memory_and_every_listed_sub_view() {
     assert_eq!(library_detail, None);
     assert_eq!(search_view.last_query, "");
     assert_eq!(settings.category(), SettingsCategory::ALL[0]);
+    assert_eq!(
+        sign_in.tier_result, None,
+        "issue #35: the old tier-result overlay must not survive sign-out"
+    );
 
     // The next draw of any key starts at the top (no stale offset, no
     // stale `shown_last_frame` from before the reset).
