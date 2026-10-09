@@ -746,7 +746,7 @@ mod tests {
         let mut active = active_account_service();
         assert_eq!(
             accessible_widget_count(|ui| {
-                let _ = crate::settings::account::show(ui, &mut active);
+                let _ = crate::settings::account::show(ui, &mut active, None);
             }),
             2
         );
@@ -755,7 +755,7 @@ mod tests {
         let mut signed_out_account = fresh_account_service();
         assert_eq!(
             accessible_widget_count(|ui| {
-                let _ = crate::settings::account::show(ui, &mut signed_out_account);
+                let _ = crate::settings::account::show(ui, &mut signed_out_account, None);
             }),
             1
         );

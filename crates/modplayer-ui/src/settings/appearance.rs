@@ -17,7 +17,13 @@ use modplayer_audio_source::SourceHost;
 use modplayer_core::{AudioSettings, PlaybackController, Severity, tr};
 use modplayer_engine::Theme;
 
-use crate::widgets::controls::{SwitchKind, switch};
+use crate::settings::field::{self, FieldSpec, ResetState};
+use crate::theme::tokens::space;
+use crate::widgets::controls::{SwitchKind, panel_card, switch};
+
+/// The high-contrast switch's descriptor id (kept here, its control site, so
+/// other modules refer to it without naming the setting).
+pub const HIGH_CONTRAST_FIELD_ID: &str = "appearance.high_contrast";
 
 /// The three theme options, in display order.
 const THEMES: [Theme; 3] = [Theme::System, Theme::Light, Theme::Dark];
@@ -33,64 +39,81 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     cached: &mut AudioSettings,
     focus: Option<&str>,
 ) {
-    ui.label(tr("setting-theme"));
-    ui.label(tr("setting-theme-desc"));
+    let defaults = AudioSettings::default();
+    panel_card(ui, &tr("settings-group-theme"), |ui| {
+        let mut theme = cached.theme;
+        let previous = theme;
+        let mut spec = FieldSpec::new("appearance.theme", tr("setting-theme"));
+        spec.help = Some(tr("setting-theme-desc"));
+        spec.reset = ResetState::compute(&previous, &defaults.theme);
+        let output = field::row(ui, &spec, |ui| {
+            ComboBox::from_id_salt("appearance.theme")
+                .selected_text(theme_label(theme))
+                .show_ui(ui, |ui| {
+                    for candidate in THEMES {
+                        ui.selectable_value(&mut theme, candidate, theme_label(candidate));
+                    }
+                })
+                .response
+        });
+        if focus == Some("appearance.theme") {
+            output.control.request_focus();
+        }
+        if output.reset_clicked {
+            theme = defaults.theme;
+        }
 
-    let mut theme = cached.theme;
-    let previous = theme;
-    let response = ComboBox::from_id_salt("appearance.theme")
-        .selected_text(theme_label(theme))
-        .show_ui(ui, |ui| {
-            for candidate in THEMES {
-                ui.selectable_value(&mut theme, candidate, theme_label(candidate));
+        if theme != previous {
+            let mut settings = controller.settings_store().load().settings;
+            settings.theme = theme;
+            if controller.settings_store().save(&settings).is_err() {
+                controller
+                    .notifications_mut()
+                    .raise(Severity::Warning, "settings-save-failed");
             }
-        })
-        .response;
-    if focus == Some("appearance.theme") {
-        response.request_focus();
-    }
-
-    if theme != previous {
-        let mut settings = controller.settings_store().load().settings;
-        settings.theme = theme;
-        if controller.settings_store().save(&settings).is_err() {
-            controller
-                .notifications_mut()
-                .raise(Severity::Warning, "settings-save-failed");
+            *cached = settings;
+            crate::theme::apply(ui.ctx(), theme);
         }
-        *cached = settings;
-        crate::theme::apply(ui.ctx(), theme);
-    }
+        ui.add_space(space::MD);
 
-    // 017-high-contrast-appearance (US2, T028): the checkbox lives below
-    // the Theme combo, orthogonal to it (FR-001/FR-015) — same reload-
-    // mutate-save persistence, `set_high_contrast` for the controller's own
-    // shadow state (mirrored into `App::ui`'s next `apply_tokens_for` call,
-    // contract A18); no direct `theme::apply_tokens_for` call is needed
-    // here.
-    let mut high_contrast = cached.high_contrast;
-    let hc_response = switch(
-        ui,
-        SwitchKind::Checkbox,
-        &mut high_contrast,
-        &tr("setting-high-contrast"),
-    );
-    if focus == Some("appearance.high_contrast") {
-        hc_response.request_focus();
-    }
-    ui.label(tr("setting-high-contrast-desc"));
-
-    if hc_response.changed() {
-        controller.set_high_contrast(high_contrast);
-        let mut settings = controller.settings_store().load().settings;
-        settings.high_contrast = high_contrast;
-        if controller.settings_store().save(&settings).is_err() {
-            controller
-                .notifications_mut()
-                .raise(Severity::Warning, "settings-save-failed");
+        // 017-high-contrast-appearance (US2, T028): the checkbox lives below
+        // the Theme combo, orthogonal to it (FR-001/FR-015) — same reload-
+        // mutate-save persistence, `set_high_contrast` for the controller's
+        // own shadow state (mirrored into `App::ui`'s next
+        // `apply_tokens_for` call, contract A18); no direct
+        // `theme::apply_tokens_for` call is needed here.
+        let mut high_contrast = cached.high_contrast;
+        let mut spec = FieldSpec::new(HIGH_CONTRAST_FIELD_ID, tr("setting-high-contrast"));
+        spec.help = Some(tr("setting-high-contrast-desc"));
+        spec.reset = ResetState::compute(&high_contrast, &defaults.high_contrast);
+        spec.label_in_control = true;
+        let output = field::row(ui, &spec, |ui| {
+            switch(
+                ui,
+                SwitchKind::Checkbox,
+                &mut high_contrast,
+                &tr("setting-high-contrast"),
+            )
+        });
+        if focus == Some("appearance.high_contrast") {
+            output.control.request_focus();
         }
-        *cached = settings;
-    }
+
+        if output.reset_clicked {
+            high_contrast = defaults.high_contrast;
+        }
+        if output.reset_clicked || output.control.changed() {
+            controller.set_high_contrast(high_contrast);
+            let mut settings = controller.settings_store().load().settings;
+            settings.high_contrast = high_contrast;
+            if controller.settings_store().save(&settings).is_err() {
+                controller
+                    .notifications_mut()
+                    .raise(Severity::Warning, "settings-save-failed");
+            }
+            *cached = settings;
+        }
+    });
 }
 
 fn theme_label(theme: Theme) -> String {

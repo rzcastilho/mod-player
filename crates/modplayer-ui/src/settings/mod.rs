@@ -14,6 +14,7 @@ pub mod audio;
 pub mod category_row;
 pub mod controls;
 pub mod developer;
+pub mod field;
 pub mod language;
 pub mod plugins;
 
@@ -60,9 +61,117 @@ pub struct SettingsScreen {
     /// 020-shell-navigation-and-gates (US2): the category row's own
     /// partition/menu state (contracts/settings-category-row.md).
     row: CategoryRowState,
+    /// 028-settings-fields-and-account (data-model §3.5): the defaults
+    /// snapshot per-field Reset compares against (research R4).
+    #[allow(dead_code, reason = "read by the Reset wiring in a later phase")]
+    defaults: AudioSettings,
+    /// The search-result field highlight, if any (data-model §3.4).
+    highlight: Option<FieldHighlight>,
+    /// Focus deferred to the next frame (after a Reset), merged with
+    /// `focus_target` when the category screen is drawn.
+    pending_focus: Option<&'static str>,
+}
+
+/// A transient outline on a search-result field (data-model §3.4):
+/// created when a result is chosen, armed on the next frame, and cleared
+/// after 3 s or on the first key/pointer press.
+#[derive(Debug, Clone, PartialEq)]
+struct FieldHighlight {
+    /// Descriptor id of the chosen result.
+    id: &'static str,
+    /// `ctx.input(|i| i.time)` when armed.
+    started_at: f64,
+    /// `false` on the selecting frame; `true` from the next frame on.
+    armed: bool,
+}
+
+/// How long a search-result highlight stays (F19).
+const HIGHLIGHT_SECONDS: f64 = 3.0;
+
+impl FieldHighlight {
+    /// A highlight created on the selecting frame (unarmed).
+    fn new(id: &'static str) -> Self {
+        Self {
+            id,
+            started_at: 0.0,
+            armed: false,
+        }
+    }
+
+    /// Advance one frame. The first call arms (and starts the 3 s clock)
+    /// without looking at input, so the press that chose the result does
+    /// not clear it. Later calls return `false` once 3 s have passed or a
+    /// key / pointer button was pressed.
+    fn advance(&mut self, now: f64, key_pressed: bool, pointer_pressed: bool) -> bool {
+        if !self.armed {
+            self.armed = true;
+            self.started_at = now;
+            return true;
+        }
+        !(now - self.started_at >= HIGHLIGHT_SECONDS || key_pressed || pointer_pressed)
+    }
 }
 
 impl SettingsScreen {
+    /// A descriptor search result was chosen: select its category, ask its
+    /// control to take focus, and (for the five owned categories) start a
+    /// highlight. Controls and Developer results only focus (F20).
+    fn select_result(&mut self, category: SettingsCategory, id: &'static str) {
+        self.category = category;
+        self.focus_target = Some(id);
+        self.highlight = matches!(
+            category,
+            SettingsCategory::Audio
+                | SettingsCategory::Playback
+                | SettingsCategory::Appearance
+                | SettingsCategory::Language
+                | SettingsCategory::Account
+        )
+        .then(|| FieldHighlight::new(id));
+    }
+
+    /// Select `category` by any means other than a search result; drops the
+    /// highlight when the category actually changes.
+    fn change_category(&mut self, category: SettingsCategory) {
+        if self.category != category {
+            self.highlight = None;
+        }
+        self.category = category;
+    }
+
+    /// Advance the highlight for this frame and publish it for the field
+    /// builder; schedules a repaint so expiry needs no input.
+    fn tick_highlight(&mut self, ctx: &egui::Context) {
+        let (now, key, pointer) = ctx.input(|i| {
+            let key = i
+                .events
+                .iter()
+                .any(|e| matches!(e, egui::Event::Key { pressed: true, .. }));
+            let pointer = i
+                .events
+                .iter()
+                .any(|e| matches!(e, egui::Event::PointerButton { pressed: true, .. }));
+            (i.time, key, pointer)
+        });
+        if let Some(h) = self.highlight.as_mut()
+            && !h.advance(now, key, pointer)
+        {
+            self.highlight = None;
+        }
+        match &self.highlight {
+            Some(h) => {
+                field::set_highlight_target(ctx, Some((h.id, h.armed)));
+                if h.armed {
+                    let remaining = (HIGHLIGHT_SECONDS - (now - h.started_at)).max(0.0);
+                    ctx.request_repaint_after(std::time::Duration::from_secs_f64(remaining));
+                } else {
+                    ctx.request_repaint();
+                }
+            }
+            None => field::set_highlight_target(ctx, None),
+        }
+    }
+
     /// Open the Settings screen on its first (fixed-order) category,
     /// loading the settings-store snapshot `audio.rs`/`appearance.rs` cache
     /// locally.
@@ -78,6 +187,9 @@ impl SettingsScreen {
             controls: ControlsScreen::default(),
             plugins: plugins::PluginsScreen::new(),
             row: CategoryRowState::default(),
+            defaults: AudioSettings::default(),
+            highlight: None,
+            pending_focus: None,
         }
     }
 
@@ -90,7 +202,7 @@ impl SettingsScreen {
     /// category is part of US3-AS4's "every section starts at its default
     /// view".
     pub fn reset_category(&mut self) {
-        self.category = SettingsCategory::ALL[0];
+        self.change_category(SettingsCategory::ALL[0]);
     }
 
     /// The currently selected category (read-only): changed only by
@@ -119,7 +231,13 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     screen: &mut SettingsScreen,
     memory: &mut SectionMemory,
 ) -> (Option<DeviceCheckScreen>, Vec<AccountEvent>) {
+    screen.tick_highlight(ui.ctx());
     show_header(ui, controller, screen);
+    // A result chosen this frame is unarmed; publish it before the
+    // category body draws so the field outlines on the same frame.
+    if let Some(h) = &screen.highlight {
+        field::set_highlight_target(ui.ctx(), Some((h.id, h.armed)));
+    }
     show_content(ui, controller, account, screen, memory)
 }
 
@@ -156,8 +274,7 @@ fn show_header<B: OutputBackend, H: SourceHost>(
             let activated_by_enter =
                 response.has_focus() && ui.input(|input| input.key_pressed(Key::Enter));
             if response.clicked() || activated_by_enter {
-                screen.category = descriptor.category;
-                screen.focus_target = Some(descriptor.id);
+                screen.select_result(descriptor.category, descriptor.id);
             }
         }
 
@@ -171,7 +288,7 @@ fn show_header<B: OutputBackend, H: SourceHost>(
             let activated_by_enter =
                 response.has_focus() && ui.input(|input| input.key_pressed(Key::Enter));
             if response.clicked() || activated_by_enter {
-                screen.category = SettingsCategory::Plugins;
+                screen.change_category(SettingsCategory::Plugins);
                 screen.plugin_focus = Some((hit.plugin, hit.field_id));
             }
         }
@@ -190,7 +307,7 @@ fn show_header<B: OutputBackend, H: SourceHost>(
     // keyboard-operable "More" menu instead (contracts/settings-category-
     // row.md), replacing the old `ui.horizontal_wrapped` block.
     if let Some(category) = category_row::show(ui, screen.category, &mut screen.row) {
-        screen.category = category;
+        screen.change_category(category);
     }
     ui.add_space(theme::space::XL);
 }
@@ -206,7 +323,10 @@ fn show_content<B: OutputBackend, H: SourceHost>(
     screen: &mut SettingsScreen,
     memory: &mut SectionMemory,
 ) -> (Option<DeviceCheckScreen>, Vec<AccountEvent>) {
-    let focus = screen.focus_target.take();
+    let focus = screen
+        .focus_target
+        .take()
+        .or_else(|| screen.pending_focus.take());
     let key = ViewKey::Settings(screen.category);
     let scroll = memory.scroll_area(&key);
     let output = scroll.show(ui, |ui| match screen.category {
@@ -226,7 +346,7 @@ fn show_content<B: OutputBackend, H: SourceHost>(
             developer::show(ui, controller);
             (None, Vec::new())
         }
-        SettingsCategory::Account => (None, account::show(ui, account)),
+        SettingsCategory::Account => (None, account::show(ui, account, focus)),
         SettingsCategory::About => {
             about::show(ui, &mut screen.about);
             (None, Vec::new())
@@ -245,8 +365,8 @@ fn show_content<B: OutputBackend, H: SourceHost>(
             plugins::show(ui, controller, &mut screen.plugins, field_focus);
             (None, Vec::new())
         }
-        SettingsCategory::Offline | SettingsCategory::PrivacyDiagnostics => {
-            ui.label(tr("placeholder-settings-category"));
+        category @ (SettingsCategory::Offline | SettingsCategory::PrivacyDiagnostics) => {
+            unavailable_category(ui, category);
             (None, Vec::new())
         }
     });
@@ -254,7 +374,22 @@ fn show_content<B: OutputBackend, H: SourceHost>(
     output.inner
 }
 
+/// Body of a category that has no settings yet (F21): a card titled with the
+/// category name and one wrapped "not available yet" sentence. Status comes
+/// from [`SettingsCategory::is_available`], so the body disappears when a
+/// later feature adds descriptors.
+fn unavailable_category(ui: &mut Ui, category: SettingsCategory) {
+    let sentence_key = match category {
+        SettingsCategory::Offline => "settings-unavailable-offline",
+        _ => "settings-unavailable-privacy-diagnostics",
+    };
+    crate::widgets::controls::panel_card(ui, &tr(category.label_key()), |ui| {
+        ui.add(egui::Label::new(tr(sentence_key)).wrap());
+    });
+}
+
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
 
@@ -275,6 +410,123 @@ mod tests {
         let controller =
             PlaybackController::new(FakeBackend::new(vec![]), ScriptedHost::new(), store);
         SettingsScreen::new(&controller)
+    }
+
+    /// How long a search-result highlight lasts (data-model §3.4).
+    #[test]
+    fn highlight_is_unarmed_on_the_selecting_frame_then_armed() {
+        let mut h = FieldHighlight::new("markers.nudge_step_ms");
+        assert!(!h.armed, "unarmed when created on the selecting frame");
+        // A key press on the selecting frame (the Enter that chose it)
+        // must not clear it: the first advance only arms.
+        assert!(h.advance(10.0, true, true));
+        assert!(h.armed);
+        assert!((h.started_at - 10.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn highlight_clears_after_three_seconds() {
+        let mut h = FieldHighlight::new("x");
+        assert!(h.advance(10.0, false, false));
+        assert!(h.advance(12.9, false, false));
+        assert!(!h.advance(13.0, false, false));
+    }
+
+    #[test]
+    fn highlight_clears_on_key_press_once_armed() {
+        let mut h = FieldHighlight::new("x");
+        assert!(h.advance(0.0, false, false));
+        assert!(!h.advance(0.1, true, false));
+    }
+
+    #[test]
+    fn highlight_clears_on_pointer_press_once_armed() {
+        let mut h = FieldHighlight::new("x");
+        assert!(h.advance(0.0, false, false));
+        assert!(!h.advance(0.1, false, true));
+    }
+
+    #[test]
+    fn highlight_clears_on_category_change_and_restarts_on_new_result() {
+        let mut screen = fresh_screen();
+        screen.select_result(SettingsCategory::Playback, "markers.nudge_step_ms");
+        assert_eq!(
+            screen.highlight,
+            Some(FieldHighlight::new("markers.nudge_step_ms"))
+        );
+        screen.highlight.as_mut().expect("set").armed = true;
+
+        // A new result restarts: new id, unarmed.
+        screen.select_result(SettingsCategory::Audio, "audio.limiter_ceiling");
+        assert_eq!(
+            screen.highlight,
+            Some(FieldHighlight::new("audio.limiter_ceiling"))
+        );
+
+        // Changing category by other means clears.
+        screen.change_category(SettingsCategory::About);
+        assert_eq!(screen.highlight, None);
+    }
+
+    #[test]
+    fn controls_and_developer_results_never_highlight() {
+        let mut screen = fresh_screen();
+        screen.select_result(SettingsCategory::Controls, "controls.keybindings");
+        assert_eq!(screen.highlight, None);
+        assert_eq!(screen.focus_target, Some("controls.keybindings"));
+        screen.select_result(SettingsCategory::Developer, "developer.buffer_frames");
+        assert_eq!(screen.highlight, None);
+    }
+
+    /// F21: Offline and Privacy & diagnostics draw a titled card plus the
+    /// per-category "not available yet" sentence, never the generic
+    /// placeholder.
+    #[test]
+    fn unavailable_categories_show_a_header_and_their_own_sentence() {
+        use egui::accesskit::Role;
+        for (category, sentence_key) in [
+            (SettingsCategory::Offline, "settings-unavailable-offline"),
+            (
+                SettingsCategory::PrivacyDiagnostics,
+                "settings-unavailable-privacy-diagnostics",
+            ),
+        ] {
+            let ctx = egui::Context::default();
+            crate::theme::apply_tokens(&ctx);
+            ctx.enable_accesskit();
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                unavailable_category(ui, category);
+            });
+            let update = output
+                .platform_output
+                .accesskit_update
+                .take()
+                .expect("accesskit update");
+            output.drop_without_applying_deltas();
+            let labels: Vec<(Role, String)> = update
+                .nodes
+                .iter()
+                .filter_map(|(_, n)| {
+                    n.label()
+                        .or_else(|| n.value())
+                        .map(|l| (n.role(), l.to_string()))
+                })
+                .collect();
+            assert!(
+                labels.contains(&(Role::Heading, tr(category.label_key()))),
+                "{category:?}: {labels:?}"
+            );
+            assert!(
+                labels.iter().any(|(_, l)| *l == tr(sentence_key)),
+                "{category:?}: {labels:?}"
+            );
+            assert!(
+                !labels
+                    .iter()
+                    .any(|(_, l)| *l == tr("placeholder-settings-category")),
+                "{category:?}: {labels:?}"
+            );
+        }
     }
 
     /// 020-shell-navigation-and-gates (US3, contracts/section-memory.md

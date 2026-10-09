@@ -503,3 +503,21 @@ fn scan_actually_reaches_both_crates() {
         "expected to find crates/modplayer/src/main.rs — modplayer root is broken"
     );
 }
+
+/// 028-settings-fields-and-account (F29, FR-016): the shared settings-field
+/// builder is inside the scan's file set, so its zero-literal state is
+/// enforced by `no_colour_or_font_literals_outside_theme`.
+#[test]
+fn settings_field_builder_is_scanned() {
+    let field = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("settings")
+        .join("field.rs");
+    assert!(field.is_file(), "{} must exist", field.display());
+    assert!(
+        scan_all_files()
+            .iter()
+            .any(|p| p.ends_with("settings/field.rs")),
+        "the literal scan must cover settings/field.rs"
+    );
+}

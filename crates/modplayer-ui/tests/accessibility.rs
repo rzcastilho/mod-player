@@ -9,6 +9,8 @@
 //! headlessly through `ScriptedHost` + `FakeBackend` exactly like
 //! `now_playing.rs`/`queue_view.rs`'s own behavioural tests.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -3252,4 +3254,164 @@ fn row_actions_opener_and_menu_items_expose_names_and_roles() {
     .collect();
     expected.sort();
     assert_eq!(items, expected, "six MenuItems named by their labels");
+}
+
+// ---------------------------------------------------------------------
+// 028 settings fields and account: the AccessKit sweep over the new names
+// ---------------------------------------------------------------------
+
+/// Every interactive node carries a non-empty accessible name.
+fn assert_interactive_nodes_named(nodes: &[AccessNode], what: &str) {
+    for node in nodes {
+        if matches!(
+            node.role,
+            Role::Button
+                | Role::CheckBox
+                | Role::ComboBox
+                | Role::Slider
+                | Role::SpinButton
+                | Role::Switch
+                | Role::TextInput
+        ) {
+            assert!(
+                node.labelled_by_something
+                    || node.accessible_name().is_some_and(|n| !n.trim().is_empty()),
+                "{what}: unnamed {:?} node: {node:?}",
+                node.role
+            );
+        }
+    }
+}
+
+/// Reset buttons: named "Reset {field} to default" with no stray
+/// isolation marks, and every other interactive node still named.
+#[test]
+fn settings_reset_buttons_expose_accessible_names() {
+    let (store, _dir) = fresh_store("028-reset-names");
+    let mut controller =
+        PlaybackController::new(FakeBackend::new(vec![]), ScriptedHost::new(), store);
+    controller.set_ceiling(modplayer_engine::CeilingDb::new(-3.0));
+    controller.set_nudge_step_ms(40);
+    let mut cached = controller.settings_store().load().settings;
+    let mut screen = modplayer_ui::settings::playback::PlaybackScreen::new(&controller);
+
+    let audio = render_nodes(|ui| {
+        let _ = modplayer_ui::settings::audio::show(ui, &mut controller, &mut cached, None);
+    });
+    let playback = render_nodes(|ui| {
+        modplayer_ui::settings::playback::show(ui, &mut controller, &mut screen, None)
+    });
+    for (what, nodes, key) in [
+        ("audio", &audio, "setting-limiter-ceiling"),
+        ("playback", &playback, "setting-nudge-step"),
+    ] {
+        let expected = tr_args("settings-reset-a11y", &[("field", tr(key))])
+            .replace(['\u{2068}', '\u{2069}'], "");
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.role == Role::Button && n.accessible_name() == Some(expected.as_str())),
+            "{what}: no Reset button named `{expected}`: {nodes:?}"
+        );
+        assert_interactive_nodes_named(nodes, what);
+    }
+}
+
+/// "Coming soon" badge: Offline and Privacy & diagnostics are announced as
+/// "{category}, coming soon"; a complete category keeps its plain name.
+#[test]
+fn unavailable_categories_are_announced_as_coming_soon() {
+    use modplayer_core::settings_registry::SettingsCategory;
+    let mut state = modplayer_ui::settings::category_row::CategoryRowState::default();
+    let nodes = render_nodes(|ui| {
+        let _ = modplayer_ui::settings::category_row::show(ui, SettingsCategory::Audio, &mut state);
+    });
+    assert_interactive_nodes_named(&nodes, "category row");
+    let all_names: Vec<String> = nodes
+        .iter()
+        .filter_map(|n| n.accessible_name())
+        .map(|n| n.replace(['\u{2068}', '\u{2069}'], ""))
+        .collect();
+    for category in [
+        SettingsCategory::Offline,
+        SettingsCategory::PrivacyDiagnostics,
+    ] {
+        let expected = tr_args(
+            "settings-category-coming-soon-a11y",
+            &[("category", tr(category.label_key()))],
+        )
+        .replace(['\u{2068}', '\u{2069}'], "");
+        // Inline or, when the row overflows at 800 px, in the More menu
+        // (closed here), so accept either the exact name or an overflow.
+        let inline = all_names.contains(&expected);
+        let overflowed = all_names
+            .iter()
+            .any(|n| n.starts_with(&tr("settings-more")));
+        assert!(
+            inline || overflowed,
+            "`{expected}` neither inline nor behind More: {all_names:?}"
+        );
+    }
+    let audio = tr(SettingsCategory::Audio.label_key());
+    assert!(
+        !all_names
+            .iter()
+            .any(|n| n.contains(&tr("settings-coming-soon")) && n.starts_with(&audio)),
+        "Audio is complete and carries no badge"
+    );
+}
+
+/// Account summary card and the sign-out modal expose named, reachable
+/// controls and a heading for the card.
+#[test]
+fn account_summary_and_signout_modal_expose_accessible_names() {
+    let mut service = common::active_account("028-a11y");
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let render = |ctx: &Context, service: &mut modplayer_account::AccountService, input| {
+        render_nodes_on(ctx, input, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                let _ = modplayer_ui::settings::account::show(ui, service, None);
+            });
+        })
+    };
+    let _ = render(&ctx, &mut service, default_input());
+    let nodes = render(&ctx, &mut service, default_input());
+    assert!(
+        nodes.iter().any(|n| n.role == Role::Heading
+            && n.accessible_name() == Some(tr("account-summary-title").as_str())),
+        "summary card heading: {nodes:?}"
+    );
+    assert_interactive_nodes_named(&nodes, "account");
+
+    // Open the sign-out dialog by clicking the page's Sign out button.
+    let centre = nodes
+        .iter()
+        .find(|n| {
+            n.role == Role::Button && n.accessible_name() == Some(tr("account-sign-out").as_str())
+        })
+        .and_then(|n| n.bounds)
+        .expect("Sign out button")
+        .center();
+    for pressed in [true, false] {
+        let mut raw = default_input();
+        raw.events.push(Event::PointerButton {
+            pos: centre,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::default(),
+        });
+        let _ = render(&ctx, &mut service, raw);
+    }
+    let _ = render(&ctx, &mut service, default_input());
+    let nodes = render(&ctx, &mut service, default_input());
+    for key in ["signout-confirm-title", "signout-cancel", "signout-confirm"] {
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.accessible_name() == Some(tr(key).as_str())),
+            "dialog node `{key}`: {nodes:?}"
+        );
+    }
+    assert_interactive_nodes_named(&nodes, "sign-out dialog");
 }
