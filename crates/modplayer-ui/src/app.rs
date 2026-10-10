@@ -682,20 +682,18 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
             // detail-navigation stack layered over it (T065).
             Section::Library => self.show_library(ui),
             Section::Search => {
-                let key = section_memory::ViewKey::Search;
-                let scroll = self.section_memory.scroll_area(&key);
-                let output = scroll.show(ui, |ui| {
-                    search_view::show(
-                        ui,
-                        &mut self.controller,
-                        &mut self.artwork,
-                        &mut self.shell.focus_search_requested,
-                        &mut self.search_view,
-                    );
-                });
-                self.section_memory
-                    .record(key.clone(), output.state.offset.y);
-                Some(key)
+                // 026: the view owns the single results `ScrollArea` (the
+                // field row stays fixed above it) and records its offset
+                // under `ViewKey::Search` itself.
+                search_view::show(
+                    ui,
+                    &mut self.controller,
+                    &mut self.artwork,
+                    &mut self.shell.focus_search_requested,
+                    &mut self.search_view,
+                    &mut self.section_memory,
+                );
+                Some(section_memory::ViewKey::Search)
             }
             Section::NowPlaying => {
                 now_playing::show(

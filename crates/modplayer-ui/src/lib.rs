@@ -29,6 +29,7 @@ pub mod plugins_view;
 pub mod privacy_notice;
 pub mod queue_view;
 pub mod rows;
+pub mod search_layout;
 pub mod search_view;
 pub mod section_memory;
 pub mod settings;

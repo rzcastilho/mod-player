@@ -4100,7 +4100,7 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
             modplayer_audio_source::catalog::CatalogError,
         >,
     ) {
-        self.search.apply_reply(request_id, result);
+        self.search.apply_reply(request_id, result, self.now());
     }
 
     /// Route a `LibraryPage` reply into `SyncScheduler`/`LibraryIndex`

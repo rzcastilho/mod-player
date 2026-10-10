@@ -377,7 +377,7 @@ fn details_row(ui: &mut Ui, id: u64, detail: &str, state: &mut StackState) {
 /// The severity's role colour (research R7, FR-007): `Info` → `positive`,
 /// `Warning` → `warning`, `Critical` → `danger`. Read from `theme::roles`
 /// (light/dark/high-contrast all covered), never a colour literal.
-fn severity_color(roles: &Roles, severity: Severity) -> Color32 {
+pub(crate) fn severity_color(roles: &Roles, severity: Severity) -> Color32 {
     match severity {
         Severity::Info => roles.positive,
         Severity::Warning => roles.warning,
@@ -387,7 +387,7 @@ fn severity_color(roles: &Roles, severity: Severity) -> Color32 {
 
 /// The severity's decorative icon glyph (FR-007). Never the sole carrier of
 /// severity — [`severity_key`]'s word is always rendered alongside it.
-fn severity_glyph(severity: Severity) -> &'static str {
+pub(crate) fn severity_glyph(severity: Severity) -> &'static str {
     match severity {
         Severity::Critical => "⛔",
         Severity::Warning => "⚠",
