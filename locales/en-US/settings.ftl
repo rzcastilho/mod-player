@@ -71,3 +71,27 @@ setting-nudge-step-desc = How far the left and right arrow keys move a focused m
 
 setting-keybindings = Keyboard shortcuts
 setting-keybindings-desc = View and rebind every keyboard shortcut, grouped by category.
+
+## 028-settings-fields-and-account (contracts/fluent-strings.md)
+
+settings-group-output = Output
+settings-group-level-protection = Level protection
+settings-group-connect-device = Connect device
+settings-group-markers = Markers
+settings-group-theme = Theme
+settings-group-language = Language
+
+setting-value-dbfs = { $value } dBFS
+setting-value-percent = { $value }%
+setting-value-ms = { $value } ms
+setting-range-dbfs = { $min } to { $max } dBFS
+setting-range-percent = { $min } to { $max }%
+setting-range-ms = { $min } to { $max } ms
+
+settings-reset = Reset
+settings-reset-a11y = Reset { $field } to default
+
+settings-coming-soon = Coming soon
+settings-category-coming-soon-a11y = { $category }, coming soon
+settings-unavailable-offline = Offline settings aren't available yet. They'll arrive in a later update.
+settings-unavailable-privacy-diagnostics = Privacy and diagnostics settings aren't available yet. They'll arrive in a later update.

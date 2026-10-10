@@ -125,6 +125,17 @@ fn more_a11y_name() -> String {
     tr("settings-more-a11y")
 }
 
+/// A category item's accessible name (F23): the plain label, or
+/// "{category}, coming soon" for an unavailable category.
+fn item_name(category: SettingsCategory) -> String {
+    let label = tr(category.label_key());
+    if category.is_available() {
+        label
+    } else {
+        modplayer_core::tr_args("settings-category-coming-soon-a11y", &[("category", label)])
+    }
+}
+
 // -- Contract R1-R4: partition() invariants (proptest) -----------------
 
 mod partition_invariants {
@@ -273,7 +284,7 @@ fn wide_screen_shows_all_eleven_categories_inline_with_no_more_control() {
     );
 
     for category in SettingsCategory::ALL {
-        let label = tr(category.label_key());
+        let label = item_name(category);
         assert_eq!(
             find_all(&nodes, Role::Button, &label).len(),
             1,
@@ -406,7 +417,7 @@ fn more_control_and_menu_items_report_the_expected_accesskit_surface() {
         let label = item.label.clone().unwrap_or_default();
         let index = SettingsCategory::ALL
             .iter()
-            .position(|c| tr(c.label_key()) == label)
+            .position(|c| item_name(*c) == label)
             .unwrap_or_else(|| panic!("menu item name `{label}` is not any category's label"));
         assert!(
             !inline_labels.contains(&label),
@@ -609,7 +620,7 @@ fn tab_reaches_every_overflowed_category_and_arrow_keys_navigate_the_menu() {
     let selected_category = SettingsCategory::ALL
         .iter()
         .copied()
-        .find(|c| tr(c.label_key()) == last_label)
+        .find(|c| item_name(*c) == last_label)
         .unwrap();
     assert_eq!(chosen, Some(selected_category));
     selected = chosen.unwrap();
@@ -784,10 +795,224 @@ fn resizing_while_the_menu_is_open_closes_it_and_moves_focus_to_the_selected_cat
         NARROW_HEIGHT,
         Vec::new(),
     );
-    let selected_node = find_one(&nodes, Role::Button, &tr(selected.label_key()));
+    let selected_node = find_one(&nodes, Role::Button, &item_name(selected));
     assert_eq!(
         focus,
         Some(selected_node.id),
         "focus must land on the selected category once More is gone"
     );
+}
+
+// -- 028 US4 (F22-F24): "Coming soon" badge ---------------------------------
+
+const UNAVAILABLE: [SettingsCategory; 2] = [
+    SettingsCategory::Offline,
+    SettingsCategory::PrivacyDiagnostics,
+];
+
+/// F23: a11y name reads "{category}, coming soon" for unavailable categories
+/// and the plain label for the rest — inline.
+#[test]
+fn unavailable_categories_are_named_coming_soon_inline_and_complete_ones_are_not() {
+    let ctx = fresh_context();
+    let mut state = CategoryRowState::default();
+    let (_, _, nodes) = render(
+        &ctx,
+        SettingsCategory::ALL[0],
+        &mut state,
+        WIDE_WIDTH,
+        NARROW_HEIGHT,
+        Vec::new(),
+    );
+    for category in SettingsCategory::ALL {
+        let expected = item_name(category);
+        find_one(&nodes, Role::Button, &expected);
+        if category.is_available() {
+            assert_eq!(expected, tr(category.label_key()));
+        } else {
+            assert!(expected.ends_with(", coming soon"), "{expected}");
+        }
+    }
+}
+
+/// F22: clicking an unavailable category selects it (not disabled).
+#[test]
+fn unavailable_categories_remain_selectable() {
+    for category in UNAVAILABLE {
+        let ctx = fresh_context();
+        let mut state = CategoryRowState::default();
+        let (_, _, nodes) = render(
+            &ctx,
+            SettingsCategory::ALL[0],
+            &mut state,
+            WIDE_WIDTH,
+            NARROW_HEIGHT,
+            Vec::new(),
+        );
+        let rect = find_one(&nodes, Role::Button, &item_name(category))
+            .bounds
+            .expect("bounds");
+        let ev = |pressed| Event::PointerButton {
+            pos: rect.center(),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        let _ = render(
+            &ctx,
+            SettingsCategory::ALL[0],
+            &mut state,
+            WIDE_WIDTH,
+            NARROW_HEIGHT,
+            vec![ev(true)],
+        );
+        let (chosen, _, _) = render(
+            &ctx,
+            SettingsCategory::ALL[0],
+            &mut state,
+            WIDE_WIDTH,
+            NARROW_HEIGHT,
+            vec![ev(false)],
+        );
+        assert_eq!(chosen, Some(category));
+    }
+}
+
+/// F23: pinned slot carries the badge name when an unavailable category is
+/// selected and would otherwise overflow.
+#[test]
+fn pinned_unavailable_category_carries_the_badge_name() {
+    let ctx = fresh_context();
+    let mut state = CategoryRowState::default();
+    let (_, _, nodes) = render(
+        &ctx,
+        SettingsCategory::PrivacyDiagnostics,
+        &mut state,
+        KEYBOARD_TEST_WIDTH,
+        NARROW_HEIGHT,
+        Vec::new(),
+    );
+    find_one(
+        &nodes,
+        Role::Button,
+        &item_name(SettingsCategory::PrivacyDiagnostics),
+    );
+}
+
+/// F23: "More" menu items carry the badge name too.
+#[test]
+fn more_menu_items_for_unavailable_categories_carry_the_badge_name() {
+    let ctx = fresh_context();
+    let mut state = CategoryRowState::default();
+    let (_, _, nodes) = render(
+        &ctx,
+        SettingsCategory::ALL[0],
+        &mut state,
+        KEYBOARD_TEST_WIDTH,
+        NARROW_HEIGHT,
+        Vec::new(),
+    );
+    let rect = find_one(&nodes, Role::Button, &more_a11y_name())
+        .bounds
+        .expect("bounds");
+    let ev = |pressed| Event::PointerButton {
+        pos: rect.center(),
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Modifiers::NONE,
+    };
+    let _ = render(
+        &ctx,
+        SettingsCategory::ALL[0],
+        &mut state,
+        KEYBOARD_TEST_WIDTH,
+        NARROW_HEIGHT,
+        vec![ev(true)],
+    );
+    let (_, _, nodes) = render(
+        &ctx,
+        SettingsCategory::ALL[0],
+        &mut state,
+        KEYBOARD_TEST_WIDTH,
+        NARROW_HEIGHT,
+        vec![ev(false)],
+    );
+    for category in UNAVAILABLE {
+        find_one(&nodes, Role::MenuItem, &item_name(category));
+    }
+    for n in nodes.iter().filter(|n| n.role == Role::MenuItem) {
+        let name = n.label.clone().unwrap_or_default();
+        assert!(
+            SettingsCategory::ALL.iter().any(|c| item_name(*c) == name),
+            "{name}"
+        );
+    }
+}
+
+/// F24: the badge widens the item (counted in `measure_category_width`, so
+/// `partition` sees it): an unavailable item is wider than its bare label.
+#[test]
+fn badge_width_is_part_of_the_item_width() {
+    let ctx = fresh_context();
+    let mut state = CategoryRowState::default();
+    let (_, _, nodes) = render(
+        &ctx,
+        SettingsCategory::ALL[0],
+        &mut state,
+        WIDE_WIDTH,
+        NARROW_HEIGHT,
+        Vec::new(),
+    );
+    let badged = find_one(&nodes, Role::Button, &item_name(SettingsCategory::Offline))
+        .bounds
+        .expect("bounds")
+        .width();
+    let mut label_width = 0.0;
+    let _ = ctx.run_ui(screen_input(WIDE_WIDTH, NARROW_HEIGHT), |ui| {
+        let galley = egui::WidgetText::from(modplayer_ui::theme::section_label(&tr(
+            SettingsCategory::Offline.label_key(),
+        )))
+        .into_galley(
+            ui,
+            Some(egui::TextWrapMode::Extend),
+            f32::INFINITY,
+            egui::TextStyle::Body,
+        );
+        label_width = galley.size().x;
+    });
+    assert!(
+        badged > label_width + 2.0 * 4.0 + 20.0,
+        "badged width {badged} should exceed bare label {label_width} by the badge"
+    );
+}
+
+/// F24: badges hold the one-line / equal-height contract at 40 % expansion
+/// for every selection, at narrow and wide widths.
+#[test]
+fn badges_keep_the_row_on_one_line_at_40_percent_expansion() {
+    for width in [NARROW_WIDTH, WIDE_WIDTH] {
+        for category in SettingsCategory::ALL {
+            let ctx = fresh_context();
+            let mut state = CategoryRowState::default();
+            let (_, _, nodes) = with_pseudo_expansion(40, || {
+                render(&ctx, category, &mut state, width, NARROW_HEIGHT, Vec::new())
+            });
+            let rects: Vec<Rect> = nodes
+                .iter()
+                .filter(|n| n.role == Role::Button)
+                .filter_map(|n| n.bounds)
+                .collect();
+            let top = rects[0].top();
+            for r in &rects {
+                assert!(
+                    (r.top() - top).abs() < 0.5,
+                    "{category:?} {width}: {rects:?}"
+                );
+                assert!(
+                    r.right() <= width + 0.5,
+                    "{category:?} {width}: clipped {r:?}"
+                );
+            }
+        }
+    }
 }

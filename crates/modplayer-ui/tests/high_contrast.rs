@@ -867,3 +867,53 @@ fn collection_header_title_and_facts_meet_contrast_in_all_four_appearances() {
         }
     }
 }
+
+// ---------------------------------------------------------------------
+// 028 settings fields and account (F18 HC)
+// ---------------------------------------------------------------------
+
+/// F18 HC: in both high-contrast appearances the search highlight outline
+/// (accent, >= 2 px, in fact the 3 px ring), the "Coming soon" badge
+/// (secondary text on the card), the group cards and the destructive
+/// Sign out styling stay distinguishable from their backgrounds.
+#[test]
+fn settings_highlight_badge_cards_and_destructive_stay_distinguishable() {
+    use modplayer_ui::theme::contrast::ratio;
+    use modplayer_ui::theme::controls::{Variant, variant_paint};
+    for roles in [&LIGHT_HIGH_CONTRAST, &DARK_HIGH_CONTRAST] {
+        // Highlight outline: the ring width in high contrast, in the accent
+        // role, clears the non-text floor against the page and the card.
+        let ring = focus_ring(roles);
+        assert!(ring.width >= 2.0, "highlight stroke width {}", ring.width);
+        assert_eq!(ring.color, roles.accent);
+        for surface in [roles.surface_base, roles.surface_raised] {
+            let measured = ratio(roles.accent, surface);
+            assert!(measured >= 3.0, "highlight outline = {measured:.2}");
+        }
+
+        // Group cards: the raised fill is a different colour from the page,
+        // and the card's divider (its only edge in high contrast) is a full
+        // strength line that clears 3:1 against both.
+        assert_ne!(roles.surface_raised, roles.surface_base);
+        let divider = divider_color_for(roles);
+        for surface in [roles.surface_base, roles.surface_raised] {
+            assert!(ratio(divider, surface) >= 3.0, "card edge vs {surface:?}");
+        }
+
+        // Badge: secondary text is promoted to primary and keeps the
+        // enhanced floor on the card it sits in and on the page.
+        for surface in [roles.surface_base, roles.surface_raised] {
+            assert!(ratio(roles.text_secondary, surface) >= 7.0, "badge text");
+        }
+
+        // Destructive Sign out: danger label and outline hold the enhanced
+        // floor and stay a different colour from ordinary text.
+        let destructive = variant_paint(roles, Variant::Destructive);
+        assert_ne!(destructive.label, roles.text_primary);
+        assert!(destructive.outline.width > 0.0);
+        for surface in [roles.surface_base, roles.surface_raised] {
+            assert!(ratio(destructive.label, surface) >= 7.0, "danger label");
+            assert!(ratio(destructive.outline.color, surface) >= 3.0, "outline");
+        }
+    }
+}

@@ -18,6 +18,8 @@
 //! to land on this frame (`settings/mod.rs`'s `SettingsScreen`, T090); the
 //! matching widget claims keyboard focus that frame.
 
+use std::ops::RangeInclusive;
+
 use egui::{ComboBox, Slider, Ui};
 use modplayer_audio_io::OutputBackend;
 use modplayer_audio_source::SourceHost;
@@ -27,8 +29,9 @@ use modplayer_engine::{
 };
 
 use crate::device_check::DeviceCheckScreen;
-use crate::theme;
-use crate::widgets::controls::{SwitchKind, switch};
+use crate::settings::field::{self, FieldOutput, FieldSpec, ResetState, Unit};
+use crate::theme::{self, tokens::space};
+use crate::widgets::controls::{SwitchKind, panel_card, switch};
 
 /// The three device-buffer presets shown in the combo, in display order
 /// (mirrors `device_check.rs`'s own `PRESETS`).
@@ -37,6 +40,12 @@ const PRESETS: [BufferPreset; 3] = [
     BufferPreset::Balanced,
     BufferPreset::Safe,
 ];
+
+/// The safe-volume switch: a checkbox-kind host switch that paints its own
+/// label (so the field row does not draw it twice).
+fn safe_volume_switch(ui: &mut Ui, on: &mut bool) -> egui::Response {
+    switch(ui, SwitchKind::Checkbox, on, &tr("setting-safe-volume"))
+}
 
 /// Draw the "Test output device" button. Returns a fresh `DeviceCheckScreen`
 /// — preselecting the controller's currently active device and preset,
@@ -55,7 +64,19 @@ pub fn test_output_device_button<B: OutputBackend, H: SourceHost>(
     }
 }
 
-/// Draw the full Audio settings screen, applying every change directly to
+/// The safe-volume cap's bounds: what the slider clamps with and what the
+/// range caption shows (research R3). `VolumePercent` itself caps at 100.
+pub(crate) const SAFE_VOLUME_CAP_RANGE: RangeInclusive<u8> = 0..=100;
+
+/// Give `output`'s control its visible label as accessible name.
+fn labelled(output: &FieldOutput) {
+    if let Some(id) = output.label_id {
+        output.control.clone().labelled_by(id);
+    }
+}
+
+/// Draw the full Audio settings screen as two cards — "Output" and "Level
+/// protection" (028, contracts F1) — applying every change directly to
 /// `controller` (or, for safe-volume, straight to its settings store via
 /// `cached`). Returns a fresh `DeviceCheckScreen` the frame "Test output
 /// device" is clicked.
@@ -70,157 +91,209 @@ pub fn show<B: OutputBackend, H: SourceHost>(
         .active_device()
         .map(|d| d.negotiated.device_rate)
         .unwrap_or_default();
+    let mut test_screen = None;
+    // Reset compares against the single source of defaults (research R4).
+    let defaults = AudioSettings::default();
 
-    ui.label(tr("setting-output-device"));
-    // FR-006, U2: field-description prose, capped at the 72-character
-    // measure (research R17).
-    ui.scope(|ui| {
-        ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
-        ui.label(tr("setting-output-device-desc"));
-    });
-    let current_device = controller.preferred_device().cloned();
-    let current_label = current_device
-        .as_ref()
-        .and_then(|id| devices.iter().find(|d| &d.id == id))
-        .map(|d| d.name.clone())
-        .unwrap_or_default();
-    let mut newly_selected: Option<DeviceId> = None;
-    let output_device_response = ComboBox::from_id_salt("audio.output_device")
-        .selected_text(current_label)
-        .show_ui(ui, |ui| {
-            for device in &devices {
-                let is_selected = current_device.as_ref() == Some(&device.id);
-                if ui
-                    .selectable_label(is_selected, device.name.clone())
-                    .clicked()
-                    && !is_selected
-                {
-                    newly_selected = Some(device.id.clone());
-                }
-            }
-        })
-        .response;
-    if focus == Some("audio.output_device") {
-        output_device_response.request_focus();
-    }
-    if let Some(device) = newly_selected {
-        let preset = controller.preset();
-        controller.confirm_device(device, preset);
-    }
+    panel_card(ui, &tr("settings-group-output"), |ui| {
+        let current_device = controller.preferred_device().cloned();
+        let current_label = current_device
+            .as_ref()
+            .and_then(|id| devices.iter().find(|d| &d.id == id))
+            .map(|d| d.name.clone())
+            .unwrap_or_default();
+        let mut newly_selected: Option<DeviceId> = None;
+        let mut spec = FieldSpec::new("audio.output_device", tr("setting-output-device"));
+        spec.help = Some(tr("setting-output-device-desc"));
+        let output = field::row(ui, &spec, |ui| {
+            ComboBox::from_id_salt("audio.output_device")
+                .selected_text(current_label)
+                .show_ui(ui, |ui| {
+                    for device in &devices {
+                        let is_selected = current_device.as_ref() == Some(&device.id);
+                        if ui
+                            .selectable_label(is_selected, device.name.clone())
+                            .clicked()
+                            && !is_selected
+                        {
+                            newly_selected = Some(device.id.clone());
+                        }
+                    }
+                })
+                .response
+        });
+        labelled(&output);
+        if focus == Some("audio.output_device") {
+            output.control.request_focus();
+        }
+        if let Some(device) = newly_selected {
+            let preset = controller.preset();
+            controller.confirm_device(device, preset);
+        }
+        ui.add_space(space::MD);
 
-    ui.label(tr("setting-buffer-preset"));
-    ui.scope(|ui| {
-        ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
-        ui.label(tr("setting-buffer-preset-desc"));
-    });
-    let mut preset = controller.preset();
-    let previous_preset = preset;
-    // 014-design-tokens-and-type-scale (US3, T044): the buffer preset's
-    // latency figure is a numeric readout — `mono` so its digits line up
-    // with every other numeric readout's column.
-    let buffer_preset_response = ComboBox::from_id_salt("audio.buffer_preset")
-        .selected_text(theme::mono_text(preset_label(preset, device_rate)))
-        .show_ui(ui, |ui| {
-            for candidate in PRESETS {
-                ui.selectable_value(
-                    &mut preset,
-                    candidate,
-                    theme::mono_text(preset_label(candidate, device_rate)),
-                );
-            }
-        })
-        .response;
-    if focus == Some("audio.buffer_preset") {
-        buffer_preset_response.request_focus();
-    }
-    if preset != previous_preset
-        && let Some(device) = controller.preferred_device().cloned()
-    {
-        controller.confirm_device(device, preset);
-    }
+        let mut preset = controller.preset();
+        let previous_preset = preset;
+        let mut spec = FieldSpec::new("audio.buffer_preset", tr("setting-buffer-preset"));
+        spec.help = Some(tr("setting-buffer-preset-desc"));
+        if controller.preferred_device().is_some() {
+            spec.reset = ResetState::compute(&previous_preset, &defaults.buffer_preset);
+        }
+        // 014-design-tokens-and-type-scale (US3, T044): the buffer preset's
+        // latency figure is a numeric readout — `mono` so its digits line up
+        // with every other numeric readout's column.
+        let output = field::row(ui, &spec, |ui| {
+            ComboBox::from_id_salt("audio.buffer_preset")
+                .selected_text(theme::mono_text(preset_label(preset, device_rate)))
+                .show_ui(ui, |ui| {
+                    for candidate in PRESETS {
+                        ui.selectable_value(
+                            &mut preset,
+                            candidate,
+                            theme::mono_text(preset_label(candidate, device_rate)),
+                        );
+                    }
+                })
+                .response
+        });
+        labelled(&output);
+        if focus == Some("audio.buffer_preset") {
+            output.control.request_focus();
+        }
+        if output.reset_clicked {
+            preset = defaults.buffer_preset;
+        }
+        if preset != previous_preset
+            && let Some(device) = controller.preferred_device().cloned()
+        {
+            controller.confirm_device(device, preset);
+        }
+        ui.add_space(space::MD);
 
-    ui.label(tr("setting-limiter-ceiling"));
-    ui.scope(|ui| {
-        ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
-        ui.label(tr("setting-limiter-ceiling-desc"));
+        let mut spec = FieldSpec::new("audio.test_output_device", tr("setting-test-output-device"));
+        spec.help = Some(tr("setting-test-output-device-desc"));
+        spec.label_in_control = true;
+        let output = field::row(ui, &spec, |ui| ui.button(tr("setting-test-output-device")));
+        if focus == Some("audio.test_output_device") {
+            output.control.request_focus();
+        }
+        if output.control.clicked() {
+            test_screen = Some(DeviceCheckScreen::new(
+                controller.active_device().map(|d| d.id.clone()),
+                controller.preset(),
+            ));
+        }
     });
-    let mut ceiling_db = f64::from(controller.ceiling().db());
-    let ceiling_response = ui.add(
-        Slider::new(
-            &mut ceiling_db,
-            f64::from(CeilingDb::MIN)..=f64::from(CeilingDb::MAX),
-        )
-        .step_by(0.1),
-    );
-    if focus == Some("audio.limiter_ceiling") {
-        ceiling_response.request_focus();
-    }
-    if ceiling_response.changed() {
-        controller.set_ceiling(CeilingDb::new(ceiling_db as f32));
-    }
+    ui.add_space(space::LG);
 
-    ui.scope(|ui| {
-        ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
-        ui.label(tr("setting-safe-volume-desc"));
-    });
-    let mut safe_volume_enabled = cached.safe_volume.enabled;
-    let enabled_response = switch(
-        ui,
-        SwitchKind::Checkbox,
-        &mut safe_volume_enabled,
-        &tr("setting-safe-volume"),
-    );
-    if focus == Some("audio.safe_volume_enabled") {
-        enabled_response.request_focus();
-    }
-    if enabled_response.changed() {
-        persist_safe_volume(
-            controller,
-            cached,
-            SafeVolume {
-                enabled: safe_volume_enabled,
-                cap: cached.safe_volume.cap,
-            },
-        );
-    }
-
-    ui.label(tr("setting-safe-volume-cap"));
-    ui.scope(|ui| {
-        ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
-        ui.label(tr("setting-safe-volume-cap-desc"));
-    });
-    let mut cap = f64::from(cached.safe_volume.cap.value());
-    let cap_response = ui.add(Slider::new(&mut cap, 0.0..=100.0).step_by(1.0));
-    if focus == Some("audio.safe_volume_cap") {
-        cap_response.request_focus();
-    }
-    if cap_response.changed() {
-        persist_safe_volume(
-            controller,
-            cached,
-            SafeVolume {
-                enabled: cached.safe_volume.enabled,
-                cap: VolumePercent::new(cap.round().clamp(0.0, 100.0) as u8),
-            },
-        );
-    }
-
-    ui.scope(|ui| {
-        ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
-        ui.label(tr("setting-test-output-device-desc"));
-    });
-    let test_button_response = ui.button(tr("setting-test-output-device"));
-    if focus == Some("audio.test_output_device") {
-        test_button_response.request_focus();
-    }
-    if test_button_response.clicked() {
-        return Some(DeviceCheckScreen::new(
-            controller.active_device().map(|d| d.id.clone()),
-            controller.preset(),
+    panel_card(ui, &tr("settings-group-level-protection"), |ui| {
+        let mut ceiling_db = f64::from(controller.ceiling().db());
+        let mut spec = FieldSpec::new("audio.limiter_ceiling", tr("setting-limiter-ceiling"));
+        spec.help = Some(tr("setting-limiter-ceiling-desc"));
+        spec.reset = ResetState::compute(&controller.ceiling(), &defaults.limiter_ceiling_db);
+        spec.range = Some(field::format_range(
+            Unit::Dbfs,
+            f64::from(CeilingDb::MIN),
+            f64::from(CeilingDb::MAX),
         ));
-    }
+        let output = field::row(ui, &spec, |ui| {
+            ui.add(
+                Slider::new(
+                    &mut ceiling_db,
+                    f64::from(CeilingDb::MIN)..=f64::from(CeilingDb::MAX),
+                )
+                .step_by(0.1)
+                .custom_formatter(|v, _| field::format_value(Unit::Dbfs, v))
+                .custom_parser(|text| field::parse_value(Unit::Dbfs, text)),
+            )
+        });
+        labelled(&output);
+        if focus == Some("audio.limiter_ceiling") {
+            output.control.request_focus();
+        }
+        if output.reset_clicked {
+            controller.set_ceiling(defaults.limiter_ceiling_db);
+        } else if output.control.changed() {
+            controller.set_ceiling(CeilingDb::new(ceiling_db as f32));
+        }
+        ui.add_space(space::MD);
 
-    None
+        let mut safe_volume_enabled = cached.safe_volume.enabled;
+        let mut spec = FieldSpec::new("audio.safe_volume_enabled", tr("setting-safe-volume"));
+        spec.help = Some(tr("setting-safe-volume-desc"));
+        spec.reset =
+            ResetState::compute(&cached.safe_volume.enabled, &defaults.safe_volume.enabled);
+        spec.label_in_control = true;
+        let output = field::row(ui, &spec, |ui| {
+            safe_volume_switch(ui, &mut safe_volume_enabled)
+        });
+        if focus == Some("audio.safe_volume_enabled") {
+            output.control.request_focus();
+        }
+        if output.reset_clicked {
+            persist_safe_volume(
+                controller,
+                cached,
+                SafeVolume {
+                    enabled: defaults.safe_volume.enabled,
+                    cap: cached.safe_volume.cap,
+                },
+            );
+        } else if output.control.changed() {
+            persist_safe_volume(
+                controller,
+                cached,
+                SafeVolume {
+                    enabled: safe_volume_enabled,
+                    cap: cached.safe_volume.cap,
+                },
+            );
+        }
+        ui.add_space(space::MD);
+
+        let mut cap = f64::from(cached.safe_volume.cap.value());
+        let (cap_min, cap_max) = (
+            f64::from(*SAFE_VOLUME_CAP_RANGE.start()),
+            f64::from(*SAFE_VOLUME_CAP_RANGE.end()),
+        );
+        let mut spec = FieldSpec::new("audio.safe_volume_cap", tr("setting-safe-volume-cap"));
+        spec.help = Some(tr("setting-safe-volume-cap-desc"));
+        spec.range = Some(field::format_range(Unit::Percent, cap_min, cap_max));
+        spec.reset = ResetState::compute(&cached.safe_volume.cap, &defaults.safe_volume.cap);
+        let output = field::row(ui, &spec, |ui| {
+            ui.add(
+                Slider::new(&mut cap, cap_min..=cap_max)
+                    .step_by(1.0)
+                    .custom_formatter(|v, _| field::format_value(Unit::Percent, v))
+                    .custom_parser(|text| field::parse_value(Unit::Percent, text)),
+            )
+        });
+        labelled(&output);
+        if focus == Some("audio.safe_volume_cap") {
+            output.control.request_focus();
+        }
+        if output.reset_clicked {
+            persist_safe_volume(
+                controller,
+                cached,
+                SafeVolume {
+                    enabled: cached.safe_volume.enabled,
+                    cap: defaults.safe_volume.cap,
+                },
+            );
+        } else if output.control.changed() {
+            persist_safe_volume(
+                controller,
+                cached,
+                SafeVolume {
+                    enabled: cached.safe_volume.enabled,
+                    cap: VolumePercent::new(cap.round().clamp(cap_min, cap_max) as u8),
+                },
+            );
+        }
+    });
+
+    test_screen
 }
 
 /// Reload the current settings, overwrite only `safe_volume`, and save —

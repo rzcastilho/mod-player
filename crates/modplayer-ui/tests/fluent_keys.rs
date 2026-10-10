@@ -714,7 +714,6 @@ const ACCOUNT_KEYS: &[&str] = &[
     "tier-free",
     "tier-unknown",
     "account-tier",
-    "account-never-validated",
     "account-signed-out",
     "account-sign-in",
     "account-recheck",
@@ -729,12 +728,7 @@ const ACCOUNT_KEYS: &[&str] = &[
 
 /// Account/notification keys that take a Fluent placeholder — resolved via
 /// `tr_args` with a stand-in value.
-const ACCOUNT_ARG_KEYS: &[&str] = &[
-    "signin-store-unavailable",
-    "account-display-name",
-    "account-last-validated",
-    "about-version",
-];
+const ACCOUNT_ARG_KEYS: &[&str] = &["signin-store-unavailable", "about-version"];
 
 /// Notification message keys that take a `{ $device }` placeholder
 /// (US3) — resolved via `tr_args` with a stand-in value, since a message
@@ -1346,6 +1340,8 @@ fn no_unused_keys_in_playback_and_settings_ftl() {
         .chain(TRANSPORT_GIVE_ARG_KEYS)
         .chain(TRANSPORT_REQUESTING_ARG_KEYS)
         .chain(TRANSPORT_ROW_A11Y_ARG_KEYS)
+        .chain(SETTINGS_028_PLAIN_KEYS)
+        .chain(SETTINGS_028_ARG_KEYS.iter().map(|(k, _)| k))
         .copied()
         .collect();
 
@@ -1858,5 +1854,134 @@ fn plugins_027_keys_have_en_us_and_pt_br_parity() {
             expected,
             "`{key}` variables differ from contracts/fluent-strings.md"
         );
+    }
+}
+
+/// 028-settings-fields-and-account (contracts/fluent-strings.md): new
+/// `settings.ftl` keys with no placeholder, resolved via plain `tr`.
+const SETTINGS_028_PLAIN_KEYS: &[&str] = &[
+    "settings-group-output",
+    "settings-group-level-protection",
+    "settings-group-connect-device",
+    "settings-group-markers",
+    "settings-group-theme",
+    "settings-group-language",
+    "settings-reset",
+    "settings-coming-soon",
+    "settings-unavailable-offline",
+    "settings-unavailable-privacy-diagnostics",
+];
+
+/// 028: new `settings.ftl` keys with placeholders, with their argument names.
+const SETTINGS_028_ARG_KEYS: &[(&str, &[&str])] = &[
+    ("setting-value-dbfs", &["value"]),
+    ("setting-value-percent", &["value"]),
+    ("setting-value-ms", &["value"]),
+    ("setting-range-dbfs", &["min", "max"]),
+    ("setting-range-percent", &["min", "max"]),
+    ("setting-range-ms", &["min", "max"]),
+    ("settings-reset-a11y", &["field"]),
+    ("settings-category-coming-soon-a11y", &["category"]),
+];
+
+/// 028: new `account.ftl` keys with no placeholder.
+const ACCOUNT_028_PLAIN_KEYS: &[&str] = &[
+    "account-summary-title",
+    "account-identity-unavailable",
+    "account-tier-unverified",
+    "account-last-verified",
+    "account-never-verified",
+];
+
+/// 028: new `account.ftl` keys with placeholders.
+const ACCOUNT_028_ARG_KEYS: &[(&str, &[&str])] = &[(
+    "account-last-verified-at",
+    &["day", "month", "year", "time"],
+)];
+
+/// 028: `date-month-short-1` … `date-month-short-12`.
+fn month_keys() -> Vec<String> {
+    (1..=12).map(|n| format!("date-month-short-{n}")).collect()
+}
+
+/// 028 (FR-015, NFR-7.1): every new settings/account key resolves against
+/// en-US.
+#[test]
+fn settings_028_keys_resolve() {
+    for key in SETTINGS_028_PLAIN_KEYS.iter().chain(ACCOUNT_028_PLAIN_KEYS) {
+        assert_ne!(&tr(key), key, "`{key}` missing from locales/en-US");
+    }
+    for key in month_keys() {
+        assert_ne!(
+            tr(&key),
+            key,
+            "`{key}` missing from locales/en-US/account.ftl"
+        );
+    }
+    for (key, args) in SETTINGS_028_ARG_KEYS.iter().chain(ACCOUNT_028_ARG_KEYS) {
+        let owned: Vec<(&str, String)> = args.iter().map(|a| (*a, "3".to_string())).collect();
+        assert_ne!(
+            &tr_args(key, &owned),
+            key,
+            "`{key}` missing from locales/en-US"
+        );
+    }
+    assert_eq!(tr("settings-reset"), "Reset");
+    assert_eq!(tr("date-month-short-9"), "Sep");
+}
+
+/// 028 (F26, FR-015, NFR-7.1): every new key exists in both en-US and pt-BR
+/// with identical placeholders.
+#[test]
+fn settings_028_keys_have_en_us_and_pt_br_parity() {
+    let files: [(&str, &str, &str); 2] = [
+        (
+            "settings.ftl",
+            include_str!("../../../locales/en-US/settings.ftl"),
+            include_str!("../../../locales/pt-BR/settings.ftl"),
+        ),
+        (
+            "account.ftl",
+            include_str!("../../../locales/en-US/account.ftl"),
+            include_str!("../../../locales/pt-BR/account.ftl"),
+        ),
+    ];
+    let months = month_keys();
+    let keys_for = |name: &str| -> Vec<String> {
+        if name == "settings.ftl" {
+            SETTINGS_028_PLAIN_KEYS
+                .iter()
+                .copied()
+                .chain(SETTINGS_028_ARG_KEYS.iter().map(|(k, _)| *k))
+                .map(String::from)
+                .collect()
+        } else {
+            ACCOUNT_028_PLAIN_KEYS
+                .iter()
+                .copied()
+                .chain(ACCOUNT_028_ARG_KEYS.iter().map(|(k, _)| *k))
+                .map(String::from)
+                .chain(months.iter().cloned())
+                .collect()
+        }
+    };
+    for (name, en_us_ftl, pt_br_ftl) in files {
+        let en_us_keys = defined_keys(en_us_ftl);
+        let pt_br_keys = defined_keys(pt_br_ftl);
+        for key in keys_for(name) {
+            assert!(
+                en_us_keys.contains(key.as_str()),
+                "`{key}` is missing from locales/en-US/{name}"
+            );
+            assert!(
+                pt_br_keys.contains(key.as_str()),
+                "`{key}` is missing from locales/pt-BR/{name}"
+            );
+            assert_eq!(
+                placeholders_of(en_us_ftl, &key),
+                placeholders_of(pt_br_ftl, &key),
+                "`{key}` placeholders differ between en-US and pt-BR {name}"
+            );
+        }
     }
 }

@@ -63,6 +63,22 @@ impl SettingsCategory {
             SettingsCategory::About => "settings-cat-about",
         }
     }
+
+    /// Whether this category has real content. `false` for the
+    /// placeholder-only categories shown as "coming soon".
+    ///
+    /// ```
+    /// use modplayer_core::SettingsCategory;
+    /// assert!(SettingsCategory::Audio.is_available());
+    /// assert!(!SettingsCategory::Offline.is_available());
+    /// assert!(!SettingsCategory::PrivacyDiagnostics.is_available());
+    /// ```
+    pub fn is_available(self) -> bool {
+        !matches!(
+            self,
+            SettingsCategory::Offline | SettingsCategory::PrivacyDiagnostics
+        )
+    }
 }
 
 /// One searchable setting (data-model.md §5.4).
@@ -312,6 +328,16 @@ mod tests {
                 !DESCRIPTORS.iter().any(|d| d.category == category),
                 "{category:?} should contribute no descriptors"
             );
+        }
+    }
+
+    /// F25: an unavailable category contributes no descriptors.
+    #[test]
+    fn unavailable_categories_have_no_descriptors() {
+        for c in SettingsCategory::ALL {
+            if !c.is_available() {
+                assert!(!DESCRIPTORS.iter().any(|d| d.category == c), "{c:?}");
+            }
         }
     }
 
