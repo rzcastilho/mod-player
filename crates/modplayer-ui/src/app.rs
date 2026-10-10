@@ -104,6 +104,8 @@ pub struct App<B: OutputBackend, H: SourceHost> {
     /// cleared on a new query) — constructed once and reused like
     /// `library_view`/`settings`.
     search_view: search_view::SearchViewState,
+    /// 027: the Plugins table's permissions/panels disclosure state.
+    plugins_view_state: plugins_view::PluginsViewState,
     /// The detail view's own frame-persistent state (US2: row selection,
     /// cleared on a target change) — constructed once and reused like
     /// `library_view`/`settings`.
@@ -202,6 +204,7 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
             library_view: library_view::LibraryViewState::default(),
             library_detail: None,
             search_view: search_view::SearchViewState::default(),
+            plugins_view_state: plugins_view::PluginsViewState::default(),
             detail_view: detail_view::DetailViewState::default(),
             waveform: WaveformState::default(),
             window_size: WindowSizeTracker::new(restored_size),
@@ -710,14 +713,15 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
             // section is visible, on top of the global ≥ 30 Hz loop above.
             Section::Plugins => {
                 ui.ctx().request_repaint_after(Duration::from_millis(500));
-                let key = section_memory::ViewKey::Plugins;
-                let scroll = self.section_memory.scroll_area(&key);
-                let output = scroll.show(ui, |ui| {
-                    plugins_view::show(ui, &mut self.controller);
-                });
-                self.section_memory
-                    .record(key.clone(), output.state.offset.y);
-                Some(key)
+                // 027: the view owns its `ScrollArea` and records the
+                // offset under `ViewKey::Plugins` itself.
+                plugins_view::show(
+                    ui,
+                    &mut self.controller,
+                    &mut self.plugins_view_state,
+                    &mut self.section_memory,
+                );
+                Some(section_memory::ViewKey::Plugins)
             }
             Section::Settings => {
                 let (device_check, events) = settings::show(

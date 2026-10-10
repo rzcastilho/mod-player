@@ -129,7 +129,10 @@ fn every_boolean_control_is_a_switch() {
         let contents = &cache[*file];
         let idx = line_index(contents, anchor, file);
         assert!(
-            window_contains(contents, idx, RADIUS, "switch("),
+            window_contains(contents, idx, RADIUS, "switch(")
+                // 027: the plugins table's narrow Enabled cell uses the
+                // label-less variant of the same host switch.
+                || window_contains(contents, idx, RADIUS, "switch_bare("),
             "{file}: expected a switch(...) call within {RADIUS} lines of {anchor:?}"
         );
         let kinds = switch_kinds_in_window(contents, idx, RADIUS);

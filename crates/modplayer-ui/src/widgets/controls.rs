@@ -105,6 +105,23 @@ pub enum SwitchKind {
 /// (research R1). `kind` controls only the reported accessible role
 /// (data-model.md §8); the visual is identical either way.
 pub fn switch(ui: &mut Ui, kind: SwitchKind, on: &mut bool, label: &str) -> Response {
+    switch_impl(ui, kind, on, label, true)
+}
+
+/// [`switch`] without the visible label: the track alone is drawn and
+/// `label` remains the control's accessible name. For table cells too
+/// narrow to hold the label text (027 plugins table, Enabled column).
+pub fn switch_bare(ui: &mut Ui, kind: SwitchKind, on: &mut bool, label: &str) -> Response {
+    switch_impl(ui, kind, on, label, false)
+}
+
+fn switch_impl(
+    ui: &mut Ui,
+    kind: SwitchKind,
+    on: &mut bool,
+    label: &str,
+    show_label: bool,
+) -> Response {
     let roles = tokens::roles(ui.visuals());
     let metrics = controls::switch_metrics();
 
@@ -114,7 +131,7 @@ pub fn switch(ui: &mut Ui, kind: SwitchKind, on: &mut bool, label: &str) -> Resp
     // know that block's width up front (024 contract R5, T043 M8 — a Stereo
     // tools row's last switch ran past the window). Same measure as
     // `now_playing::wrap_switch_before`: track + item spacing + label galley.
-    if ui.layout().main_wrap && ui.cursor().min.x > ui.max_rect().left() {
+    if show_label && ui.layout().main_wrap && ui.cursor().min.x > ui.max_rect().left() {
         let galley = egui::WidgetText::from(label).into_galley(
             ui,
             None,
@@ -161,7 +178,9 @@ pub fn switch(ui: &mut Ui, kind: SwitchKind, on: &mut bool, label: &str) -> Resp
                 controls::switch_thumb(roles, *on),
             );
         }
-        ui.label(label);
+        if show_label {
+            ui.label(label);
+        }
     });
 
     let rect = inner.response.rect;

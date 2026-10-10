@@ -2622,7 +2622,11 @@ fn fixture_controller_for_a11y(
 #[test]
 fn plugins_section_controls_named() {
     let (mut controller, _dir) = fixture_controller_for_a11y("plugins-section");
-    let nodes = render_nodes(|ui| modplayer_ui::plugins_view::show(ui, &mut controller));
+    let mut state = modplayer_ui::plugins_view::PluginsViewState::default();
+    let mut memory = modplayer_ui::section_memory::SectionMemory::default();
+    let nodes = render_nodes(|ui| {
+        modplayer_ui::plugins_view::show(ui, &mut controller, &mut state, &mut memory);
+    });
 
     let checkboxes: Vec<_> = nodes.iter().filter(|n| n.role == Role::CheckBox).collect();
     // 17 fixtures (010-transport-focus adds `focus-a`/`focus-b`;
@@ -2669,6 +2673,118 @@ fn plugins_section_controls_named() {
         ok_labels.len(),
         18,
         "expected 18 `ok` health labels: {nodes:?}"
+    );
+}
+
+/// 027 T17, FR-010: Tab walks each row's controls in reading order —
+/// Enabled → permissions disclosure → panel controls — and rows run top to
+/// bottom. Header labels are never focusable. (Restart and the
+/// expansion-area controls sit after the same cells; they need a suspended
+/// plugin / two panels and are covered by `tests/plugins_view.rs`.)
+#[test]
+fn tab_order_within_row() {
+    let (mut controller, _dir) = fixture_controller_for_a11y("plugins-tab-order");
+    let id = plugin_id_by_identifier(&mut controller, "org.modplayer.fixture.ui-panel");
+    let shared = std::sync::Arc::clone(controller.shared());
+    controller.plugins_mut().spawn(id, &shared);
+    assert!(wait_plugin_active(&mut controller, id));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while controller.plugin_panels_view().docked.is_empty() {
+        assert!(Instant::now() < deadline, "panel never registered");
+        controller.tick();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let plugin = controller
+        .plugins_view()
+        .rows
+        .iter()
+        .find(|r| r.id == id)
+        .map(|r| r.name.clone())
+        .expect("ui-panel row");
+
+    let mut state = modplayer_ui::plugins_view::PluginsViewState::default();
+    let mut memory = modplayer_ui::section_memory::SectionMemory::default();
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    // (role, accessible name, top y) of each newly focused node.
+    let mut order: Vec<(Role, String, f32)> = Vec::new();
+    for _ in 0..200 {
+        let mut input = default_input();
+        input.events.push(Event::Key {
+            key: Key::Tab,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::default(),
+        });
+        let mut output = ctx.run_ui(input, |ui| {
+            modplayer_ui::plugins_view::show(ui, &mut controller, &mut state, &mut memory);
+        });
+        let update = output
+            .platform_output
+            .accesskit_update
+            .take()
+            .expect("accesskit_update should be populated once enabled");
+        output.drop_without_applying_deltas();
+        let Some((_, node)) = update.nodes.iter().find(|(nid, _)| *nid == update.focus) else {
+            continue;
+        };
+        let name = node
+            .label()
+            .or_else(|| node.value())
+            .unwrap_or_default()
+            .to_string();
+        let y = node.bounds().map_or(0.0, |b| b.y0 as f32);
+        if node.role() == Role::Window {
+            continue; // nothing focused yet: AccessKit reports the root
+        }
+        if order.last().is_none_or(|(_, n, _)| *n != name) {
+            if order.iter().any(|(_, n, _)| *n == name) {
+                break; // wrapped around to the start
+            }
+            order.push((node.role(), name, y));
+        }
+    }
+    assert!(order.len() >= 19, "Tab must reach every row: {order:?}");
+
+    // Only interactive widgets take focus — never a header/cell label.
+    for (role, name, _) in &order {
+        assert!(
+            matches!(role, Role::CheckBox | Role::Button),
+            "`{name}` ({role:?}) must not be focusable"
+        );
+    }
+    // Rows top to bottom.
+    assert!(
+        order.windows(2).all(|w| w[1].2 + 1.0 >= w[0].2),
+        "focus must run top to bottom: {order:?}"
+    );
+    // Within the ui-panel row: Enabled, permissions, then panel controls.
+    let pos = |pred: &dyn Fn(&(Role, String, f32)) -> bool| {
+        order
+            .iter()
+            .position(pred)
+            .unwrap_or_else(|| panic!("control not focusable: {order:?}"))
+    };
+    let enabled = pos(&|(r, n, _)| *r == Role::CheckBox && n.contains(&plugin));
+    let permissions =
+        pos(&|(r, n, _)| *r == Role::Button && n.contains(&plugin) && !n.contains("Controls"));
+    let panel_controls: Vec<usize> = order
+        .iter()
+        .enumerate()
+        .filter(|(_, (r, n, _))| {
+            *r == Role::Button && n.contains(&plugin) && n.contains("Controls")
+        })
+        .map(|(i, _)| i)
+        .collect();
+    assert!(!panel_controls.is_empty(), "panel controls focusable");
+    assert!(
+        enabled < permissions,
+        "Enabled before permissions: {order:?}"
+    );
+    assert!(
+        panel_controls.iter().all(|&i| permissions < i),
+        "permissions before panel controls: {order:?}"
     );
 }
 

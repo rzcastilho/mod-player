@@ -523,19 +523,15 @@ const PLUGINS_KEYS: &[&str] = &[
     "plugins-title",
     "plugins-empty",
     "plugins-col-name",
-    "plugins-col-version",
     "plugins-col-source",
     "plugins-col-enabled",
     "plugins-col-health",
     "plugins-col-permissions",
-    "plugins-col-cpu",
-    "plugins-col-memory",
     "plugins-source-bundled",
     "plugins-health-ok",
     "plugins-health-warning",
     "plugins-health-suspended",
     "plugins-dash",
-    "plugins-list-separator",
     "permission-playback-observe",
     "permission-transport-control",
     "permission-queue-write",
@@ -590,8 +586,6 @@ const PLUGINS_KEYS: &[&str] = &[
 const PLUGINS_ARG_KEYS: &[&str] = &[
     "plugins-enable-toggle",
     "plugins-invalid-manifest",
-    "plugins-cpu",
-    "plugins-memory",
     "plugin-suspended",
     "plugin-auto-disabled",
     "plugin-panel-suspended",
@@ -1772,6 +1766,97 @@ fn search_026_keys_have_en_us_and_pt_br_parity() {
             placeholders_of(en_us_ftl, key),
             placeholders_of(pt_br_ftl, key),
             "`{key}` placeholders differ between en-US and pt-BR"
+        );
+    }
+}
+
+/// 027 (contracts/fluent-strings.md): plugins-table keys with no variables.
+const PLUGINS_027_PLAIN_KEYS: &[&str] = &[
+    "plugins-health-ok",
+    "plugins-health-warning",
+    "plugins-health-suspended",
+    "plugins-col-resource",
+    "plugins-col-actions",
+    "plugins-resource-cpu-none",
+    "plugins-resource-memory-none",
+    "plugins-over-budget",
+    "plugins-suspended-reason-unknown",
+];
+
+/// 027: plugins-table keys with the variables both locales must share.
+const PLUGINS_027_ARG_KEYS: &[(&str, &[&str])] = &[
+    ("plugins-resource-cpu", &["used", "budget"]),
+    ("plugins-resource-memory", &["used", "budget"]),
+    ("plugins-permissions-show", &["count", "plugin"]),
+    ("plugins-permissions-hide", &["count", "plugin"]),
+    ("plugins-panels-count", &["count"]),
+    ("plugins-panels-show", &["plugin"]),
+    ("plugins-panels-hide", &["plugin"]),
+    ("plugins-panel-show-a11y", &["title", "plugin"]),
+    ("plugins-panel-hide-a11y", &["title", "plugin"]),
+    ("plugins-panel-enable-a11y", &["title", "plugin"]),
+    ("plugins-panel-disable-a11y", &["title", "plugin"]),
+    ("plugins-restart-a11y", &["plugin"]),
+];
+
+/// 027: every contract key resolves against en-US, with the new health words.
+#[test]
+fn plugins_027_keys_resolve() {
+    for key in PLUGINS_027_PLAIN_KEYS {
+        assert_ne!(
+            &tr(key),
+            key,
+            "`{key}` missing from locales/en-US/plugins.ftl"
+        );
+    }
+    for (key, args) in PLUGINS_027_ARG_KEYS {
+        let owned: Vec<(&str, String)> = args.iter().map(|a| (*a, "3".to_string())).collect();
+        assert_ne!(
+            &tr_args(key, &owned),
+            key,
+            "`{key}` missing from locales/en-US/plugins.ftl"
+        );
+    }
+    assert_eq!(tr("plugins-health-ok"), "healthy");
+    assert_eq!(tr("plugins-health-warning"), "degraded");
+    assert_eq!(tr("plugins-health-suspended"), "suspended");
+}
+
+/// 027 (NFR-7.1): every contract key exists in both en-US and pt-BR
+/// `plugins.ftl` with identical placeholders.
+#[test]
+fn plugins_027_keys_have_en_us_and_pt_br_parity() {
+    let en_us_ftl = include_str!("../../../locales/en-US/plugins.ftl");
+    let pt_br_ftl = include_str!("../../../locales/pt-BR/plugins.ftl");
+    let en_us_keys = defined_keys(en_us_ftl);
+    let pt_br_keys = defined_keys(pt_br_ftl);
+
+    let all = PLUGINS_027_PLAIN_KEYS
+        .iter()
+        .copied()
+        .chain(PLUGINS_027_ARG_KEYS.iter().map(|(k, _)| *k));
+    for key in all {
+        assert!(
+            en_us_keys.contains(key),
+            "`{key}` is missing from locales/en-US/plugins.ftl"
+        );
+        assert!(
+            pt_br_keys.contains(key),
+            "`{key}` is missing from locales/pt-BR/plugins.ftl"
+        );
+        assert_eq!(
+            placeholders_of(en_us_ftl, key),
+            placeholders_of(pt_br_ftl, key),
+            "`{key}` placeholders differ between en-US and pt-BR"
+        );
+    }
+    for (key, args) in PLUGINS_027_ARG_KEYS {
+        let mut expected: Vec<String> = args.iter().map(|a| (*a).to_string()).collect();
+        expected.sort();
+        assert_eq!(
+            placeholders_of(en_us_ftl, key),
+            expected,
+            "`{key}` variables differ from contracts/fluent-strings.md"
         );
     }
 }
