@@ -21,8 +21,8 @@ use std::ops::Range;
 
 use egui::accesskit::Role;
 use egui::{
-    Align, Key, Label, Layout, Popup, PopupKind, RichText, ScrollArea, Sense, SetOpenCommand, Ui,
-    UiBuilder, Vec2,
+    Align, Id, Key, Label, Layout, Modifiers, Popup, PopupKind, Response, RichText, ScrollArea,
+    Sense, SetOpenCommand, Ui, UiBuilder, Vec2,
 };
 
 use modplayer_audio_source::{
@@ -34,7 +34,7 @@ use crate::actions::{self, Claim};
 use crate::artwork::{ArtworkCache, ArtworkState};
 use crate::theme;
 use crate::theme::controls::Variant;
-use crate::widgets::controls::button;
+use crate::widgets::controls::{button, button_over};
 use crate::widgets::initials::initials_placeholder;
 use crate::widgets::skeleton::{ROW_HEIGHT, WIDE_ROW_HEIGHT};
 
@@ -42,10 +42,10 @@ use crate::widgets::skeleton::{ROW_HEIGHT, WIDE_ROW_HEIGHT};
 /// artist/playlist rows are visually taller (`WIDE_ROW_HEIGHT`) than track
 /// rows, but share the same artwork size for now — a later polish pass may
 /// grow it for the wide rows.
-const ARTWORK_SIZE: f32 = 40.0;
-/// Width kept free at the row's trailing edge for the "…" actions button
-/// (button + item spacing), so the text column truncates before it.
-const ACTIONS_RESERVED_WIDTH: f32 = 40.0;
+pub(crate) const ARTWORK_SIZE: f32 = 40.0;
+/// The glyph on every "…" actions opener (U+2026; the midline U+22EF is
+/// not in egui's bundled fonts).
+const OPENER_GLYPH: &str = "…";
 
 /// What one row renders (data-model.md §4). Owns the ref by value: callers
 /// clone out of `SearchSession`/`LibraryIndex` state to build the rows a
@@ -459,37 +459,41 @@ fn artwork_decision(state: Option<ArtworkState>, name: &str) -> ArtworkDecision 
 /// square while `Loading`, and the initials placeholder on `Failed` or no
 /// URL at all (contracts/ui-surface.md §6, FR-020).
 fn draw_artwork(ui: &mut Ui, cache: &mut ArtworkCache, entity: &RowEntity) {
-    draw_artwork_url(ui, cache, artwork_url(entity), artwork_name(entity));
+    draw_artwork_url(
+        ui,
+        cache,
+        artwork_url(entity),
+        artwork_name(entity),
+        ARTWORK_SIZE,
+    );
 }
 
 /// The URL/name half of [`draw_artwork`], factored out so callers that
 /// don't have a `RowEntity` — the Queue panel's `queue_row` (021 research
 /// R8) — can draw the same 40 px artwork square from a raw URL and
-/// placeholder name.
+/// placeholder name. `size` is the square's side: rows pass
+/// [`ARTWORK_SIZE`], the 025 collection header passes its 128 px square.
 pub(crate) fn draw_artwork_url(
     ui: &mut Ui,
     cache: &mut ArtworkCache,
     url: Option<&str>,
     name: &str,
+    size: f32,
 ) {
     let state = url.map(|url| cache.get(ui.ctx(), url));
     match artwork_decision(state, name) {
         ArtworkDecision::Texture(texture_id) => {
-            ui.add(egui::Image::from_texture((
-                texture_id,
-                Vec2::splat(ARTWORK_SIZE),
-            )));
+            ui.add(egui::Image::from_texture((texture_id, Vec2::splat(size))));
         }
         ArtworkDecision::NeutralSquare => {
-            let (rect, _response) =
-                ui.allocate_exact_size(Vec2::splat(ARTWORK_SIZE), Sense::hover());
+            let (rect, _response) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
             if ui.is_rect_visible(rect) {
                 ui.painter()
                     .rect_filled(rect, theme::radius::MD, ui.visuals().faint_bg_color);
             }
         }
         ArtworkDecision::Initials(name) => {
-            initials_placeholder(ui, &name, ARTWORK_SIZE);
+            initials_placeholder(ui, &name, size);
         }
     }
 }
@@ -633,18 +637,89 @@ fn draw_content(ui: &mut Ui, entity: &RowEntity, selected: bool) {
     }
 }
 
+/// The width kept free at a row's trailing edge for the "…" opener
+/// (contract RM3, research R4): the opener's measured width plus one
+/// `item_spacing.x` either side of it. Measured, not a constant, so it
+/// tracks text scale.
+fn actions_reserved_width(ui: &Ui) -> f32 {
+    button_width(ui, OPENER_GLYPH).max(ui.spacing().interact_size.x)
+        + 2.0 * ui.spacing().item_spacing.x
+}
+
+/// A key the open actions menu reacts to (contract RM6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NavKey {
+    Down,
+    Up,
+    Home,
+    End,
+}
+
+/// The item index focus moves to when `key` is pressed on item `focused`
+/// of `len` (contract RM6): ↓/↑ wrap (last → first, first → last),
+/// Home/End jump to the ends. Pure, so the wrap maths is unit-tested.
+pub(crate) fn step(focused: usize, key: NavKey, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let len_i = len as isize;
+    match key {
+        NavKey::Down => (focused as isize + 1).rem_euclid(len_i) as usize,
+        NavKey::Up => (focused as isize - 1).rem_euclid(len_i) as usize,
+        NavKey::Home => 0,
+        NavKey::End => len - 1,
+    }
+}
+
+/// Per-menu keyboard state kept in egui temp memory, keyed by the menu's
+/// id (research R7): where focus returns to once the menu closes. Removed
+/// on close.
+#[derive(Debug, Clone, Copy)]
+struct MenuNav {
+    return_to: Id,
+}
+
 /// Draw the trailing six-action `Menu` and report which item (if any) was
 /// clicked this frame (contracts/ui-surface.md §5). `open_request` forces
 /// the menu open this frame regardless of the button's own click — used by
 /// the row's right-click/`Shift+F10` triggers, computed by the caller
-/// before this menu (and thus this frame) renders.
-fn actions_menu(ui: &mut Ui, accessible_name: &str, open_request: bool) -> Option<RowAction> {
+/// before this menu (and thus this frame) renders. Focus returns to the
+/// opener when the menu closes; see [`actions_menu_returning`].
+pub(crate) fn actions_menu(
+    ui: &mut Ui,
+    accessible_name: &str,
+    open_request: bool,
+) -> Option<RowAction> {
+    actions_menu_returning(ui, accessible_name, open_request, None, false)
+}
+
+/// [`actions_menu`] with an explicit focus-return target (contract RM7):
+/// `Some(id)` is the row that opened the menu; `None` is the opener itself
+/// (the header's "…"). `on_accent` draws the opener on a selected row's
+/// `accent` fill, so its glyph is `text_on_accent`.
+pub(crate) fn actions_menu_returning(
+    ui: &mut Ui,
+    accessible_name: &str,
+    open_request: bool,
+    return_to: Option<Id>,
+    on_accent: bool,
+) -> Option<RowAction> {
     let label = tr_args("row-actions", &[("name", accessible_name.to_string())]);
-    let opener = ui.button("…");
+    let over = on_accent.then(|| {
+        let roles = theme::roles(ui.visuals());
+        (roles.accent, roles.text_on_accent)
+    });
+    let opener = button_over(ui, Variant::Quiet, OPENER_GLYPH, over);
     ui.ctx()
         .accesskit_node_builder(opener.id, |b| b.set_label(label));
 
     let menu_id = opener.id.with("row-actions-menu");
+    let nav_id = menu_id.with("nav");
+    let return_id = return_to.unwrap_or(opener.id);
+    let was_open = Popup::is_id_open(ui.ctx(), menu_id);
+    let opened_by_keyboard = !was_open
+        && opener.has_focus()
+        && ui.input(|i| i.key_pressed(Key::Enter) || i.key_pressed(Key::Space));
     let command = if opener.clicked() {
         Some(SetOpenCommand::Toggle)
     } else if open_request {
@@ -653,32 +728,103 @@ fn actions_menu(ui: &mut Ui, accessible_name: &str, open_request: bool) -> Optio
         None
     };
 
+    // Menu keys are consumed only while this menu is open, before any item
+    // is drawn, so egui's spatial focus navigation never sees them.
+    let nav_key = if was_open {
+        ui.input_mut(|i| {
+            if i.consume_key(Modifiers::NONE, Key::ArrowDown) {
+                Some(NavKey::Down)
+            } else if i.consume_key(Modifiers::NONE, Key::ArrowUp) {
+                Some(NavKey::Up)
+            } else if i.consume_key(Modifiers::NONE, Key::Home) {
+                Some(NavKey::Home)
+            } else if i.consume_key(Modifiers::NONE, Key::End) {
+                Some(NavKey::End)
+            } else {
+                None
+            }
+        })
+    } else {
+        None
+    };
+    // Captured once, before any item is drawn or re-focused, so one key
+    // press moves focus by exactly one item.
+    let originally_focused = ui.memory(|m| m.focused());
+    let focus_first = opened_by_keyboard || (open_request && !was_open);
+
     let mut chosen = None;
     Popup::new(menu_id, ui.ctx().clone(), &opener, opener.layer_id)
         .kind(PopupKind::Menu)
         .layout(Layout::top_down_justified(Align::Min))
         .open_memory(command)
         .show(|ui| {
+            let mut items: Vec<Response> = Vec::with_capacity(RowAction::ORDER.len());
             for action in RowAction::ORDER {
                 let response = ui.button(tr(action.fluent_key()));
                 ui.ctx()
                     .accesskit_node_builder(response.id, |b| b.set_role(Role::MenuItem));
+                actions::register_claim(
+                    ui.ctx(),
+                    response.id,
+                    Claim::Keys(actions::row_menu_item_claims()),
+                );
+                ui.memory_mut(|m| {
+                    m.set_focus_lock_filter(
+                        response.id,
+                        egui::EventFilter {
+                            vertical_arrows: true,
+                            ..egui::EventFilter::default()
+                        },
+                    );
+                });
                 if response.clicked() {
                     chosen = Some(action);
-                    Popup::close_id(ui.ctx(), menu_id);
                 }
+                items.push(response);
+            }
+            if focus_first {
+                items[0].request_focus();
+            } else if let Some(key) = nav_key
+                && let Some(current) = items.iter().position(|r| Some(r.id) == originally_focused)
+            {
+                items[step(current, key, items.len())].request_focus();
             }
         });
+
+    if chosen.is_some() {
+        Popup::close_id(ui.ctx(), menu_id);
+    }
+    let is_open = Popup::is_id_open(ui.ctx(), menu_id);
+    if is_open {
+        ui.data_mut(|d| {
+            d.insert_temp(
+                nav_id,
+                MenuNav {
+                    return_to: return_id,
+                },
+            )
+        });
+    } else if was_open || chosen.is_some() {
+        // Activated or dismissed: focus goes back where the menu came from.
+        if let Some(nav) = ui.data_mut(|d| {
+            let nav = d.get_temp::<MenuNav>(nav_id);
+            d.remove::<MenuNav>(nav_id);
+            nav
+        }) {
+            ui.memory_mut(|m| m.request_focus(nav.return_to));
+        }
+    }
     chosen
 }
 
 /// The middle text column's width (contract L1, FR-001, data-model.md §1):
-/// `available` minus the trailing region — the "…" menu's reserved width
-/// and the duration column's own measure — never negative. Takes no
-/// `RowEntity`/row-height parameter at all, so it is, by construction, the
-/// same subtraction for every row kind and both row heights (contract L2).
-fn content_column_width(available_width: f32, ctx: &egui::Context) -> f32 {
-    (available_width - ACTIONS_RESERVED_WIDTH - theme::duration_measure(ctx)).max(0.0)
+/// `available` minus the trailing region — the "…" opener's reserved width
+/// (`actions_reserved`, measured, contract RM3) and the duration column's
+/// own measure — never negative. Takes no `RowEntity`/row-height parameter
+/// at all, so it is, by construction, the same subtraction for every row
+/// kind and both row heights (contract L2).
+fn content_column_width(available_width: f32, actions_reserved: f32, ctx: &egui::Context) -> f32 {
+    (available_width - actions_reserved - theme::duration_measure(ctx)).max(0.0)
 }
 
 /// The one row widget every catalog list renders through (contracts/ui-
@@ -786,14 +932,17 @@ pub fn list_row(
         // Reserve the trailing region — the duration column plus the "…"
         // button's width — so the text column truncates before either
         // (contract L1/L2, FR-001/FR-003).
-        let text_width = content_column_width(content_ui.available_width(), content_ui.ctx());
+        let reserved = actions_reserved_width(&content_ui);
+        let text_width =
+            content_column_width(content_ui.available_width(), reserved, content_ui.ctx());
         content_ui.vertical(|ui| {
             ui.set_max_width(text_width);
             ui.set_min_width(text_width);
             draw_content(ui, entity, selected);
         });
         content_ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            action = actions_menu(ui, &name, open_via_row);
+            action =
+                actions_menu_returning(ui, &name, open_via_row, Some(row_response.id), selected);
             // The trailing duration column (contract L1/L5, FR-001/FR-002):
             // a fixed `duration_measure` width ahead of the "…" menu, right-
             // aligned. Only a Track row draws a figure into it; Album/
@@ -1066,7 +1215,13 @@ pub fn queue_row(
             Vec2::new(available, ROW_HEIGHT),
             Layout::left_to_right(Align::Center),
             |ui| {
-                draw_artwork_url(ui, artwork, row.artwork_url.as_deref(), &row.artwork_name);
+                draw_artwork_url(
+                    ui,
+                    artwork,
+                    row.artwork_url.as_deref(),
+                    &row.artwork_name,
+                    ARTWORK_SIZE,
+                );
 
                 ui.scope(|ui| {
                     ui.set_max_width(text_width);
@@ -1559,15 +1714,39 @@ mod tests {
         );
     }
 
+    // -- Row actions menu keyboard maths (025, contract RM3/RM6) --------------
+
+    #[test]
+    fn step_wraps_at_both_ends_and_jumps_on_home_end() {
+        assert_eq!(step(5, NavKey::Down, 6), 0);
+        assert_eq!(step(0, NavKey::Up, 6), 5);
+        assert_eq!(step(2, NavKey::Down, 6), 3);
+        assert_eq!(step(2, NavKey::Up, 6), 1);
+        assert_eq!(step(3, NavKey::Home, 6), 0);
+        assert_eq!(step(3, NavKey::End, 6), 5);
+        assert_eq!(step(0, NavKey::Down, 0), 0);
+    }
+
+    #[test]
+    fn actions_reserved_width_is_the_measured_opener_plus_two_spacings() {
+        let ctx = egui::Context::default();
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            let expected = button_width(ui, OPENER_GLYPH).max(ui.spacing().interact_size.x)
+                + 2.0 * ui.spacing().item_spacing.x;
+            assert_eq!(actions_reserved_width(ui), expected);
+            assert!(actions_reserved_width(ui) > button_width(ui, OPENER_GLYPH));
+        })
+        .drop_without_applying_deltas();
+    }
+
     // -- Three-column grid (contract L1/L2/L5, FR-001-003) ------------------
 
     #[test]
     fn content_column_width_follows_the_l1_formula() {
         egui::__run_test_ctx(|ctx| {
             for available in [1000.0_f32, 300.0, 50.0, 0.0] {
-                let expected =
-                    (available - ACTIONS_RESERVED_WIDTH - theme::duration_measure(ctx)).max(0.0);
-                assert_eq!(content_column_width(available, ctx), expected);
+                let expected = (available - 30.0 - theme::duration_measure(ctx)).max(0.0);
+                assert_eq!(content_column_width(available, 30.0, ctx), expected);
             }
             // The formula takes no row-height/entity parameter at all, so it
             // holds identically whether the row draws at `ROW_HEIGHT`
@@ -1608,7 +1787,7 @@ mod tests {
             ];
             let widths: Vec<f32> = kinds
                 .iter()
-                .map(|_kind| content_column_width(available, ctx))
+                .map(|_kind| content_column_width(available, 30.0, ctx))
                 .collect();
             for w in &widths {
                 assert!((w - widths[0]).abs() < f32::EPSILON, "{widths:?}");

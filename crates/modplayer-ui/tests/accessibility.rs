@@ -1477,6 +1477,94 @@ fn detail_back_button_exposes_its_accessible_name() {
     }
 }
 
+/// 025 H11: the collection header is a `Group` named by the title; the
+/// facts are exposed as text; Play and "…" carry their names; Play exposes
+/// its disabled state for an empty collection.
+#[test]
+fn collection_header_exposes_group_facts_play_and_menu() {
+    let (mut controller, handle, _dir) = active_controller("header-a11y");
+    let id = ArtistId::new("spotify:artist:h").unwrap();
+    let artist = ArtistRef {
+        id: id.clone(),
+        name: "The Artist".to_string(),
+        artwork_url: None,
+    };
+    handle.script_hydrate(HydratedReply {
+        artists: vec![artist.clone()],
+        ..Default::default()
+    });
+    handle.script_library(
+        LibrarySet::FollowedArtists,
+        vec![Ok(LibraryPage {
+            set: LibrarySet::FollowedArtists,
+            items: vec![LibraryItem::Artist(artist)],
+            next_page: None,
+            sync_token: None,
+        })],
+    );
+    for set in [
+        LibrarySet::SavedTracks,
+        LibrarySet::SavedAlbums,
+        LibrarySet::Playlists,
+    ] {
+        handle.script_library(set, vec![Ok(empty_page(set))]);
+    }
+    controller.library_retry_sync();
+    for _ in 0..12 {
+        controller.tick();
+    }
+    handle.script_track_list(
+        TrackListSource::ArtistTop(id.clone()),
+        Ok(TrackList {
+            source: TrackListSource::ArtistTop(id.clone()),
+            tracks: vec![],
+        }),
+    );
+
+    let mut artwork = ArtworkCache::new();
+    let target = DetailTarget::Artist(id);
+    let mut state = detail_view::DetailViewState::default();
+    let mut draw = |controller: &mut PlaybackController<FakeBackend, ScriptedHost>| {
+        render_nodes(|ui| {
+            let _ = detail_view::show(
+                ui,
+                controller,
+                &mut artwork,
+                &target,
+                &mut state,
+                &mut modplayer_ui::section_memory::SectionMemory::default(),
+            );
+        })
+    };
+    draw(&mut controller);
+    controller.tick();
+    let nodes = draw(&mut controller);
+
+    find_one(&nodes, Role::Group, "The Artist");
+    let play = find_one(
+        &nodes,
+        Role::Button,
+        &tr_args("detail-play-name", &[("name", "The Artist".to_string())]),
+    );
+    assert!(play.disabled, "empty collection: Play disabled: {play:?}");
+    let more = find_one(
+        &nodes,
+        Role::Button,
+        &tr_args("row-actions", &[("name", "The Artist".to_string())]),
+    );
+    assert!(!more.disabled, "{more:?}");
+    let facts = format!("{} · ", tr("detail-kind-artist"));
+    assert!(
+        nodes.iter().any(|n| {
+            n.label
+                .as_deref()
+                .or(n.value.as_deref())
+                .is_some_and(|t| t.starts_with(&facts))
+        }),
+        "facts text node missing: {nodes:?}"
+    );
+}
+
 // 005-now-playing-waveform (T037, contracts/ui-waveform.md §1/§7): the
 // waveform overview is a real `Role::Slider` named `transport-seek` with
 // value text `m:ss / m:ss`; the empty state exposes `now-playing-pick-a-
@@ -2910,4 +2998,95 @@ fn getting_started_controls_accessible() {
     // X1: Dismiss is an ordinary named, enabled button.
     let dismiss = find_one(&nodes, Role::Button, &tr("getting-started-dismiss"));
     assert!(!dismiss.disabled, "{dismiss:?}");
+}
+
+/// 025 US3 (RM9, FR-012): a row's "…" opener is a Button named
+/// `row-actions{name}` and its six menu items are `MenuItem`s named by
+/// their action labels.
+#[test]
+fn row_actions_opener_and_menu_items_expose_names_and_roles() {
+    use modplayer_audio_source::{Availability, TrackId};
+    use modplayer_ui::rows::{RowEntity, list_row};
+
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut cache = ArtworkCache::new();
+    let track = TrackRef::new(
+        TrackId::new("spotify:track:a11y").unwrap(),
+        "Title".to_string(),
+        vec!["Artist".to_string()],
+        None,
+        None,
+        1000,
+        Availability::Available,
+    );
+    let entity = RowEntity::Track(track);
+    let name = modplayer_ui::rows::accessible_name(&entity);
+    let opener = tr_args("row-actions", &[("name", name)]);
+    let input = |events: Vec<Event>| RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0))),
+        events,
+        ..Default::default()
+    };
+    let nodes_of = |mut out: egui::FullOutput| {
+        let update = out.platform_output.accesskit_update.take().unwrap();
+        out.drop_without_applying_deltas();
+        update
+            .nodes
+            .into_iter()
+            .map(|(_, n)| {
+                (
+                    n.role(),
+                    n.label().unwrap_or_default().to_string(),
+                    n.bounds(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let nodes = nodes_of(ctx.run_ui(input(vec![]), |ui| {
+        let _ = list_row(ui, &mut cache, &entity, false);
+    }));
+    let b = nodes
+        .iter()
+        .find(|(r, l, _)| *r == Role::Button && *l == opener)
+        .and_then(|(_, _, b)| *b)
+        .expect("opener is a Button named row-actions{name}");
+    let centre = Pos2::new(((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32);
+    for pressed in [true, false] {
+        ctx.run_ui(
+            input(vec![Event::PointerButton {
+                pos: centre,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            }]),
+            |ui| {
+                let _ = list_row(ui, &mut cache, &entity, false);
+            },
+        )
+        .drop_without_applying_deltas();
+    }
+    let nodes = nodes_of(ctx.run_ui(input(vec![]), |ui| {
+        let _ = list_row(ui, &mut cache, &entity, false);
+    }));
+    let mut items: Vec<String> = nodes
+        .iter()
+        .filter(|(r, _, _)| *r == Role::MenuItem)
+        .map(|(_, l, _)| l.clone())
+        .collect();
+    items.sort();
+    let mut expected: Vec<String> = [
+        "action-play-now",
+        "action-play-next",
+        "action-add-to-queue",
+        "action-add-to-playlist",
+        "action-save-to-library",
+        "action-pin-offline",
+    ]
+    .iter()
+    .map(|k| tr(k))
+    .collect();
+    expected.sort();
+    assert_eq!(items, expected, "six MenuItems named by their labels");
 }

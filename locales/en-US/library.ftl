@@ -29,7 +29,18 @@ action-save-to-library = Save to library
 action-pin-offline = Pin for offline
 coming-soon = Coming soon
 loading = Loading
-detail-back = Back
+detail-back = ‹ Library
+detail-play = Play
+detail-play-name = Play { $name }
+detail-no-tracks-hint = This collection has no tracks
+detail-owner = by { $name }
+detail-kind-artist = Artist
+detail-top-track-count = { $count ->
+    [one] 1 top track
+   *[other] { $count } top tracks
+}
+detail-runtime-minutes = { $minutes } min
+detail-runtime-hours = { $hours } hr { $minutes } min
 
 # Library view (US2 T066, contracts/ui-surface.md §3/§9).
 library-tab-saved-tracks = Saved Tracks
