@@ -85,6 +85,10 @@ pub struct Shell {
     /// clears it to request keyboard focus on the search box the same
     /// frame.
     pub focus_search_requested: bool,
+    /// Set by the nav rail's "Keyboard shortcuts" item (029, contracts
+    /// S1/S2); `App` consumes and clears it the same frame to open the
+    /// shortcut sheet. `section` is never changed by it.
+    pub shortcut_sheet_requested: bool,
 }
 
 impl Default for Shell {
@@ -92,6 +96,7 @@ impl Default for Shell {
         Self {
             section: Section::Library,
             focus_search_requested: false,
+            shortcut_sheet_requested: false,
         }
     }
 }
@@ -126,6 +131,12 @@ impl Shell {
             if response.clicked() {
                 self.section = section;
             }
+        }
+        // 029 (S1-S3): an action item, not a section — never selected.
+        theme::divider(ui);
+        let response = crate::widgets::controls::nav_item(ui, false, &tr("nav-keyboard-shortcuts"));
+        if response.clicked() {
+            self.shortcut_sheet_requested = true;
         }
     }
 }
@@ -519,8 +530,9 @@ mod tests {
                 );
             }
         }
-        // 5 nav buttons + 3 Dismiss buttons (one per notification raised above).
-        assert_eq!(buttons_checked, 8);
+        // 5 section buttons + the 029 "Keyboard shortcuts" item + 3 Dismiss
+        // buttons (one per notification raised above).
+        assert_eq!(buttons_checked, 9);
     }
 
     /// Run `render` in a fresh headless context with AccessKit enabled,

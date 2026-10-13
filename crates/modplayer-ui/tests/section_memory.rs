@@ -276,6 +276,7 @@ fn m4_reset_session_ui_clears_memory_and_every_listed_sub_view() {
     let mut shell = Shell {
         section: modplayer_ui::shell::Section::Settings,
         focus_search_requested: true,
+        shortcut_sheet_requested: false,
     };
     let mut library_view = LibraryViewState {
         tab: LibraryTab::RecentlyPlayed,

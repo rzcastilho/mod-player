@@ -2324,6 +2324,71 @@ fn getting_started_tutorial_opens_url() {
     );
 }
 
+/// 029 S4: the card's "Keyboard shortcuts" control is a `Role::Link`;
+/// clicking it reports `OpenShortcuts` (and not `OpenTutorial`). Tutorial
+/// and Dismiss keep their own outcomes.
+#[test]
+fn getting_started_shortcuts_link_reports_open_shortcuts() {
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+
+    let mut discover = ctx.run_ui(default_input(), |ui| {
+        let _ = getting_started::show(ui);
+    });
+    let update = discover
+        .platform_output
+        .accesskit_update
+        .take()
+        .expect("accesskit_update should be populated once enabled");
+    discover.drop_without_applying_deltas();
+    let label = tr("getting-started-shortcuts");
+    let bounds = update
+        .nodes
+        .iter()
+        .find(|(_, n)| n.role() == Role::Link && n.label() == Some(label.as_str()))
+        .and_then(|(_, n)| n.bounds())
+        .expect("the shortcuts control must have a Link role and bounds");
+    let center = Pos2::new(
+        ((bounds.x0 + bounds.x1) / 2.0) as f32,
+        ((bounds.y0 + bounds.y1) / 2.0) as f32,
+    );
+
+    for pressed in [true, false] {
+        let mut input = default_input();
+        input.events.push(Event::PointerButton {
+            pos: center,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        });
+        let mut outcome = GettingStartedOutcome::None;
+        ctx.run_ui(input, |ui| {
+            outcome = getting_started::show(ui);
+        })
+        .drop_without_applying_deltas();
+        if !pressed {
+            assert_eq!(outcome, GettingStartedOutcome::OpenShortcuts);
+        }
+    }
+}
+
+/// 029 SC-006: the rendered card carries no shortcut prose.
+#[test]
+fn getting_started_card_has_no_shortcut_prose() {
+    let (mut controller, _handle, _dir) = active_controller("getting-started-no-prose");
+    let mut artwork = ArtworkCache::new();
+    let mut state = LibraryViewState::default();
+    let (nodes, _) = render_library_with_card(&mut controller, &mut artwork, &mut state, false);
+    for text in [
+        tr("getting-started-section-loop"),
+        tr("getting-started-key-tempo"),
+    ] {
+        assert!(!text.contains("Shortcuts:"), "{text}");
+        assert!(!text.contains("Atalhos:"), "{text}");
+    }
+    assert!(has(&nodes, Role::Link, &tr("getting-started-shortcuts")));
+}
+
 // -- Back control (025 US2, H10) -------------------------------------------
 
 fn key_event(key: egui::Key, modifiers: egui::Modifiers) -> Event {

@@ -40,6 +40,7 @@ use crate::library_view::{self, LibraryOutcome};
 use crate::section_memory;
 use crate::settings::SettingsScreen;
 use crate::shell::{self, Section, Shell};
+use crate::shortcut_sheet::{self, SheetOutcome, ShortcutSheetState};
 use crate::sign_in::{self, SignInScreen, TierResult};
 use crate::ticker::Ticker;
 use crate::waveform::WaveformState;
@@ -128,6 +129,9 @@ pub struct App<B: OutputBackend, H: SourceHost> {
     /// — constructed once and reused like `shell`/`settings`; reset on
     /// sign-out/revocation via `reset_session_ui` (never persisted, M6).
     section_memory: section_memory::SectionMemory,
+    /// 029: the keyboard shortcut sheet's open/closed state; never
+    /// persisted (S12).
+    shortcut_sheet: ShortcutSheetState,
 }
 
 impl<B: OutputBackend, H: SourceHost> App<B, H> {
@@ -210,6 +214,7 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
             window_size: WindowSizeTracker::new(restored_size),
             notification_stack: notifications::StackState::default(),
             section_memory: section_memory::SectionMemory::default(),
+            shortcut_sheet: ShortcutSheetState::default(),
         }
     }
 
@@ -306,6 +311,9 @@ impl<B: OutputBackend, H: SourceHost> eframe::App for App<B, H> {
         // step (research R1: dispatch consumes *this* frame's input before
         // `account.tick()` runs).
         let pre = shell::Chrome::for_frame(self.launch_step(), self.device_check.is_some());
+        // 029 (S11): Esc with focus inside the sheet closes it and is
+        // consumed before the dispatcher can act on it.
+        shortcut_sheet::consume_escape(&ctx, &mut self.shortcut_sheet);
         if pre.navigation_enabled() {
             let scope = self.scope_state();
             let invocations = actions::dispatch(&ctx, &claims, self.controller.actions(), &scope);
@@ -341,6 +349,11 @@ impl<B: OutputBackend, H: SourceHost> eframe::App for App<B, H> {
         let step = self.launch_step();
         let chrome = shell::Chrome::for_frame(step, self.device_check.is_some());
         shell::show_chrome(ui, chrome, &mut self.shell);
+        // 029 (S2): the nav item opens the sheet this frame; the section
+        // is untouched.
+        if std::mem::take(&mut self.shell.shortcut_sheet_requested) {
+            self.shortcut_sheet.open();
+        }
 
         // Bottom-right, newest-first, non-modal — never blocks navigation
         // or playback, and never covers the header/tab strip/category
@@ -436,6 +449,16 @@ impl<B: OutputBackend, H: SourceHost> eframe::App for App<B, H> {
         // The app-wide focus ring (015-control-variants, research R3,
         // contract F4): one pass, after every panel, so no view file
         // paints a ring. Last statement of `App::ui`.
+        // 029 (S6-S14): drawn each frame while open; `open_url` for its
+        // printable export happens only here.
+        if let SheetOutcome::OpenPrintable(url) = shortcut_sheet::show(
+            ui.ctx(),
+            &mut self.shortcut_sheet,
+            self.controller.actions(),
+        ) {
+            ui.ctx().open_url(OpenUrl::new_tab(url));
+        }
+
         widgets::controls::paint_focus_ring(ui.ctx());
     }
 
@@ -783,6 +806,7 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
                     ui.ctx()
                         .open_url(OpenUrl::new_tab(GETTING_STARTED_TUTORIAL_URL));
                 }
+                GettingStartedOutcome::OpenShortcuts => self.shortcut_sheet.open(),
                 GettingStartedOutcome::Dismiss => {
                     self.controller.dismiss_getting_started();
                 }

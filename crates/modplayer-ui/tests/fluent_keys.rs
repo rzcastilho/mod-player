@@ -1985,3 +1985,254 @@ fn settings_028_keys_have_en_us_and_pt_br_parity() {
         }
     }
 }
+
+// ---------------------------------------------------------------------
+// 029-keyboard-shortcut-reference (F1-F5)
+// ---------------------------------------------------------------------
+
+const SHORTCUTS_029_KEYS: &[&str] = &[
+    "nav-keyboard-shortcuts",
+    "shortcuts-sheet-title",
+    "shortcuts-not-bound",
+    "shortcuts-open-printable",
+    "shortcuts-printable-error",
+    "shortcuts-printable-generated",
+    "shortcuts-printable-col-action",
+    "shortcuts-printable-col-shortcut",
+    "shortcuts-conflict-marker",
+    "controls-row",
+    "key-word-space",
+    "key-word-return",
+    "key-word-enter",
+    "key-word-esc",
+    "key-word-tab",
+    "key-word-backspace",
+    "key-word-delete",
+    "key-word-insert",
+    "key-word-home",
+    "key-word-end",
+    "key-word-page-up",
+    "key-word-page-down",
+    "key-word-copy",
+    "key-word-cut",
+    "key-word-paste",
+    "key-word-left",
+    "key-word-right",
+    "key-word-up",
+    "key-word-down",
+    "key-word-ctrl",
+    "key-word-shift",
+    "key-word-alt",
+    "key-word-browser-back",
+    "key-word-shift-left",
+    "key-word-shift-right",
+    "key-word-control-left",
+    "key-word-control-right",
+    "key-word-alt-left",
+    "key-word-alt-right",
+    "key-word-super-left",
+    "key-word-super-right",
+    "key-word-intl-backslash",
+    "key-spoken-command",
+    "key-spoken-option",
+    "key-spoken-arrow-left",
+    "key-spoken-arrow-right",
+    "key-spoken-arrow-up",
+    "key-spoken-arrow-down",
+    "key-spoken-colon",
+    "key-spoken-comma",
+    "key-spoken-minus",
+    "key-spoken-period",
+    "key-spoken-plus",
+    "key-spoken-equals",
+    "key-spoken-semicolon",
+    "key-spoken-backslash",
+    "key-spoken-slash",
+    "key-spoken-pipe",
+    "key-spoken-questionmark",
+    "key-spoken-exclamationmark",
+    "key-spoken-open-bracket",
+    "key-spoken-close-bracket",
+    "key-spoken-open-curly",
+    "key-spoken-close-curly",
+    "key-spoken-backtick",
+    "key-spoken-quote",
+];
+
+/// 029 (F1): every new key resolves under en-US to a real string.
+#[test]
+fn shortcuts_029_keys_resolve() {
+    for key in SHORTCUTS_029_KEYS
+        .iter()
+        .chain(["getting-started-shortcuts"].iter())
+    {
+        let args: Vec<(&'static str, String)> = match *key {
+            "shortcuts-printable-generated" => vec![("date", "2026-10-09".to_string())],
+            "controls-row" => vec![
+                ("action", "Play".to_string()),
+                ("bindings", "Space".to_string()),
+            ],
+            _ => Vec::new(),
+        };
+        let resolved = if args.is_empty() {
+            tr(key)
+        } else {
+            tr_args(key, &args)
+        };
+        assert_ne!(&resolved, key, "`{key}` does not resolve under en-US");
+        assert!(!resolved.trim().is_empty(), "`{key}` resolves to empty");
+    }
+}
+
+/// 029 (F2): parity between en-US and pt-BR, same placeholders.
+#[test]
+fn shortcuts_029_keys_have_en_us_and_pt_br_parity() {
+    let pairs = [
+        (
+            include_str!("../../../locales/en-US/shortcuts.ftl"),
+            include_str!("../../../locales/pt-BR/shortcuts.ftl"),
+            SHORTCUTS_029_KEYS,
+        ),
+        (
+            include_str!("../../../locales/en-US/app.ftl"),
+            include_str!("../../../locales/pt-BR/app.ftl"),
+            &[
+                "getting-started-title",
+                "getting-started-section-loop",
+                "getting-started-key-tempo",
+                "getting-started-tutorial",
+                "getting-started-dismiss",
+                "getting-started-shortcuts",
+            ][..],
+        ),
+    ];
+    for (en_ftl, pt_ftl, keys) in pairs {
+        let en_defined = defined_keys(en_ftl);
+        let pt_defined = defined_keys(pt_ftl);
+        for key in keys {
+            assert!(en_defined.contains(key), "`{key}` missing from en-US");
+            assert!(pt_defined.contains(key), "`{key}` missing from pt-BR");
+            assert_eq!(
+                placeholders_of(en_ftl, key),
+                placeholders_of(pt_ftl, key),
+                "`{key}` placeholders differ between en-US and pt-BR"
+            );
+        }
+    }
+}
+
+/// 029 (F3): no orphan `KeyWord` variant: both Fluent keys are defined.
+#[test]
+fn every_key_word_has_a_string() {
+    for word in modplayer_core::actions::KeyWord::ALL {
+        for key in [word.fluent_key(), word.spoken_key()] {
+            assert!(
+                SHORTCUTS_029_KEYS.contains(&key),
+                "{word:?}: `{key}` is not in the contract key table"
+            );
+            assert_ne!(tr(key), key, "{word:?}: `{key}` does not resolve");
+        }
+    }
+}
+
+/// 029 (F4): the Getting Started card no longer carries shortcut prose.
+#[test]
+fn getting_started_has_no_shortcut_prose() {
+    let en = include_str!("../../../locales/en-US/app.ftl");
+    let pt = include_str!("../../../locales/pt-BR/app.ftl");
+    for (ftl, banned) in [(en, "Shortcuts:"), (pt, "Atalhos:")] {
+        for line in ftl.lines().filter(|l| l.starts_with("getting-started-")) {
+            assert!(!line.contains(banned), "shortcut prose in: {line}");
+        }
+    }
+}
+
+/// Whether `literal` (the text between the quotes) is allowed in the
+/// 029 UI modules: a Fluent key / identifier / file name (lowercase, digits,
+/// `-`, `_`, `.`), a canonical `KEY_NAMES` entry (identifier, not display
+/// text), a BCP 47 locale tag, markup or CSS (contains `<` or `{`, or is an
+/// HTML entity), or has no run of two letters (typographic constants: `+`,
+/// modifier symbols, punctuation).
+fn literal_is_allowed(literal: &str) -> bool {
+    if modplayer_core::KEY_NAMES.contains(&literal) {
+        return true;
+    }
+    if literal.contains('<') || literal.contains('{') || literal.contains("%s") {
+        return true;
+    }
+    if literal.starts_with('&') && literal.ends_with(';') {
+        return true;
+    }
+    // A BCP 47 locale tag such as `en-US` (an identifier, not display text).
+    if let Some((lang, region)) = literal.split_once('-')
+        && (2..=3).contains(&lang.len())
+        && lang.chars().all(|c| c.is_ascii_lowercase())
+        && region.len() == 2
+        && region.chars().all(|c| c.is_ascii_uppercase())
+    {
+        return true;
+    }
+    if !literal.is_empty()
+        && literal
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.'))
+    {
+        return true;
+    }
+    let mut run = 0;
+    for c in literal.chars() {
+        if c.is_alphabetic() {
+            run += 1;
+            if run >= 2 {
+                return false;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    true
+}
+
+/// 029 (F5): the new UI modules hold no literal user-facing strings.
+#[test]
+fn shortcut_modules_contain_no_user_facing_literals() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for name in ["key_label.rs", "shortcut_groups.rs", "shortcut_sheet.rs"] {
+        let text =
+            std::fs::read_to_string(root.join(name)).unwrap_or_else(|e| panic!("read {name}: {e}"));
+        // Everything after the unit-test module is test code.
+        let code = text.split("#[cfg(test)]").next().unwrap_or("");
+        for (n, line) in code.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            // A `'"'` char literal is not the start of a string.
+            let unquoted = trimmed.replace("'\"'", "' '");
+            let mut rest = unquoted.as_str();
+            while let Some(start) = rest.find('"') {
+                let after = &rest[start + 1..];
+                let mut end = None;
+                let mut escaped = false;
+                for (i, c) in after.char_indices() {
+                    if escaped {
+                        escaped = false;
+                    } else if c == '\\' {
+                        escaped = true;
+                    } else if c == '"' {
+                        end = Some(i);
+                        break;
+                    }
+                }
+                let Some(end) = end else { break };
+                let literal = &after[..end];
+                assert!(
+                    literal_is_allowed(literal),
+                    "{name}:{}: user-facing literal {literal:?} (use Fluent)",
+                    n + 1
+                );
+                rest = &after[end + 1..];
+            }
+        }
+    }
+}

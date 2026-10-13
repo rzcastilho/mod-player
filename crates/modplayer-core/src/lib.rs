@@ -26,8 +26,8 @@ pub mod transport;
 
 pub use actions::{
     ActionCategory, ActionDef, ActionKind, ActionOwner, ActionRegistry, ActionRow, BindingError,
-    CATALOG, Chord, ChordParseError, HostAction, KEY_NAMES, KeyName, KeymapOverrides, Mods,
-    Platform, Scope, ScopeState, def,
+    CATALOG, Chord, ChordParseError, DisplayParts, HostAction, KEY_NAMES, KeyName, KeyToken,
+    KeyWord, KeymapOverrides, Mods, Platform, Scope, ScopeState, def,
 };
 pub use analysis::{
     ANALYZER_VERSION, AnalysisPaths, AnalysisService, AnalysisSnapshot, AnalysisStatus, PeakLevel,

@@ -263,6 +263,67 @@ fn press_key<B: OutputBackend, H: SourceHost>(
     output.drop_without_applying_deltas();
 }
 
+/// Spoken bindings of `action`, as its row element's accessible name
+/// lists them (`controls-row`).
+fn spoken_bindings<B: OutputBackend, H: SourceHost>(
+    controller: &PlaybackController<B, H>,
+    action: HostAction,
+) -> String {
+    let chords = controller.actions().bindings(action);
+    if chords.is_empty() {
+        return tr("shortcuts-not-bound");
+    }
+    chords
+        .iter()
+        .map(|&chord| modplayer_ui::key_label::KeyLabel::new(chord, platform_now()).spoken)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The bounds of `action`'s row element (its focusable name label).
+fn row_bounds<B: OutputBackend, H: SourceHost>(
+    ctx: &Context,
+    controller: &mut PlaybackController<B, H>,
+    screen: &mut ControlsScreen,
+    action: HostAction,
+) -> Rect {
+    let name = tr_args(
+        "controls-row",
+        &[
+            ("action", tr(action.label_key())),
+            ("bindings", spoken_bindings(controller, action)),
+        ],
+    );
+    let update = render_update(ctx, controller, screen);
+    let bounds = update
+        .nodes
+        .iter()
+        .find(|(_, node)| node.label() == Some(name.as_str()))
+        .and_then(|(_, node)| node.bounds())
+        .unwrap_or_else(|| panic!("no row element named `{name}`"));
+    Rect::from_min_max(
+        Pos2::new(bounds.x0 as f32, bounds.y0 as f32),
+        Pos2::new(bounds.x1 as f32, bounds.y1 as f32),
+    )
+}
+
+/// Move the pointer onto `action`'s row and render until its controls are
+/// revealed (the pointer stays there for later frames).
+fn hover_row<B: OutputBackend, H: SourceHost>(
+    ctx: &Context,
+    controller: &mut PlaybackController<B, H>,
+    screen: &mut ControlsScreen,
+    action: HostAction,
+) {
+    let pos = row_bounds(ctx, controller, screen, action).center();
+    for _ in 0..2 {
+        let mut input = default_input();
+        input.events.push(Event::PointerMoved(pos));
+        let output = ctx.run_ui(input, |ui| controls::show(ui, controller, screen, None));
+        output.drop_without_applying_deltas();
+    }
+}
+
 // -- T062: filter and full-catalog listing ---------------------------------
 
 #[test]
@@ -368,17 +429,14 @@ fn capture_accepts_chord_and_adds_chip() {
     let mut screen = ControlsScreen::default();
 
     let action = HostAction::NavPlugins;
-    let index = HostAction::ALL
-        .iter()
-        .position(|&a| a == action)
-        .unwrap_or_else(|| unreachable!());
 
+    hover_row(&ctx, &mut controller, &mut screen, action);
     let bounds = nth_button_bounds(
         &ctx,
         &mut controller,
         &mut screen,
         &tr("controls-add-binding"),
-        index,
+        0,
     );
     click_at(&ctx, &mut controller, &mut screen, bounds.center());
     assert_eq!(
@@ -490,18 +548,15 @@ fn capture_esc_and_focus_loss_cancel() {
     let mut screen = ControlsScreen::default();
 
     let action = HostAction::NavPlugins;
-    let index = HostAction::ALL
-        .iter()
-        .position(|&a| a == action)
-        .unwrap_or_else(|| unreachable!());
 
     // Esc cancels with no change.
+    hover_row(&ctx, &mut controller, &mut screen, action);
     let bounds = nth_button_bounds(
         &ctx,
         &mut controller,
         &mut screen,
         &tr("controls-add-binding"),
-        index,
+        0,
     );
     click_at(&ctx, &mut controller, &mut screen, bounds.center());
     assert_eq!(screen.capture, Some(ActionId::Host(action)));
@@ -526,12 +581,13 @@ fn capture_esc_and_focus_loss_cancel() {
     ctx2.enable_accesskit();
     let mut screen2 = ControlsScreen::default();
 
+    hover_row(&ctx2, &mut controller2, &mut screen2, action);
     let bounds2 = nth_button_bounds(
         &ctx2,
         &mut controller2,
         &mut screen2,
         &tr("controls-add-binding"),
-        index,
+        0,
     );
     click_at(&ctx2, &mut controller2, &mut screen2, bounds2.center());
     assert_eq!(screen2.capture, Some(ActionId::Host(action)));
@@ -578,6 +634,7 @@ fn remove_chip_immediately_allows_zero_bindings() {
         &[("binding", chord.display(platform_now()))],
     );
 
+    hover_row(&ctx, &mut controller, &mut screen, action);
     let bounds = nth_button_bounds(&ctx, &mut controller, &mut screen, &remove_label, 0);
     click_at(&ctx, &mut controller, &mut screen, bounds.center());
 
@@ -609,6 +666,7 @@ fn reset_action_restores_default_without_confirm() {
         "controls-reset-action",
         &[("action", tr(action.label_key()))],
     );
+    hover_row(&ctx, &mut controller, &mut screen, action);
     let bounds = nth_button_bounds(&ctx, &mut controller, &mut screen, &reset_label, 0);
     click_at(&ctx, &mut controller, &mut screen, bounds.center());
 
@@ -769,11 +827,14 @@ fn chips_display_platform_glyphs() {
     let chord = Chord::parse("Primary+1").unwrap_or_else(|_| unreachable!());
     let expected = tr_args(
         "controls-binding-chip",
-        &[("binding", chord.display(platform_now()))],
+        &[(
+            "binding",
+            modplayer_ui::key_label::KeyLabel::new(chord, platform_now()).spoken,
+        )],
     );
     assert!(
         texts.iter().any(|t| t == &expected),
-        "a binding chip must render via `Chord::display` for the detected platform"
+        "a binding chip's accessible name must use `KeyLabel::spoken` for the detected platform (C8)"
     );
 }
 
@@ -839,17 +900,14 @@ fn capture_of_conflicting_chord_flags_both_and_names_partner() {
     let mut screen = ControlsScreen::default();
 
     let action = HostAction::ToggleLoop;
-    let index = HostAction::ALL
-        .iter()
-        .position(|&a| a == action)
-        .unwrap_or_else(|| unreachable!());
 
+    hover_row(&ctx, &mut controller, &mut screen, action);
     let bounds = nth_button_bounds(
         &ctx,
         &mut controller,
         &mut screen,
         &tr("controls-add-binding"),
-        index,
+        0,
     );
     click_at(&ctx, &mut controller, &mut screen, bounds.center());
     assert_eq!(screen.capture, Some(ActionId::Host(action)));
@@ -1160,5 +1218,870 @@ fn greyed_when_suspended() {
     assert!(
         texts.iter().any(|t| t == &expected),
         "a suspended plugin's own action row must render the `(inactive)` suffix, got: {texts:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// 029-keyboard-shortcut-reference (SC-005 baseline, research R12)
+// ---------------------------------------------------------------------
+
+/// Controls-page content height (px) at 1280×800, full host catalog,
+/// default bindings, empty filter, measured on the PRE-029 layout.
+/// US1's `controls_height_at_most_60_percent_of_baseline` (C17) asserts
+/// against this; do not re-measure after the layout changes.
+// Measured on commit 72b0019 (pre-029 layout): 1474.125.
+const PRE_029_CONTROLS_HEIGHT: f32 = 1474.125;
+
+/// Draw `controls::show` inside a `ScrollArea` at 1280×800 and return the
+/// scroll content height (`content_size.y`).
+fn measure_controls_content_height() -> f32 {
+    let ctx = fresh_ctx();
+    let (mut controller, _dir) = fresh_controller("height-baseline");
+    let mut screen = ControlsScreen::default();
+    let input = RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1280.0, 800.0))),
+        ..Default::default()
+    };
+    let mut height = 0.0_f32;
+    // Two frames so layout settles.
+    for _ in 0..2 {
+        let output = ctx.run_ui(input.clone(), |ui| {
+            let out = egui::ScrollArea::vertical().show(ui, |ui| {
+                controls::show(ui, &mut controller, &mut screen, None);
+            });
+            height = out.content_size.y;
+        });
+        output.drop_without_applying_deltas();
+    }
+    height
+}
+
+#[test]
+fn baseline_controls_height_measurement() {
+    let height = measure_controls_content_height();
+    assert!(height > 0.0, "controls page must have content");
+}
+
+// ---------------------------------------------------------------------
+// 029-keyboard-shortcut-reference, US1 (contracts C1-C13, C17)
+// ---------------------------------------------------------------------
+
+fn sized_input(width: f32) -> RawInput {
+    RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(width, 4000.0))),
+        ..Default::default()
+    }
+}
+
+/// One frame at `width`, returning the AccessKit update.
+fn render_at<B: OutputBackend, H: SourceHost>(
+    ctx: &Context,
+    controller: &mut PlaybackController<B, H>,
+    screen: &mut ControlsScreen,
+    width: f32,
+) -> TreeUpdate {
+    let mut output = ctx.run_ui(sized_input(width), |ui| {
+        controls::show(ui, controller, screen, None);
+    });
+    let update = output
+        .platform_output
+        .accesskit_update
+        .take()
+        .expect("accesskit_update should be populated once enabled");
+    output.drop_without_applying_deltas();
+    update
+}
+
+fn rect_of(bounds: egui::accesskit::Rect) -> Rect {
+    Rect::from_min_max(
+        Pos2::new(bounds.x0 as f32, bounds.y0 as f32),
+        Pos2::new(bounds.x1 as f32, bounds.y1 as f32),
+    )
+}
+
+/// Bounds of every node (any role) whose accessible name equals `label`.
+fn bounds_labelled(update: &TreeUpdate, label: &str) -> Vec<Rect> {
+    update
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.label() == Some(label))
+        .filter_map(|(_, node)| node.bounds())
+        .map(rect_of)
+        .collect()
+}
+
+fn host_headings() -> Vec<String> {
+    ActionCategory::ALL
+        .iter()
+        .map(|c| tr(c.label_key()))
+        .collect()
+}
+
+/// Distinct left edges (rounded) of the host group headings.
+fn heading_columns(update: &TreeUpdate) -> Vec<i32> {
+    let mut xs: Vec<i32> = host_headings()
+        .iter()
+        .flat_map(|h| bounds_labelled(update, h))
+        .map(|r| r.min.x.round() as i32)
+        .collect();
+    xs.sort_unstable();
+    xs.dedup();
+    xs
+}
+
+fn pointer_to<B: OutputBackend, H: SourceHost>(
+    ctx: &Context,
+    controller: &mut PlaybackController<B, H>,
+    screen: &mut ControlsScreen,
+    pos: Pos2,
+) {
+    for _ in 0..2 {
+        let mut input = default_input();
+        input.events.push(Event::PointerMoved(pos));
+        let output = ctx.run_ui(input, |ui| controls::show(ui, controller, screen, None));
+        output.drop_without_applying_deltas();
+    }
+}
+
+fn has_button<B: OutputBackend, H: SourceHost>(
+    ctx: &Context,
+    controller: &mut PlaybackController<B, H>,
+    screen: &mut ControlsScreen,
+    label: &str,
+) -> bool {
+    let update = render_update(ctx, controller, screen);
+    update
+        .nodes
+        .iter()
+        .any(|(_, n)| n.role() == Role::Button && n.label() == Some(label))
+}
+
+// -- C1-C5: layout ----------------------------------------------------------
+
+#[test]
+fn layout_order_filter_and_reset_all_above_columns() {
+    let (mut controller, _dir) = fresh_controller("layout-order");
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut screen = ControlsScreen::default();
+    let _ = render_at(&ctx, &mut controller, &mut screen, 1280.0);
+    let update = render_at(&ctx, &mut controller, &mut screen, 1280.0);
+
+    let filter = update
+        .nodes
+        .iter()
+        .find(|(_, n)| n.role() == Role::TextInput)
+        .and_then(|(_, n)| n.bounds())
+        .map(rect_of)
+        .expect("filter box");
+    let reset_all = bounds_labelled(&update, &tr("controls-reset-all"));
+    let reset_all = reset_all.first().expect("Reset all button");
+    let first_heading_y = host_headings()
+        .iter()
+        .flat_map(|h| bounds_labelled(&update, h))
+        .map(|r| r.min.y)
+        .fold(f32::INFINITY, f32::min);
+    assert!(
+        filter.max.y <= reset_all.min.y + 1.0,
+        "filter above Reset all"
+    );
+    assert!(reset_all.max.y <= first_heading_y, "Reset all above groups");
+    assert!(filter.max.y <= first_heading_y, "filter above groups");
+}
+
+#[test]
+fn groups_follow_catalog_then_plugin_order() {
+    let (mut controller, _dir) = fresh_controller("group-order");
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut screen = ControlsScreen::default();
+    // One column, so top-to-bottom is the group order.
+    let _ = render_at(&ctx, &mut controller, &mut screen, 600.0);
+    let update = render_at(&ctx, &mut controller, &mut screen, 600.0);
+
+    let mut ys: Vec<(f32, String)> = host_headings()
+        .into_iter()
+        .filter_map(|h| {
+            bounds_labelled(&update, &h)
+                .first()
+                .map(|r| (r.min.y, h.clone()))
+        })
+        .collect();
+    ys.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let order: Vec<String> = ys.into_iter().map(|(_, h)| h).collect();
+    assert_eq!(order, host_headings());
+
+    // Plugin groups follow the host groups in the snapshot itself.
+    let groups = modplayer_ui::shortcut_groups::snapshot(controller.actions());
+    let first_plugin = groups
+        .iter()
+        .position(|g| matches!(g.group, modplayer_ui::shortcut_groups::RowGroup::Plugin(_)));
+    if let Some(i) = first_plugin {
+        assert!(
+            groups[i..]
+                .iter()
+                .all(|g| matches!(g.group, modplayer_ui::shortcut_groups::RowGroup::Plugin(_)))
+        );
+    }
+}
+
+#[test]
+fn two_columns_at_or_above_720() {
+    let (mut controller, _dir) = fresh_controller("two-cols");
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut screen = ControlsScreen::default();
+    let _ = render_at(&ctx, &mut controller, &mut screen, 1280.0);
+    let update = render_at(&ctx, &mut controller, &mut screen, 1280.0);
+    assert_eq!(
+        heading_columns(&update).len(),
+        2,
+        "headings must sit in exactly two columns at 1280 px"
+    );
+}
+
+#[test]
+fn one_column_below_720() {
+    let (mut controller, _dir) = fresh_controller("one-col");
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut screen = ControlsScreen::default();
+    let _ = render_at(&ctx, &mut controller, &mut screen, 700.0);
+    let update = render_at(&ctx, &mut controller, &mut screen, 700.0);
+    assert_eq!(
+        heading_columns(&update).len(),
+        1,
+        "headings must share one column at 700 px"
+    );
+}
+
+/// A filter that leaves a single group puts it in the left column, not
+/// alone on the right (found in the T051 manual walk).
+#[test]
+fn lone_filtered_group_sits_in_left_column() {
+    let (mut controller, _dir) = fresh_controller("lone-group-left");
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut screen = ControlsScreen::default();
+    let _ = render_at(&ctx, &mut controller, &mut screen, 1280.0);
+    let unfiltered = heading_columns(&render_at(&ctx, &mut controller, &mut screen, 1280.0));
+    assert_eq!(unfiltered.len(), 2, "sanity: two columns at 1280 px");
+
+    screen.filter = "space".to_owned();
+    let _ = render_at(&ctx, &mut controller, &mut screen, 1280.0);
+    let filtered = heading_columns(&render_at(&ctx, &mut controller, &mut screen, 1280.0));
+    assert_eq!(
+        filtered,
+        vec![unfiltered[0]],
+        "the only matching group must start at the left column's origin"
+    );
+}
+
+/// The groups keep clear of the page's floating scroll bar: nothing is
+/// laid out in the scroll-bar gutter at the right edge (found in the T051
+/// manual walk: right-column conflict notes ran under the bar).
+#[test]
+fn groups_keep_clear_of_scroll_bar_gutter() {
+    let (mut controller, _dir) = fresh_controller("scroll-gutter");
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut screen = ControlsScreen::default();
+    let width = 760.0;
+    let _ = render_at(&ctx, &mut controller, &mut screen, width);
+    let update = render_at(&ctx, &mut controller, &mut screen, width);
+    let scroll = ctx.global_style().spacing.scroll;
+    let limit = width - scroll.bar_width - scroll.bar_outer_margin;
+    let rightmost = update
+        .nodes
+        .iter()
+        .filter_map(|(_, node)| node.bounds())
+        // Skip the root (the whole screen, starting at x = 0).
+        .filter(|b| b.x0 > 0.0)
+        .map(|b| b.x1 as f32)
+        .fold(0.0_f32, f32::max);
+    assert!(
+        rightmost <= limit + 0.5,
+        "content reaches x = {rightmost}, past the scroll-bar gutter at {limit}"
+    );
+}
+
+fn many_bindings_wrap_without_elision_body() {
+    let (mut controller, _dir) = fresh_controller("many-bindings");
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut screen = ControlsScreen::default();
+    let action = HostAction::ToggleLoop;
+    for extra in ["K", "J", "M", "N"] {
+        let chord = Chord::parse(extra).unwrap_or_else(|_| unreachable!());
+        controller
+            .add_binding(action, chord)
+            .unwrap_or_else(|_| unreachable!());
+    }
+    assert_eq!(controller.actions().bindings(action).len(), 5);
+
+    let _ = render_at(&ctx, &mut controller, &mut screen, 700.0);
+    let update = render_at(&ctx, &mut controller, &mut screen, 700.0);
+    let mut rects = Vec::new();
+    for &chord in controller.actions().bindings(action) {
+        let spoken = modplayer_ui::key_label::KeyLabel::new(chord, platform_now()).spoken;
+        let name = tr_args("controls-binding-chip", &[("binding", spoken)]);
+        let found = bounds_labelled(&update, &name);
+        assert!(!found.is_empty(), "chip `{name}` must be rendered");
+        rects.extend(found.into_iter().take(1));
+    }
+    for (i, a) in rects.iter().enumerate() {
+        assert!(
+            a.max.x <= 700.0,
+            "chip {i} must stay inside the page: {a:?}"
+        );
+        assert!(a.width() > 4.0 && a.height() > 4.0, "chip {i} not clipped");
+        for b in &rects[i + 1..] {
+            assert!(!a.intersects(*b), "chips must not overlap: {a:?} {b:?}");
+        }
+    }
+}
+
+#[test]
+fn many_bindings_wrap_without_elision() {
+    many_bindings_wrap_without_elision_body();
+}
+
+// -- C6-C9: row anatomy at rest ------------------------------------------
+
+#[test]
+fn row_at_rest_shows_name_chips_conflict_only() {
+    let (mut controller, _dir) = fresh_controller("row-rest");
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut screen = ControlsScreen::default();
+    let update = render_update(&ctx, &mut controller, &mut screen);
+    let _ = update;
+    let update = render_update(&ctx, &mut controller, &mut screen);
+
+    let action = HostAction::ToggleLoop;
+    let name = tr(action.label_key());
+    assert!(
+        update
+            .nodes
+            .iter()
+            .any(|(_, n)| n.label().is_some_and(|l| l.contains(&name))),
+        "the action name must be rendered"
+    );
+    let chord = Chord::parse("L").unwrap_or_else(|_| unreachable!());
+    let chip = tr_args(
+        "controls-binding-chip",
+        &[(
+            "binding",
+            modplayer_ui::key_label::KeyLabel::new(chord, platform_now()).spoken,
+        )],
+    );
+    assert!(!bounds_labelled(&update, &chip).is_empty(), "chip rendered");
+    assert!(
+        bounds_labelled(&update, &tr("controls-add-binding")).is_empty(),
+        "`Add binding` must be absent at rest"
+    );
+    assert!(
+        update.nodes.iter().all(|(_, n)| n.role() != Role::Button
+            || !n.label().is_some_and(|l| (l.starts_with("Reset ")
+                && l != tr("controls-reset-all"))
+                || l.starts_with("Remove binding"))),
+        "no Remove/Reset buttons at rest"
+    );
+}
+
+#[test]
+fn unbound_row_shows_not_bound() {
+    let (mut controller, _dir) = fresh_controller("unbound");
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut screen = ControlsScreen::default();
+    let action = HostAction::ToggleLoop;
+    let chord = Chord::parse("L").unwrap_or_else(|_| unreachable!());
+    controller.remove_binding(ActionId::Host(action), chord);
+    let texts = rendered_texts(&ctx, &mut controller, &mut screen);
+    assert!(
+        texts.iter().any(|t| t == &tr("shortcuts-not-bound")),
+        "an unbound row must say `Not bound`"
+    );
+}
+
+#[test]
+fn trigger_kind_label_removed() {
+    let (mut controller, _dir) = fresh_controller("kind-label");
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut screen = ControlsScreen::default();
+    let texts = rendered_texts(&ctx, &mut controller, &mut screen);
+    assert!(
+        !texts.iter().any(|t| t == &tr("controls-kind-trigger")),
+        "the `trigger` kind label must not be drawn"
+    );
+    let groups = modplayer_ui::shortcut_groups::snapshot(controller.actions());
+    let any_continuous = groups
+        .iter()
+        .flat_map(|g| &g.rows)
+        .any(|r| r.kind == modplayer_core::actions::ActionKind::Continuous);
+    assert_eq!(
+        texts.iter().any(|t| t == &tr("controls-kind-continuous")),
+        any_continuous,
+        "a kind label is drawn for continuous actions only"
+    );
+}
+
+#[test]
+fn chip_text_is_key_label() {
+    let (mut controller, _dir) = fresh_controller("chip-text");
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut screen = ControlsScreen::default();
+    let _ = render_update(&ctx, &mut controller, &mut screen);
+    let update = render_update(&ctx, &mut controller, &mut screen);
+    let chord = Chord::parse("Space").unwrap_or_else(|_| unreachable!());
+    let label = modplayer_ui::key_label::KeyLabel::new(chord, platform_now());
+    assert_eq!(label.visible, "Space");
+    let chip = tr_args("controls-binding-chip", &[("binding", label.spoken)]);
+    let node = update
+        .nodes
+        .iter()
+        .find(|(_, n)| n.label() == Some(chip.as_str()))
+        .map(|(_, n)| n)
+        .expect("Space chip");
+    assert_eq!(
+        node.value(),
+        Some("Space"),
+        "the chip paints the key label only, with no `Binding` prefix"
+    );
+}
+
+fn controls_hidden_at_rest_take_zero_width_body() {
+    let (mut controller, _dir) = fresh_controller("zero-width");
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut screen = ControlsScreen::default();
+    let action = HostAction::ToggleLoop;
+    let add = tr("controls-add-binding");
+    let reset = tr_args(
+        "controls-reset-action",
+        &[("action", tr(action.label_key()))],
+    );
+    let chord = Chord::parse("L").unwrap_or_else(|_| unreachable!());
+    let chip = tr_args(
+        "controls-binding-chip",
+        &[(
+            "binding",
+            modplayer_ui::key_label::KeyLabel::new(chord, platform_now()).spoken,
+        )],
+    );
+
+    let _ = render_update(&ctx, &mut controller, &mut screen);
+    let rest = render_update(&ctx, &mut controller, &mut screen);
+    assert!(bounds_labelled(&rest, &add).is_empty());
+    assert!(bounds_labelled(&rest, &reset).is_empty());
+    let rest_chip = bounds_labelled(&rest, &chip);
+    assert_eq!(rest_chip.len(), 1);
+
+    hover_row(&ctx, &mut controller, &mut screen, action);
+    assert!(
+        has_button(&ctx, &mut controller, &mut screen, &reset),
+        "hover reveals the row's controls"
+    );
+
+    // Pointer leaves: back to rest — nodes absent, row layout as before.
+    pointer_to(&ctx, &mut controller, &mut screen, Pos2::new(1.0, 1.0));
+    let again = render_update(&ctx, &mut controller, &mut screen);
+    assert!(bounds_labelled(&again, &add).is_empty());
+    assert!(bounds_labelled(&again, &reset).is_empty());
+    assert_eq!(bounds_labelled(&again, &chip), rest_chip);
+}
+
+#[test]
+fn controls_hidden_at_rest_take_zero_width() {
+    controls_hidden_at_rest_take_zero_width_body();
+}
+
+// -- C10-C13: reveal --------------------------------------------------------
+
+#[test]
+fn hover_reveals_controls() {
+    let (mut controller, _dir) = fresh_controller("hover-reveal");
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut screen = ControlsScreen::default();
+    let action = HostAction::ToggleLoop;
+    let chord = Chord::parse("L").unwrap_or_else(|_| unreachable!());
+    let remove = tr_args(
+        "controls-remove-binding",
+        &[(
+            "binding",
+            modplayer_ui::key_label::KeyLabel::new(chord, platform_now()).spoken,
+        )],
+    );
+    let add = tr("controls-add-binding");
+    let reset = tr_args(
+        "controls-reset-action",
+        &[("action", tr(action.label_key()))],
+    );
+    hover_row(&ctx, &mut controller, &mut screen, action);
+    let update = render_update(&ctx, &mut controller, &mut screen);
+    assert!(!bounds_labelled(&update, &remove).is_empty(), "× revealed");
+    assert!(!bounds_labelled(&update, &add).is_empty(), "Add revealed");
+    assert!(
+        !bounds_labelled(&update, &reset).is_empty(),
+        "Reset revealed"
+    );
+    // Only the hovered row is revealed.
+    assert_eq!(bounds_labelled(&update, &add).len(), 1);
+}
+
+fn focus_node<B: OutputBackend, H: SourceHost>(
+    ctx: &Context,
+    controller: &mut PlaybackController<B, H>,
+    screen: &mut ControlsScreen,
+    target: egui::accesskit::NodeId,
+) {
+    let mut input = default_input();
+    input.events.push(Event::AccessKitActionRequest(
+        egui::accesskit::ActionRequest {
+            action: egui::accesskit::Action::Focus,
+            target_tree: egui::accesskit::TreeId::ROOT,
+            target_node: target,
+            data: None,
+        },
+    ));
+    let output = ctx.run_ui(input, |ui| controls::show(ui, controller, screen, None));
+    output.drop_without_applying_deltas();
+}
+
+#[test]
+fn row_element_is_focusable_and_named() {
+    let (mut controller, _dir) = fresh_controller("row-element");
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut screen = ControlsScreen::default();
+    let action = HostAction::ToggleLoop;
+    let name = tr_args(
+        "controls-row",
+        &[
+            ("action", tr(action.label_key())),
+            ("bindings", spoken_bindings(&controller, action)),
+        ],
+    );
+    let _ = render_update(&ctx, &mut controller, &mut screen);
+    let update = render_update(&ctx, &mut controller, &mut screen);
+    let node = update
+        .nodes
+        .iter()
+        .find(|(_, n)| n.label() == Some(name.as_str()))
+        .map(|(_, n)| n)
+        .unwrap_or_else(|| panic!("row element `{name}`"));
+    assert!(
+        node.supports_action(egui::accesskit::Action::Focus),
+        "the row element must be focusable"
+    );
+}
+
+#[test]
+fn keyboard_reveal_tab_walk() {
+    let (mut controller, _dir) = fresh_controller("tab-walk");
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut screen = ControlsScreen::default();
+    let action = HostAction::ToggleLoop;
+    let chord = Chord::parse("L").unwrap_or_else(|_| unreachable!());
+    let name = tr_args(
+        "controls-row",
+        &[
+            ("action", tr(action.label_key())),
+            ("bindings", spoken_bindings(&controller, action)),
+        ],
+    );
+    let remove = tr_args(
+        "controls-remove-binding",
+        &[(
+            "binding",
+            modplayer_ui::key_label::KeyLabel::new(chord, platform_now()).spoken,
+        )],
+    );
+    let add = tr("controls-add-binding");
+    let reset = tr_args(
+        "controls-reset-action",
+        &[("action", tr(action.label_key()))],
+    );
+
+    let _ = render_update(&ctx, &mut controller, &mut screen);
+    let update = render_update(&ctx, &mut controller, &mut screen);
+    let row_node = update
+        .nodes
+        .iter()
+        .find(|(_, n)| n.label() == Some(name.as_str()))
+        .map(|(id, _)| *id)
+        .expect("row element");
+    focus_node(&ctx, &mut controller, &mut screen, row_node);
+    let _ = render_update(&ctx, &mut controller, &mut screen);
+    let update = render_update(&ctx, &mut controller, &mut screen);
+    assert_eq!(update.focus, row_node, "row element holds focus");
+    assert!(
+        !bounds_labelled(&update, &remove).is_empty(),
+        "focus reveals"
+    );
+
+    let node_named = |u: &TreeUpdate, label: &str| {
+        u.nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::Button && n.label() == Some(label))
+            .map(|(id, _)| *id)
+            .unwrap_or_else(|| panic!("button `{label}`"))
+    };
+    for expected in [&remove, &add, &reset] {
+        let mut input = default_input();
+        input.events.push(key(EguiKey::Tab, Modifiers::NONE));
+        let mut output = ctx.run_ui(input, |ui| {
+            controls::show(ui, &mut controller, &mut screen, None)
+        });
+        let update = output
+            .platform_output
+            .accesskit_update
+            .take()
+            .expect("accesskit");
+        output.drop_without_applying_deltas();
+        assert_eq!(
+            update.focus,
+            node_named(&update, expected),
+            "Tab order: row element, ×, Add binding, Reset; expected `{expected}`"
+        );
+    }
+
+    // Focus moves elsewhere (the filter box): controls hide again.
+    let filter = update
+        .nodes
+        .iter()
+        .find(|(_, n)| n.role() == Role::TextInput)
+        .map(|(id, _)| *id)
+        .expect("filter");
+    focus_node(&ctx, &mut controller, &mut screen, filter);
+    let _ = render_update(&ctx, &mut controller, &mut screen);
+    assert!(!has_button(&ctx, &mut controller, &mut screen, &reset));
+}
+
+#[test]
+fn capture_keeps_controls_visible_when_pointer_leaves() {
+    let (mut controller, _dir) = fresh_controller("capture-visible");
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut screen = ControlsScreen::default();
+    let action = HostAction::ToggleLoop;
+    let reset = tr_args(
+        "controls-reset-action",
+        &[("action", tr(action.label_key()))],
+    );
+    hover_row(&ctx, &mut controller, &mut screen, action);
+    let bounds = nth_button_bounds(
+        &ctx,
+        &mut controller,
+        &mut screen,
+        &tr("controls-add-binding"),
+        0,
+    );
+    click_at(&ctx, &mut controller, &mut screen, bounds.center());
+    assert_eq!(screen.capture, Some(ActionId::Host(action)));
+
+    pointer_to(&ctx, &mut controller, &mut screen, Pos2::new(1.0, 1.0));
+    assert_eq!(screen.capture, Some(ActionId::Host(action)));
+    assert!(
+        has_button(&ctx, &mut controller, &mut screen, &reset),
+        "controls stay visible while capturing"
+    );
+
+    // A rejection (Tab) keeps them visible too.
+    press_key(
+        &ctx,
+        &mut controller,
+        &mut screen,
+        key(EguiKey::Tab, Modifiers::NONE),
+    );
+    assert!(screen.capture_error.is_some());
+    pointer_to(&ctx, &mut controller, &mut screen, Pos2::new(2.0, 2.0));
+    assert!(has_button(&ctx, &mut controller, &mut screen, &reset));
+}
+
+// -- C17: size --------------------------------------------------------------
+
+#[test]
+fn controls_height_at_most_60_percent_of_baseline() {
+    let height = measure_controls_content_height();
+    assert!(
+        height <= 0.6 * PRE_029_CONTROLS_HEIGHT,
+        "controls page is {height} px; limit is {} px (60% of {PRE_029_CONTROLS_HEIGHT})",
+        0.6 * PRE_029_CONTROLS_HEIGHT
+    );
+}
+
+// -- NFR-7.1: 40% pseudo-expansion ------------------------------------------
+
+#[test]
+fn many_bindings_wrap_without_elision_pseudo_expanded() {
+    modplayer_core::i18n::with_pseudo_expansion(40, many_bindings_wrap_without_elision_body);
+}
+
+#[test]
+fn controls_hidden_at_rest_take_zero_width_pseudo_expanded() {
+    modplayer_core::i18n::with_pseudo_expansion(40, controls_hidden_at_rest_take_zero_width_body);
+}
+
+// ---------------------------------------------------------------------
+// 029-keyboard-shortcut-reference, US2 (contracts C14-C16)
+// ---------------------------------------------------------------------
+
+/// Action ids (host) that survive `query` on `platform` in a default
+/// registry, via the filter the controls page uses.
+fn filtered_actions(
+    controller: &PlaybackController<FakeBackend, SyntheticHost>,
+    query: &str,
+    platform: Platform,
+) -> Vec<ActionId> {
+    let groups = modplayer_ui::shortcut_groups::snapshot(controller.actions());
+    modplayer_ui::shortcut_groups::filter_groups(&groups, query, platform)
+        .into_iter()
+        .flat_map(|(_, rows)| rows.into_iter().map(|r| r.row.id.clone()))
+        .collect()
+}
+
+#[test]
+fn filter_by_key_alias_lists_bound_actions() {
+    let (mut controller, _dir) = fresh_controller("filter-key-alias");
+    let loop_id = ActionId::Host(HostAction::ToggleLoop);
+    let play_id = ActionId::Host(HostAction::TogglePlayPause);
+    let ctrl_shift_l = Chord::parse("Primary+Shift+L").unwrap_or_else(|_| unreachable!());
+    controller
+        .add_binding(HostAction::ToggleLoop, ctrl_shift_l)
+        .unwrap_or_else(|_| unreachable!());
+
+    for query in ["L", "l", " l "] {
+        assert!(
+            filtered_actions(&controller, query, Platform::Other).contains(&loop_id),
+            "`{query}` must list Toggle loop"
+        );
+    }
+    for query in ["space", "Space"] {
+        assert!(
+            filtered_actions(&controller, query, Platform::Other).contains(&play_id),
+            "`{query}` must list Play/pause"
+        );
+    }
+    // Canonical key name (what the user types for an arrow key).
+    let seek_left: Vec<ActionId> = HostAction::ALL
+        .into_iter()
+        .filter(|a| {
+            controller
+                .actions()
+                .bindings(*a)
+                .iter()
+                .any(|c| c.key.as_str() == "Left" && c.mods.is_none())
+        })
+        .map(ActionId::Host)
+        .collect();
+    assert!(
+        !seek_left.is_empty(),
+        "fixture: some action binds bare Left"
+    );
+    let by_name = filtered_actions(&controller, "left", Platform::Other);
+    for id in &seek_left {
+        assert!(by_name.contains(id), "`left` must list {id:?}");
+    }
+    // Mac arrow glyph.
+    let by_glyph = filtered_actions(&controller, "\u{2190}", Platform::Mac);
+    for id in &seek_left {
+        assert!(by_glyph.contains(id), "`←` (mac) must list {id:?}");
+    }
+    // Whole visible chord.
+    assert!(
+        filtered_actions(&controller, "ctrl+shift+l", Platform::Other).contains(&loop_id),
+        "`ctrl+shift+l` must list the chord's action"
+    );
+}
+
+#[test]
+fn filter_key_match_is_exact() {
+    let (controller, _dir) = fresh_controller("filter-key-exact");
+    let groups = modplayer_ui::shortcut_groups::snapshot(controller.actions());
+    let hits = modplayer_ui::shortcut_groups::filter_groups(&groups, "e", Platform::Other);
+    for (_, rows) in &hits {
+        for filtered in rows {
+            for (chord, &hit) in filtered.row.bindings.iter().zip(&filtered.key_hits) {
+                if hit {
+                    assert_eq!(
+                        chord.key.as_str(),
+                        "E",
+                        "`e` may key-match only the E key, got `{}`",
+                        chord.key.as_str()
+                    );
+                }
+            }
+        }
+    }
+    // Enter / Escape actions are not listed through their keys.
+    let via_keys: Vec<&str> = hits
+        .iter()
+        .flat_map(|(_, rows)| rows.iter())
+        .filter(|f| f.key_hits.iter().any(|&h| h))
+        .flat_map(|f| f.row.bindings.iter().map(|c| c.key.as_str()))
+        .collect();
+    assert!(!via_keys.contains(&"Enter") && !via_keys.contains(&"Escape"));
+}
+
+#[test]
+fn filter_no_match_message() {
+    let (mut controller, _dir) = fresh_controller("filter-key-nomatch");
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut screen = ControlsScreen {
+        filter: "ctrl+alt+shift+zzz".to_string(),
+        ..Default::default()
+    };
+    let texts = rendered_texts(&ctx, &mut controller, &mut screen);
+    assert!(texts.iter().any(|t| t == &tr("controls-no-match")));
+}
+
+/// Number of rectangle strokes in `ctx`'s frame output equal to the
+/// accent focus-ring stroke, after rendering the controls page once.
+fn accent_outlined_rects(
+    ctx: &Context,
+    controller: &mut PlaybackController<FakeBackend, SyntheticHost>,
+    screen: &mut ControlsScreen,
+) -> usize {
+    fn count(shape: &egui::Shape, ring: egui::Stroke) -> usize {
+        match shape {
+            egui::Shape::Vec(shapes) => shapes.iter().map(|s| count(s, ring)).sum(),
+            egui::Shape::Rect(rect) if rect.stroke == ring => 1,
+            _ => 0,
+        }
+    }
+    let output = ctx.run_ui(default_input(), |ui| {
+        controls::show(ui, controller, screen, None);
+    });
+    let roles = modplayer_ui::theme::roles(&ctx.global_style().visuals);
+    let ring = modplayer_ui::theme::controls::focus_ring(roles);
+    let n = output.shapes.iter().map(|s| count(&s.shape, ring)).sum();
+    output.drop_without_applying_deltas();
+    n
+}
+
+#[test]
+fn key_match_chip_outlined() {
+    let (mut controller, _dir) = fresh_controller("key-match-outline");
+    let ctx = fresh_ctx();
+    let mut plain = ControlsScreen::default();
+    let _ = accent_outlined_rects(&ctx, &mut controller, &mut plain);
+    let baseline = accent_outlined_rects(&ctx, &mut controller, &mut plain);
+
+    let mut screen = ControlsScreen {
+        filter: "space".to_string(),
+        ..Default::default()
+    };
+    let _ = accent_outlined_rects(&ctx, &mut controller, &mut screen);
+    let filtered = accent_outlined_rects(&ctx, &mut controller, &mut screen);
+    assert!(
+        filtered > baseline,
+        "a key-matched chip must gain an accent outline ({filtered} vs {baseline})"
     );
 }

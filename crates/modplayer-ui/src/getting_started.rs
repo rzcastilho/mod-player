@@ -19,6 +19,8 @@ use crate::theme;
 pub enum GettingStartedOutcome {
     None,
     OpenTutorial,
+    /// 029 (S4): open the shortcut sheet.
+    OpenShortcuts,
     Dismiss,
 }
 
@@ -45,6 +47,13 @@ pub fn show(ui: &mut Ui) -> GettingStartedOutcome {
             });
             if tutorial.clicked() {
                 outcome = GettingStartedOutcome::OpenTutorial;
+            }
+            let shortcuts = ui.button(tr("getting-started-shortcuts"));
+            ui.ctx().accesskit_node_builder(shortcuts.id, |b| {
+                b.set_role(Role::Link);
+            });
+            if shortcuts.clicked() {
+                outcome = GettingStartedOutcome::OpenShortcuts;
             }
             if ui.button(tr("getting-started-dismiss")).clicked() {
                 outcome = GettingStartedOutcome::Dismiss;

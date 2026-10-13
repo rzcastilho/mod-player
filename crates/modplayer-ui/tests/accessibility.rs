@@ -2439,6 +2439,36 @@ fn platform_now() -> Platform {
     }
 }
 
+/// Render the Controls page with the pointer over `action`'s row, so its
+/// hover-revealed controls (029 C9/C10) are present in the returned nodes.
+fn render_controls_hovering(
+    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+    screen: &mut ControlsScreen,
+    action: HostAction,
+) -> Vec<AccessNode> {
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let needle = tr(action.label_key());
+    let first = render_nodes_on(&ctx, default_input(), |ui| {
+        controls::show(ui, controller, screen, None)
+    });
+    let pos = first
+        .iter()
+        .filter(|n| n.accessible_name().is_some_and(|l| l.contains(&needle)))
+        .find_map(|n| n.bounds)
+        .expect("row element")
+        .center();
+    let mut nodes = Vec::new();
+    for _ in 0..2 {
+        let mut input = default_input();
+        input.events.push(Event::PointerMoved(pos));
+        nodes = render_nodes_on(&ctx, input, |ui| {
+            controls::show(ui, controller, screen, None)
+        });
+    }
+    nodes
+}
+
 #[test]
 fn controls_filter_box_is_labelled() {
     let (mut controller, _dir) = fresh_bare_controller("controls-filter-a11y");
@@ -2463,14 +2493,14 @@ fn controls_filter_box_is_labelled() {
 fn controls_reset_all_and_row_controls_expose_accessible_names_and_stay_enabled() {
     let (mut controller, _dir) = fresh_bare_controller("controls-row-a11y");
     let mut screen = ControlsScreen::default();
-    let nodes = render_nodes(|ui| controls::show(ui, &mut controller, &mut screen, None));
+    let nodes = render_controls_hovering(&mut controller, &mut screen, HostAction::NavLibrary);
 
     let reset_all = find_one(&nodes, Role::Button, &tr("controls-reset-all"));
     assert!(!reset_all.disabled);
 
     assert!(
         !find_all(&nodes, Role::Button, &tr("controls-add-binding")).is_empty(),
-        "every row must expose an \"Add binding\" button"
+        "a revealed row must expose an \"Add binding\" button"
     );
 
     let action = HostAction::NavLibrary;
@@ -2486,11 +2516,12 @@ fn controls_reset_all_and_row_controls_expose_accessible_names_and_stay_enabled(
 fn controls_binding_chip_and_remove_button_expose_accessible_names() {
     let (mut controller, _dir) = fresh_bare_controller("controls-chip-a11y");
     let mut screen = ControlsScreen::default();
-    let nodes = render_nodes(|ui| controls::show(ui, &mut controller, &mut screen, None));
+    let action = HostAction::ToggleLoop;
+    let nodes = render_controls_hovering(&mut controller, &mut screen, action);
 
     let chord = Chord::parse("L").unwrap_or_else(|_| unreachable!()); // ToggleLoop's default.
-    let display = chord.display(platform_now());
-    let chip_text = tr_args("controls-binding-chip", &[("binding", display.clone())]);
+    let spoken = modplayer_ui::key_label::KeyLabel::new(chord, platform_now()).spoken;
+    let chip_text = tr_args("controls-binding-chip", &[("binding", spoken.clone())]);
     assert!(
         nodes
             .iter()
@@ -2498,9 +2529,22 @@ fn controls_binding_chip_and_remove_button_expose_accessible_names() {
         "the binding chip must expose its accessible name: {nodes:?}"
     );
 
-    let remove_name = tr_args("controls-remove-binding", &[("binding", display)]);
+    let remove_name = tr_args("controls-remove-binding", &[("binding", spoken.clone())]);
     let remove = find_one(&nodes, Role::Button, &remove_name);
     assert!(!remove.disabled);
+
+    // 029 C11: the row element is named `controls-row { action } { bindings }`.
+    let row_name = tr_args(
+        "controls-row",
+        &[("action", tr(action.label_key())), ("bindings", spoken)],
+    );
+    assert!(
+        nodes
+            .iter()
+            .any(|n| n.accessible_name() == Some(row_name.as_str())),
+        "the row element must expose `{row_name}`: {nodes:?}"
+    );
+    assert_interactive_nodes_named(&nodes, "controls page with a revealed row");
 }
 
 #[test]
@@ -2526,12 +2570,12 @@ fn controls_disabled_row_shows_inactive_suffix_and_keeps_controls_enabled() {
     let action = HostAction::TempoStepUp;
     controller.set_action_enabled(action, false);
     let mut screen = ControlsScreen::default();
-    let nodes = render_nodes(|ui| controls::show(ui, &mut controller, &mut screen, None));
+    let nodes = render_controls_hovering(&mut controller, &mut screen, action);
     let expected_label = format!("{} {}", tr(action.label_key()), tr("controls-inactive"));
     assert!(
-        nodes
-            .iter()
-            .any(|n| n.accessible_name() == Some(expected_label.as_str())),
+        nodes.iter().any(|n| n
+            .accessible_name()
+            .is_some_and(|name| name.contains(expected_label.as_str()))),
         "a disabled row's label must expose the `(inactive)` suffix: {nodes:?}"
     );
 
@@ -3414,4 +3458,72 @@ fn account_summary_and_signout_modal_expose_accessible_names() {
         );
     }
     assert_interactive_nodes_named(&nodes, "sign-out dialog");
+}
+
+// 029 keyboard shortcut reference (S13): the sheet, nav item and link.
+
+/// Every interactive node in the shortcut sheet, the "Keyboard shortcuts"
+/// nav item and the getting-started link has a non-empty accessible
+/// name, and each action row announces its action and bindings.
+#[test]
+fn shortcut_sheet_nav_item_and_link_are_named() {
+    use modplayer_core::actions::{ActionRegistry, KeymapOverrides};
+    use modplayer_ui::shortcut_sheet::{self, ShortcutSheetState};
+
+    let registry = ActionRegistry::new(KeymapOverrides::default());
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut state = ShortcutSheetState::default();
+    state.open();
+    let mut nodes = Vec::new();
+    for _ in 0..4 {
+        nodes = render_nodes_on(&ctx, default_input(), |ui| {
+            let _ = shortcut_sheet::show(ui.ctx(), &mut state, &registry);
+        });
+    }
+    let interactive = [Role::Button, Role::Link, Role::CheckBox, Role::TextInput];
+    for node in nodes.iter().filter(|n| interactive.contains(&n.role)) {
+        assert!(
+            node.accessible_name().is_some_and(|n| !n.is_empty()),
+            "unnamed interactive node in the sheet: {node:?}"
+        );
+    }
+    let open_printable = tr("shortcuts-open-printable");
+    assert!(
+        nodes
+            .iter()
+            .any(|n| n.role == Role::Button && n.accessible_name() == Some(open_printable.as_str()))
+    );
+    let toggle_name = tr("action-transport-toggle");
+    assert!(
+        nodes
+            .iter()
+            .any(|n| n.accessible_name().is_some_and(|name| name
+                .replace(['\u{2068}', '\u{2069}'], "")
+                .starts_with(&format!("{toggle_name}:")))),
+        "rows announce action and bindings"
+    );
+
+    // Nav item.
+    let nodes = render_nodes(|ui| {
+        let mut shell = Shell::default();
+        shell.nav_rail(ui);
+    });
+    let nav = tr("nav-keyboard-shortcuts");
+    assert!(
+        nodes
+            .iter()
+            .any(|n| n.role == Role::Button && n.accessible_name() == Some(nav.as_str()))
+    );
+
+    // Getting-started link.
+    let nodes = render_nodes(|ui| {
+        let _ = getting_started::show(ui);
+    });
+    let link = tr("getting-started-shortcuts");
+    assert!(
+        nodes
+            .iter()
+            .any(|n| n.role == Role::Link && n.accessible_name() == Some(link.as_str()))
+    );
 }

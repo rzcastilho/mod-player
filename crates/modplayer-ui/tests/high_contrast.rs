@@ -917,3 +917,106 @@ fn settings_highlight_badge_cards_and_destructive_stay_distinguishable() {
         }
     }
 }
+
+/// 029 US2 (contract C16): a key-matched chip keeps its accent outline in
+/// high contrast, drawn thicker than in normal mode and clearing the
+/// non-text contrast floor against the page.
+#[test]
+fn key_match_outline_visible_in_hc() {
+    use modplayer_ui::settings::controls::{self, ControlsScreen};
+    use modplayer_ui::theme::contrast::ratio;
+
+    fn count(shape: &egui::Shape, ring: Stroke) -> usize {
+        match shape {
+            egui::Shape::Vec(shapes) => shapes.iter().map(|s| count(s, ring)).sum(),
+            egui::Shape::Rect(rect) if rect.stroke == ring => 1,
+            _ => 0,
+        }
+    }
+
+    let outlined = |high_contrast: bool, filter: &str| -> (usize, Stroke) {
+        let (mut controller, _path, _dir, _track) = fresh_controller("key-match-hc");
+        let ctx = Context::default();
+        apply_tokens_for(&ctx, high_contrast);
+        let mut screen = ControlsScreen {
+            filter: filter.to_string(),
+            ..Default::default()
+        };
+        let mut last = 0;
+        let mut ring = Stroke::NONE;
+        for _ in 0..2 {
+            let output = ctx.run_ui(default_input(), |ui| {
+                controls::show(ui, &mut controller, &mut screen, None);
+            });
+            let roles = modplayer_ui::theme::roles(&ctx.global_style().visuals);
+            ring = focus_ring(roles);
+            last = output.shapes.iter().map(|s| count(&s.shape, ring)).sum();
+            output.drop_without_applying_deltas();
+        }
+        (last, ring)
+    };
+
+    let (plain_hits, _) = outlined(true, "");
+    let (hits, ring) = outlined(true, "space");
+    assert!(
+        hits > plain_hits,
+        "key-matched chip must be outlined in high contrast ({hits} vs {plain_hits})"
+    );
+    let (_, normal_ring) = outlined(false, "space");
+    assert!(ring.width > normal_ring.width, "HC outline is thicker");
+    for roles in [&LIGHT_HIGH_CONTRAST, &DARK_HIGH_CONTRAST] {
+        for surface in [roles.surface_base, roles.surface_raised] {
+            assert!(ratio(focus_ring(roles).color, surface) >= 3.0);
+        }
+    }
+}
+
+/// 029 (S13): the shortcut sheet draws only theme strokes in high
+/// contrast: every chip border is the divider colour, which clears the
+/// non-text contrast floor against both surfaces.
+#[test]
+fn shortcut_sheet_borders_follow_the_divider_in_hc() {
+    use modplayer_core::actions::{ActionRegistry, KeymapOverrides};
+    use modplayer_ui::shortcut_sheet::{self, ShortcutSheetState};
+    use modplayer_ui::theme::contrast::ratio;
+
+    fn chip_strokes(shape: &egui::Shape, out: &mut Vec<Stroke>) {
+        match shape {
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| chip_strokes(s, out)),
+            egui::Shape::Rect(rect) if rect.stroke.width > 0.0 => out.push(rect.stroke),
+            _ => {}
+        }
+    }
+
+    let registry = ActionRegistry::new(KeymapOverrides::default());
+    let ctx = Context::default();
+    apply_tokens_for(&ctx, true);
+    let mut state = ShortcutSheetState::default();
+    state.open();
+    let mut strokes = Vec::new();
+    for frame in 0..6 {
+        strokes.clear();
+        // Advance time so the window's fade-in finishes: a still-fading
+        // stroke is alpha-scaled and not the plain divider colour.
+        let input = RawInput {
+            time: Some(f64::from(frame) * 1.0),
+            ..default_input()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            let _ = shortcut_sheet::show(ui.ctx(), &mut state, &registry);
+        });
+        for clipped in &output.shapes {
+            chip_strokes(&clipped.shape, &mut strokes);
+        }
+        output.drop_without_applying_deltas();
+    }
+    assert!(!strokes.is_empty(), "the sheet paints bordered chips");
+    let roles = modplayer_ui::theme::roles(&ctx.global_style().visuals);
+    let divider = divider_color_for(roles);
+    for stroke in &strokes {
+        assert_eq!(stroke.color, divider, "sheet border is not the divider");
+    }
+    for roles in [&LIGHT_HIGH_CONTRAST, &DARK_HIGH_CONTRAST] {
+        assert!(ratio(divider_color_for(roles), roles.surface_base) >= 3.0);
+    }
+}

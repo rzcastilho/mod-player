@@ -292,60 +292,336 @@ impl Chord {
         out
     }
 
-    /// A human-readable rendering for the shortcut map and tests
-    /// (R14): macOS glyphs with no separator (`⌘⇧→`), or
-    /// `Ctrl`/`Shift`/`Alt`/name joined by `+` elsewhere. Never empty.
-    pub fn display(&self, platform: Platform) -> String {
+    /// The platform-specific structure of this chord's label (029,
+    /// data-model §1.2): modifier tokens in the fixed order primary,
+    /// shift, alt, then the key token. Total over every [`KeyName`] and
+    /// never empty.
+    ///
+    /// ```
+    /// # use modplayer_core::actions::{Chord, Platform, KeyToken, KeyWord};
+    /// let c = Chord::parse("Shift+Space").unwrap();
+    /// let parts = c.display_parts(Platform::Mac);
+    /// assert_eq!(parts.mods, vec![KeyToken::Symbol("\u{21e7}")]);
+    /// assert_eq!(parts.key, KeyToken::Word(KeyWord::Space));
+    /// ```
+    pub fn display_parts(&self, platform: Platform) -> DisplayParts {
+        let mut mods = Vec::new();
         match platform {
             Platform::Mac => {
-                let mut out = String::new();
                 if self.mods.primary {
-                    out.push('⌘');
+                    mods.push(KeyToken::Symbol("\u{2318}"));
                 }
                 if self.mods.shift {
-                    out.push('⇧');
+                    mods.push(KeyToken::Symbol("\u{21e7}"));
                 }
                 if self.mods.alt {
-                    out.push('⌥');
+                    mods.push(KeyToken::Symbol("\u{2325}"));
                 }
-                out.push_str(mac_key_symbol(self.key.as_str()));
-                out
             }
             Platform::Other => {
-                let mut parts = Vec::new();
                 if self.mods.primary {
-                    parts.push("Ctrl");
+                    mods.push(KeyToken::Word(KeyWord::Ctrl));
                 }
                 if self.mods.shift {
-                    parts.push("Shift");
+                    mods.push(KeyToken::Word(KeyWord::Shift));
                 }
                 if self.mods.alt {
-                    parts.push("Alt");
+                    mods.push(KeyToken::Word(KeyWord::Alt));
                 }
-                parts.push(self.key.as_str());
-                parts.join("+")
             }
+        }
+        DisplayParts {
+            mods,
+            key: key_token(self.key, platform),
+            platform,
+        }
+    }
+
+    /// A human-readable rendering (en-US words): macOS symbols with no
+    /// separator (`\u{2318}\u{21e7}\u{2192}`, `\u{21e7}Space`), or
+    /// `Ctrl`/`Shift`/`Alt`/key joined by `+` elsewhere. Never empty.
+    ///
+    /// ```
+    /// # use modplayer_core::actions::{Chord, Platform};
+    /// let c = Chord::parse("Primary+Shift+L").unwrap();
+    /// assert_eq!(c.display(Platform::Other), "Ctrl+Shift+L");
+    /// ```
+    pub fn display(&self, platform: Platform) -> String {
+        self.display_parts(platform).to_en_string()
+    }
+}
+
+/// One token of a chord label: a printed symbol, or a word that must be
+/// localised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KeyToken {
+    Symbol(&'static str),
+    Word(KeyWord),
+}
+
+/// The closed set of words that appear in chord labels. Each has a
+/// Fluent key (`key-word-*`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KeyWord {
+    Space,
+    Return,
+    Enter,
+    Esc,
+    Tab,
+    Backspace,
+    Delete,
+    Insert,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Copy,
+    Cut,
+    Paste,
+    ArrowLeft,
+    ArrowRight,
+    ArrowUp,
+    ArrowDown,
+    Ctrl,
+    Shift,
+    Alt,
+    BrowserBack,
+    ShiftLeft,
+    ShiftRight,
+    ControlLeft,
+    ControlRight,
+    AltLeft,
+    AltRight,
+    SuperLeft,
+    SuperRight,
+    IntlBackslash,
+}
+
+impl KeyWord {
+    /// Every variant, for exhaustive string-coverage tests.
+    pub const ALL: [KeyWord; 32] = [
+        KeyWord::Space,
+        KeyWord::Return,
+        KeyWord::Enter,
+        KeyWord::Esc,
+        KeyWord::Tab,
+        KeyWord::Backspace,
+        KeyWord::Delete,
+        KeyWord::Insert,
+        KeyWord::Home,
+        KeyWord::End,
+        KeyWord::PageUp,
+        KeyWord::PageDown,
+        KeyWord::Copy,
+        KeyWord::Cut,
+        KeyWord::Paste,
+        KeyWord::ArrowLeft,
+        KeyWord::ArrowRight,
+        KeyWord::ArrowUp,
+        KeyWord::ArrowDown,
+        KeyWord::Ctrl,
+        KeyWord::Shift,
+        KeyWord::Alt,
+        KeyWord::BrowserBack,
+        KeyWord::ShiftLeft,
+        KeyWord::ShiftRight,
+        KeyWord::ControlLeft,
+        KeyWord::ControlRight,
+        KeyWord::AltLeft,
+        KeyWord::AltRight,
+        KeyWord::SuperLeft,
+        KeyWord::SuperRight,
+        KeyWord::IntlBackslash,
+    ];
+
+    /// The Fluent key of the visible word.
+    ///
+    /// ```
+    /// # use modplayer_core::actions::KeyWord;
+    /// assert_eq!(KeyWord::PageUp.fluent_key(), "key-word-page-up");
+    /// ```
+    pub fn fluent_key(self) -> &'static str {
+        match self {
+            KeyWord::Space => "key-word-space",
+            KeyWord::Return => "key-word-return",
+            KeyWord::Enter => "key-word-enter",
+            KeyWord::Esc => "key-word-esc",
+            KeyWord::Tab => "key-word-tab",
+            KeyWord::Backspace => "key-word-backspace",
+            KeyWord::Delete => "key-word-delete",
+            KeyWord::Insert => "key-word-insert",
+            KeyWord::Home => "key-word-home",
+            KeyWord::End => "key-word-end",
+            KeyWord::PageUp => "key-word-page-up",
+            KeyWord::PageDown => "key-word-page-down",
+            KeyWord::Copy => "key-word-copy",
+            KeyWord::Cut => "key-word-cut",
+            KeyWord::Paste => "key-word-paste",
+            KeyWord::ArrowLeft => "key-word-left",
+            KeyWord::ArrowRight => "key-word-right",
+            KeyWord::ArrowUp => "key-word-up",
+            KeyWord::ArrowDown => "key-word-down",
+            KeyWord::Ctrl => "key-word-ctrl",
+            KeyWord::Shift => "key-word-shift",
+            KeyWord::Alt => "key-word-alt",
+            KeyWord::BrowserBack => "key-word-browser-back",
+            KeyWord::ShiftLeft => "key-word-shift-left",
+            KeyWord::ShiftRight => "key-word-shift-right",
+            KeyWord::ControlLeft => "key-word-control-left",
+            KeyWord::ControlRight => "key-word-control-right",
+            KeyWord::AltLeft => "key-word-alt-left",
+            KeyWord::AltRight => "key-word-alt-right",
+            KeyWord::SuperLeft => "key-word-super-left",
+            KeyWord::SuperRight => "key-word-super-right",
+            KeyWord::IntlBackslash => "key-word-intl-backslash",
+        }
+    }
+
+    /// The Fluent key of the spoken word. A word's spoken form reuses
+    /// its visible string.
+    ///
+    /// ```
+    /// # use modplayer_core::actions::KeyWord;
+    /// assert_eq!(KeyWord::Esc.spoken_key(), KeyWord::Esc.fluent_key());
+    /// ```
+    pub fn spoken_key(self) -> &'static str {
+        self.fluent_key()
+    }
+
+    /// The en-US text of the word (what [`Chord::display`] prints).
+    pub fn en_us(self) -> &'static str {
+        match self {
+            KeyWord::Space => "Space",
+            KeyWord::Return => "Return",
+            KeyWord::Enter => "Enter",
+            KeyWord::Esc => "Esc",
+            KeyWord::Tab => "Tab",
+            KeyWord::Backspace => "Backspace",
+            KeyWord::Delete => "Delete",
+            KeyWord::Insert => "Insert",
+            KeyWord::Home => "Home",
+            KeyWord::End => "End",
+            KeyWord::PageUp => "Page Up",
+            KeyWord::PageDown => "Page Down",
+            KeyWord::Copy => "Copy",
+            KeyWord::Cut => "Cut",
+            KeyWord::Paste => "Paste",
+            KeyWord::ArrowLeft => "Left",
+            KeyWord::ArrowRight => "Right",
+            KeyWord::ArrowUp => "Up",
+            KeyWord::ArrowDown => "Down",
+            KeyWord::Ctrl => "Ctrl",
+            KeyWord::Shift => "Shift",
+            KeyWord::Alt => "Alt",
+            KeyWord::BrowserBack => "Browser Back",
+            KeyWord::ShiftLeft => "Left Shift",
+            KeyWord::ShiftRight => "Right Shift",
+            KeyWord::ControlLeft => "Left Ctrl",
+            KeyWord::ControlRight => "Right Ctrl",
+            KeyWord::AltLeft => "Left Alt",
+            KeyWord::AltRight => "Right Alt",
+            KeyWord::SuperLeft => "Left Super",
+            KeyWord::SuperRight => "Right Super",
+            KeyWord::IntlBackslash => "Intl Backslash",
         }
     }
 }
 
-/// macOS's symbol for a key name where one exists (R14); every other
-/// name (letters, digits, function keys, unlisted punctuation) displays
-/// as its own name.
-fn mac_key_symbol(name: &str) -> &str {
-    match name {
-        "Left" => "←",
-        "Right" => "→",
-        "Up" => "↑",
-        "Down" => "↓",
-        "Space" => "␣",
-        "Enter" => "⏎",
-        "Tab" => "⇥",
-        "Escape" => "⎋",
-        "Plus" => "+",
-        "Equals" => "=",
-        "Minus" => "-",
-        "Slash" => "/",
-        other => other,
+/// The structure of a chord's label for one platform (see
+/// [`Chord::display_parts`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayParts {
+    /// Modifier tokens (at most 3), in order primary, shift, alt.
+    pub mods: Vec<KeyToken>,
+    /// The key token.
+    pub key: KeyToken,
+    /// Mac joins parts with no separator; other platforms with `+`.
+    pub platform: Platform,
+}
+
+impl DisplayParts {
+    /// All tokens, modifiers first.
+    pub fn tokens(&self) -> impl Iterator<Item = KeyToken> + '_ {
+        self.mods.iter().copied().chain(std::iter::once(self.key))
+    }
+
+    /// The separator placed between tokens.
+    pub fn separator(&self) -> &'static str {
+        match self.platform {
+            Platform::Mac => "",
+            Platform::Other => "+",
+        }
+    }
+
+    /// Join the tokens using en-US words.
+    pub fn to_en_string(&self) -> String {
+        let texts: Vec<&str> = self
+            .tokens()
+            .map(|t| match t {
+                KeyToken::Symbol(s) => s,
+                KeyToken::Word(w) => w.en_us(),
+            })
+            .collect();
+        texts.join(self.separator())
+    }
+}
+
+/// The key token for a key name on a platform (data-model §1.2).
+fn key_token(key: KeyName, platform: Platform) -> KeyToken {
+    let mac = platform == Platform::Mac;
+    match key.as_str() {
+        "Space" => KeyToken::Word(KeyWord::Space),
+        "Enter" if mac => KeyToken::Word(KeyWord::Return),
+        "Enter" => KeyToken::Word(KeyWord::Enter),
+        "Escape" => KeyToken::Word(KeyWord::Esc),
+        "Tab" => KeyToken::Word(KeyWord::Tab),
+        "Left" if mac => KeyToken::Symbol("\u{2190}"),
+        "Right" if mac => KeyToken::Symbol("\u{2192}"),
+        "Up" if mac => KeyToken::Symbol("\u{2191}"),
+        "Down" if mac => KeyToken::Symbol("\u{2193}"),
+        "Left" => KeyToken::Word(KeyWord::ArrowLeft),
+        "Right" => KeyToken::Word(KeyWord::ArrowRight),
+        "Up" => KeyToken::Word(KeyWord::ArrowUp),
+        "Down" => KeyToken::Word(KeyWord::ArrowDown),
+        "PageUp" => KeyToken::Word(KeyWord::PageUp),
+        "PageDown" => KeyToken::Word(KeyWord::PageDown),
+        "Backspace" => KeyToken::Word(KeyWord::Backspace),
+        "Delete" => KeyToken::Word(KeyWord::Delete),
+        "Insert" => KeyToken::Word(KeyWord::Insert),
+        "Home" => KeyToken::Word(KeyWord::Home),
+        "End" => KeyToken::Word(KeyWord::End),
+        "Copy" => KeyToken::Word(KeyWord::Copy),
+        "Cut" => KeyToken::Word(KeyWord::Cut),
+        "Paste" => KeyToken::Word(KeyWord::Paste),
+        "Colon" => KeyToken::Symbol(":"),
+        "Comma" => KeyToken::Symbol(","),
+        "Minus" => KeyToken::Symbol("-"),
+        "Period" => KeyToken::Symbol("."),
+        "Plus" => KeyToken::Symbol("+"),
+        "Equals" => KeyToken::Symbol("="),
+        "Semicolon" => KeyToken::Symbol(";"),
+        "Backslash" => KeyToken::Symbol("\\"),
+        "Slash" => KeyToken::Symbol("/"),
+        "Pipe" => KeyToken::Symbol("|"),
+        "Questionmark" => KeyToken::Symbol("?"),
+        "Exclamationmark" => KeyToken::Symbol("!"),
+        "OpenBracket" => KeyToken::Symbol("["),
+        "CloseBracket" => KeyToken::Symbol("]"),
+        "OpenCurlyBracket" => KeyToken::Symbol("{"),
+        "CloseCurlyBracket" => KeyToken::Symbol("}"),
+        "Backtick" => KeyToken::Symbol("`"),
+        "Quote" => KeyToken::Symbol("'"),
+        "BrowserBack" => KeyToken::Word(KeyWord::BrowserBack),
+        "ShiftLeft" => KeyToken::Word(KeyWord::ShiftLeft),
+        "ShiftRight" => KeyToken::Word(KeyWord::ShiftRight),
+        "ControlLeft" => KeyToken::Word(KeyWord::ControlLeft),
+        "ControlRight" => KeyToken::Word(KeyWord::ControlRight),
+        "AltLeft" => KeyToken::Word(KeyWord::AltLeft),
+        "AltRight" => KeyToken::Word(KeyWord::AltRight),
+        "SuperLeft" => KeyToken::Word(KeyWord::SuperLeft),
+        "SuperRight" => KeyToken::Word(KeyWord::SuperRight),
+        "IntlBackslash" => KeyToken::Word(KeyWord::IntlBackslash),
+        // Letters, digits and function keys print as their own name.
+        _ => KeyToken::Symbol(key.as_str()),
     }
 }

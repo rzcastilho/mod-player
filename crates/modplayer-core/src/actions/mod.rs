@@ -12,7 +12,7 @@ pub mod keymap;
 pub mod registry;
 
 pub use catalog::{ActionDef, CATALOG, HostAction, def};
-pub use chord::{Chord, KEY_NAMES, KeyName, Mods, Platform};
+pub use chord::{Chord, DisplayParts, KEY_NAMES, KeyName, KeyToken, KeyWord, Mods, Platform};
 pub use keymap::KeymapOverrides;
 pub use registry::{ActionLimit, ActionRegistry, ActionRow, RowCategory, RowLabel};
 
