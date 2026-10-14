@@ -161,7 +161,7 @@ pub fn show(
     let more_width = measure_button_width(ui, &more_label);
     let widths: Vec<f32> = SettingsCategory::ALL
         .iter()
-        .map(|category| measure_category_width(ui, &tr(category.label_key())))
+        .map(|category| measure_category_width(ui, *category))
         .collect();
     let gap = ui.spacing().item_spacing.x;
     let available = ui.available_width();
@@ -229,13 +229,13 @@ fn draw_category_item(
     row_height: f32,
     state: &mut CategoryRowState,
 ) -> bool {
-    let label = tr(category.label_key());
     let response = ui.add(
-        egui::Button::selectable(selected, theme::section_label(&label))
+        egui::Button::selectable(selected, category_item_job(ui, category, selected))
             .min_size(egui::vec2(0.0, row_height)),
     );
+    let name = category_a11y_name(category);
     ui.ctx().accesskit_node_builder(response.id, |b| {
-        b.set_label(label.clone());
+        b.set_label(name);
     });
     if selected && state.focus_after_close == Some(FocusTarget::Selected) {
         response.request_focus();
@@ -308,12 +308,12 @@ fn draw_more(
 
             for &idx in &partition.overflow {
                 let category = SettingsCategory::ALL[idx];
-                let label = tr(category.label_key());
-                let response = ui.button(label.clone());
+                let response = ui.button(category_item_job(ui, category, false));
 
+                let name = category_a11y_name(category);
                 ui.ctx().accesskit_node_builder(response.id, |b| {
                     b.set_role(Role::MenuItem);
-                    b.set_label(label);
+                    b.set_label(name);
                 });
                 actions::register_claim(
                     ui.ctx(),
@@ -393,12 +393,72 @@ fn row_item_height(ui: &Ui) -> f32 {
     content_height.max(ui.spacing().interact_size.y)
 }
 
-/// A category item's drawn width (research.md R6 point 2): the uppercased
-/// `section_label` galley, laid out with no wrap, plus `spacing.
-/// button_padding.x` on both sides — the exact box `ui.selectable_label`
-/// draws (`Button::selectable` uses the same padding).
-fn measure_category_width(ui: &Ui, label: &str) -> f32 {
-    let galley = egui::WidgetText::from(theme::section_label(label)).into_galley(
+/// A category item's text (F23): the uppercased `section_label`, plus — for
+/// a category with `!is_available()` — a `space::XS` gap and the
+/// `settings-coming-soon` badge in the secondary style and role (the
+/// button's own text colour while `selected`). Shared by
+/// the inline, pinned and "More" menu items and by
+/// [`measure_category_width`], so the badge always counts in `partition`.
+pub(crate) fn category_item_job(
+    ui: &Ui,
+    category: SettingsCategory,
+    selected: bool,
+) -> egui::text::LayoutJob {
+    use egui::text::{LayoutJob, TextFormat};
+    let roles = theme::tokens::roles(ui.visuals());
+    let label = tr(category.label_key());
+    let mut job = LayoutJob::default();
+    job.append(
+        &label.to_uppercase(),
+        0.0,
+        TextFormat {
+            font_id: egui::TextStyle::resolve(&theme::tokens::text::SECTION, ui.style()),
+            // PLACEHOLDER = take the button's own state-dependent text colour.
+            color: theme::tokens::INHERIT_TEXT_COLOR,
+            extra_letter_spacing: 0.52,
+            valign: Align::Center,
+            ..Default::default()
+        },
+    );
+    if !category.is_available() {
+        job.append(
+            &tr("settings-coming-soon"),
+            theme::tokens::space::XS,
+            TextFormat {
+                font_id: theme::secondary_font_id(),
+                // On the accent-filled selected item `text_secondary` is
+                // unreadable (~1:1); inherit the on-accent text colour.
+                color: if selected {
+                    theme::tokens::INHERIT_TEXT_COLOR
+                } else {
+                    roles.text_secondary
+                },
+                valign: Align::Center,
+                ..Default::default()
+            },
+        );
+    }
+    job
+}
+
+/// Accessible name of a category item: the exact label, or
+/// "{category}, coming soon" for an unavailable category (F23).
+fn category_a11y_name(category: SettingsCategory) -> String {
+    let label = tr(category.label_key());
+    if category.is_available() {
+        label
+    } else {
+        modplayer_core::tr_args("settings-category-coming-soon-a11y", &[("category", label)])
+    }
+}
+
+/// A category item's drawn width (research.md R6 point 2): the
+/// [`category_item_job`] galley (label plus any badge), laid out with no
+/// wrap, plus `spacing.button_padding.x` on both sides — the exact box
+/// `ui.selectable_label` draws (`Button::selectable` uses the same
+/// padding).
+fn measure_category_width(ui: &Ui, category: SettingsCategory) -> f32 {
+    let galley = egui::WidgetText::from(category_item_job(ui, category, false)).into_galley(
         ui,
         Some(egui::TextWrapMode::Extend),
         f32::INFINITY,
@@ -443,5 +503,35 @@ mod tests {
         assert_eq!(result.pinned, Some(3));
         assert!(!result.overflow.contains(&3));
         assert!(result.visible.iter().all(|&i| i < 3));
+    }
+
+    /// Manual walk M5 regression: the selected item is filled with the
+    /// accent role, and `text_secondary` on it measured ~1.04:1, so the
+    /// "Coming soon" badge vanished exactly when its category was open.
+    /// Selected, the badge takes the button's own (on-accent) text colour.
+    #[test]
+    fn badge_follows_the_selected_text_colour() {
+        let ctx = egui::Context::default();
+        theme::apply_tokens(&ctx);
+        let mut jobs = None;
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            jobs = Some((
+                category_item_job(ui, SettingsCategory::Offline, false),
+                category_item_job(ui, SettingsCategory::Offline, true),
+                theme::tokens::roles(ui.visuals()).text_secondary,
+            ));
+        });
+        output.drop_without_applying_deltas();
+        let Some((unselected, selected, secondary)) = jobs else {
+            panic!("run_ui ran no frame");
+        };
+        assert_eq!(unselected.sections.len(), 2);
+        assert_eq!(unselected.sections[1].format.color, secondary);
+        assert_eq!(selected.sections.len(), 2);
+        assert_eq!(
+            selected.sections[1].format.color,
+            theme::tokens::INHERIT_TEXT_COLOR
+        );
+        assert_eq!(unselected.text, selected.text, "same width either way");
     }
 }

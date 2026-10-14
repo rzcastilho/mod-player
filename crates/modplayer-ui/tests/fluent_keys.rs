@@ -523,19 +523,15 @@ const PLUGINS_KEYS: &[&str] = &[
     "plugins-title",
     "plugins-empty",
     "plugins-col-name",
-    "plugins-col-version",
     "plugins-col-source",
     "plugins-col-enabled",
     "plugins-col-health",
     "plugins-col-permissions",
-    "plugins-col-cpu",
-    "plugins-col-memory",
     "plugins-source-bundled",
     "plugins-health-ok",
     "plugins-health-warning",
     "plugins-health-suspended",
     "plugins-dash",
-    "plugins-list-separator",
     "permission-playback-observe",
     "permission-transport-control",
     "permission-queue-write",
@@ -590,8 +586,6 @@ const PLUGINS_KEYS: &[&str] = &[
 const PLUGINS_ARG_KEYS: &[&str] = &[
     "plugins-enable-toggle",
     "plugins-invalid-manifest",
-    "plugins-cpu",
-    "plugins-memory",
     "plugin-suspended",
     "plugin-auto-disabled",
     "plugin-panel-suspended",
@@ -720,7 +714,6 @@ const ACCOUNT_KEYS: &[&str] = &[
     "tier-free",
     "tier-unknown",
     "account-tier",
-    "account-never-validated",
     "account-signed-out",
     "account-sign-in",
     "account-recheck",
@@ -735,12 +728,7 @@ const ACCOUNT_KEYS: &[&str] = &[
 
 /// Account/notification keys that take a Fluent placeholder — resolved via
 /// `tr_args` with a stand-in value.
-const ACCOUNT_ARG_KEYS: &[&str] = &[
-    "signin-store-unavailable",
-    "account-display-name",
-    "account-last-validated",
-    "about-version",
-];
+const ACCOUNT_ARG_KEYS: &[&str] = &["signin-store-unavailable", "about-version"];
 
 /// Notification message keys that take a `{ $device }` placeholder
 /// (US3) — resolved via `tr_args` with a stand-in value, since a message
@@ -759,7 +747,6 @@ const DEVICE_NAMED_KEYS: &[&str] = &[
 /// seeded in Foundational (T027) and are not repeated here.
 const SEARCH_KEYS: &[&str] = &[
     "nav-search",
-    "search-placeholder",
     "search-offline",
     "search-group-tracks",
     "search-group-albums",
@@ -1353,6 +1340,10 @@ fn no_unused_keys_in_playback_and_settings_ftl() {
         .chain(TRANSPORT_GIVE_ARG_KEYS)
         .chain(TRANSPORT_REQUESTING_ARG_KEYS)
         .chain(TRANSPORT_ROW_A11Y_ARG_KEYS)
+        .chain(SETTINGS_028_PLAIN_KEYS)
+        .chain(SETTINGS_028_ARG_KEYS.iter().map(|(k, _)| k))
+        .chain(ONBOARDING_030_KEYS)
+        .chain(ONBOARDING_030_ARG_KEYS)
         .copied()
         .collect();
 
@@ -1568,4 +1559,746 @@ fn markers_heading_key_was_intentionally_consolidated() {
         "`markers-heading` is now defined in playback.ftl — either wire it up and add it to \
          `PLAYBACK_KEYS` above, or this test/comment is stale"
     );
+}
+
+/// 025-library-browsing-and-detail (contracts/fluent-strings.md): keys
+/// with no Fluent placeholder, resolved via plain `tr`.
+const LIBRARY_025_PLAIN_KEYS: &[&str] = &[
+    "detail-back",
+    "detail-play",
+    "detail-no-tracks-hint",
+    "detail-kind-artist",
+];
+
+/// 025: keys with placeholders, with the args to resolve each one.
+const LIBRARY_025_ARG_KEYS: &[(&str, &[&str])] = &[
+    ("detail-play-name", &["name"]),
+    ("detail-owner", &["name"]),
+    ("detail-top-track-count", &["count"]),
+    ("detail-runtime-minutes", &["minutes"]),
+    ("detail-runtime-hours", &["hours", "minutes"]),
+];
+
+/// 025: pt-BR-only keys (en-US values already exist from 004) with the
+/// placeholders both locales must share.
+const LIBRARY_025_PT_BR_ONLY_KEYS: &[&str] =
+    &["playlist-track-count", "row-actions", "playlist-no-tracks"];
+
+/// The sorted set of `$placeholder` names in `key`'s entry (its first line
+/// plus any indented/closing continuation lines).
+fn placeholders_of(ftl: &str, key: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_entry = false;
+    for line in ftl.lines() {
+        if in_entry {
+            let continues = line.starts_with(char::is_whitespace) || line.starts_with('}');
+            if !continues || line.trim().is_empty() {
+                break;
+            }
+        } else if line
+            .split_once(" = ")
+            .is_some_and(|(k, _)| k.trim() == key && !line.starts_with('#'))
+        {
+            in_entry = true;
+        } else {
+            continue;
+        }
+        let mut rest = line;
+        while let Some(i) = rest.find('$') {
+            let name: String = rest[i + 1..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                .collect();
+            out.push(name);
+            rest = &rest[i + 1..];
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// 025 (FR-012, NFR-7.1): every contract key resolves against en-US.
+#[test]
+fn library_025_keys_resolve() {
+    for key in LIBRARY_025_PLAIN_KEYS {
+        assert_ne!(
+            &tr(key),
+            key,
+            "`{key}` missing from locales/en-US/library.ftl"
+        );
+    }
+    for (key, args) in LIBRARY_025_ARG_KEYS {
+        let owned: Vec<(&str, String)> = args.iter().map(|a| (*a, "3".to_string())).collect();
+        assert_ne!(
+            &tr_args(key, &owned),
+            key,
+            "`{key}` missing from locales/en-US/library.ftl"
+        );
+    }
+    assert_eq!(tr("detail-back"), "‹ Library");
+}
+
+/// 025 (FR-012, NFR-7.1): every key exists in both en-US and pt-BR
+/// `library.ftl` with identical placeholders.
+#[test]
+fn library_025_keys_have_en_us_and_pt_br_parity() {
+    let en_us_ftl = include_str!("../../../locales/en-US/library.ftl");
+    let pt_br_ftl = include_str!("../../../locales/pt-BR/library.ftl");
+    let en_us_keys = defined_keys(en_us_ftl);
+    let pt_br_keys = defined_keys(pt_br_ftl);
+
+    let all = LIBRARY_025_PLAIN_KEYS
+        .iter()
+        .copied()
+        .chain(LIBRARY_025_ARG_KEYS.iter().map(|(k, _)| *k))
+        .chain(LIBRARY_025_PT_BR_ONLY_KEYS.iter().copied());
+    for key in all {
+        assert!(
+            en_us_keys.contains(key),
+            "`{key}` is missing from locales/en-US/library.ftl"
+        );
+        assert!(
+            pt_br_keys.contains(key),
+            "`{key}` is missing from locales/pt-BR/library.ftl"
+        );
+        assert_eq!(
+            placeholders_of(en_us_ftl, key),
+            placeholders_of(pt_br_ftl, key),
+            "`{key}` placeholders differ between en-US and pt-BR"
+        );
+    }
+}
+
+/// 026 (FR-012a, NFR-7.1): new plain search keys.
+const SEARCH_026_PLAIN_KEYS: &[&str] = &[
+    "search-field-label",
+    "search-hint",
+    "search-clear",
+    "search-in-flight",
+    "search-stale",
+    "search-rate-limited",
+];
+
+/// 026: new search keys taking placeholders, with their arg names.
+const SEARCH_026_ARG_KEYS: &[(&str, &[&str])] = &[
+    ("search-result-count", &["count"]),
+    ("search-group-header", &["group", "count"]),
+];
+
+/// 026 (T003): existing keys that gain a pt-BR value.
+const SEARCH_026_EXISTING_KEYS: &[&str] = &[
+    "search-offline",
+    "search-no-results",
+    "search-group-tracks",
+    "search-group-albums",
+    "search-group-artists",
+    "search-group-playlists",
+    "search-show-more",
+];
+
+/// 026 (FR-012a, NFR-7.1): every new key resolves, and the count keys pluralise.
+#[test]
+fn search_026_keys_resolve_and_pluralise() {
+    for key in SEARCH_026_PLAIN_KEYS {
+        assert_ne!(
+            &tr(key),
+            key,
+            "`{key}` missing from locales/en-US/library.ftl"
+        );
+    }
+    for (key, args) in SEARCH_026_ARG_KEYS {
+        let owned: Vec<(&str, String)> = args
+            .iter()
+            .map(|a| {
+                (
+                    *a,
+                    if *a == "group" {
+                        "Tracks".into()
+                    } else {
+                        "3".to_string()
+                    },
+                )
+            })
+            .collect();
+        assert_ne!(&tr_args(key, &owned), key, "`{key}` missing");
+    }
+    let count = |key: &str, n: &str| {
+        let mut a = vec![("count", n.to_string())];
+        if key == "search-group-header" {
+            a.push(("group", "Tracks".to_string()));
+        }
+        // Drop Fluent's bidi isolation marks around placeables.
+        tr_args(key, &a).replace(['\u{2068}', '\u{2069}'], "")
+    };
+    assert!(count("search-result-count", "1").contains("1 result"));
+    assert!(!count("search-result-count", "1").contains("results"));
+    assert!(count("search-result-count", "25").contains("25 results"));
+    assert!(count("search-group-header", "1").contains("Tracks, 1 result"));
+    assert!(count("search-group-header", "20").contains("Tracks, 20 results"));
+}
+
+/// 026 (FR-012a, NFR-7.1): en-US/pt-BR parity with identical placeholders,
+/// including the seven existing keys given pt-BR values.
+#[test]
+fn search_026_keys_have_en_us_and_pt_br_parity() {
+    let en_us_ftl = include_str!("../../../locales/en-US/library.ftl");
+    let pt_br_ftl = include_str!("../../../locales/pt-BR/library.ftl");
+    let en_us_keys = defined_keys(en_us_ftl);
+    let pt_br_keys = defined_keys(pt_br_ftl);
+    let all = SEARCH_026_PLAIN_KEYS
+        .iter()
+        .copied()
+        .chain(SEARCH_026_ARG_KEYS.iter().map(|(k, _)| *k))
+        .chain(SEARCH_026_EXISTING_KEYS.iter().copied());
+    for key in all {
+        assert!(
+            en_us_keys.contains(key),
+            "`{key}` missing from en-US library.ftl"
+        );
+        assert!(
+            pt_br_keys.contains(key),
+            "`{key}` missing from pt-BR library.ftl"
+        );
+        assert_eq!(
+            placeholders_of(en_us_ftl, key),
+            placeholders_of(pt_br_ftl, key),
+            "`{key}` placeholders differ between en-US and pt-BR"
+        );
+    }
+}
+
+/// 027 (contracts/fluent-strings.md): plugins-table keys with no variables.
+const PLUGINS_027_PLAIN_KEYS: &[&str] = &[
+    "plugins-health-ok",
+    "plugins-health-warning",
+    "plugins-health-suspended",
+    "plugins-col-resource",
+    "plugins-col-actions",
+    "plugins-resource-cpu-none",
+    "plugins-resource-memory-none",
+    "plugins-over-budget",
+    "plugins-suspended-reason-unknown",
+];
+
+/// 027: plugins-table keys with the variables both locales must share.
+const PLUGINS_027_ARG_KEYS: &[(&str, &[&str])] = &[
+    ("plugins-resource-cpu", &["used", "budget"]),
+    ("plugins-resource-memory", &["used", "budget"]),
+    ("plugins-permissions-show", &["count", "plugin"]),
+    ("plugins-permissions-hide", &["count", "plugin"]),
+    ("plugins-panels-count", &["count"]),
+    ("plugins-panels-show", &["plugin"]),
+    ("plugins-panels-hide", &["plugin"]),
+    ("plugins-panel-show-a11y", &["title", "plugin"]),
+    ("plugins-panel-hide-a11y", &["title", "plugin"]),
+    ("plugins-panel-enable-a11y", &["title", "plugin"]),
+    ("plugins-panel-disable-a11y", &["title", "plugin"]),
+    ("plugins-restart-a11y", &["plugin"]),
+];
+
+/// 027: every contract key resolves against en-US, with the new health words.
+#[test]
+fn plugins_027_keys_resolve() {
+    for key in PLUGINS_027_PLAIN_KEYS {
+        assert_ne!(
+            &tr(key),
+            key,
+            "`{key}` missing from locales/en-US/plugins.ftl"
+        );
+    }
+    for (key, args) in PLUGINS_027_ARG_KEYS {
+        let owned: Vec<(&str, String)> = args.iter().map(|a| (*a, "3".to_string())).collect();
+        assert_ne!(
+            &tr_args(key, &owned),
+            key,
+            "`{key}` missing from locales/en-US/plugins.ftl"
+        );
+    }
+    assert_eq!(tr("plugins-health-ok"), "healthy");
+    assert_eq!(tr("plugins-health-warning"), "degraded");
+    assert_eq!(tr("plugins-health-suspended"), "suspended");
+}
+
+/// 027 (NFR-7.1): every contract key exists in both en-US and pt-BR
+/// `plugins.ftl` with identical placeholders.
+#[test]
+fn plugins_027_keys_have_en_us_and_pt_br_parity() {
+    let en_us_ftl = include_str!("../../../locales/en-US/plugins.ftl");
+    let pt_br_ftl = include_str!("../../../locales/pt-BR/plugins.ftl");
+    let en_us_keys = defined_keys(en_us_ftl);
+    let pt_br_keys = defined_keys(pt_br_ftl);
+
+    let all = PLUGINS_027_PLAIN_KEYS
+        .iter()
+        .copied()
+        .chain(PLUGINS_027_ARG_KEYS.iter().map(|(k, _)| *k));
+    for key in all {
+        assert!(
+            en_us_keys.contains(key),
+            "`{key}` is missing from locales/en-US/plugins.ftl"
+        );
+        assert!(
+            pt_br_keys.contains(key),
+            "`{key}` is missing from locales/pt-BR/plugins.ftl"
+        );
+        assert_eq!(
+            placeholders_of(en_us_ftl, key),
+            placeholders_of(pt_br_ftl, key),
+            "`{key}` placeholders differ between en-US and pt-BR"
+        );
+    }
+    for (key, args) in PLUGINS_027_ARG_KEYS {
+        let mut expected: Vec<String> = args.iter().map(|a| (*a).to_string()).collect();
+        expected.sort();
+        assert_eq!(
+            placeholders_of(en_us_ftl, key),
+            expected,
+            "`{key}` variables differ from contracts/fluent-strings.md"
+        );
+    }
+}
+
+/// 028-settings-fields-and-account (contracts/fluent-strings.md): new
+/// `settings.ftl` keys with no placeholder, resolved via plain `tr`.
+const SETTINGS_028_PLAIN_KEYS: &[&str] = &[
+    "settings-group-output",
+    "settings-group-level-protection",
+    "settings-group-connect-device",
+    "settings-group-markers",
+    "settings-group-theme",
+    "settings-group-language",
+    "settings-reset",
+    "settings-coming-soon",
+    "settings-unavailable-offline",
+    "settings-unavailable-privacy-diagnostics",
+];
+
+/// 028: new `settings.ftl` keys with placeholders, with their argument names.
+const SETTINGS_028_ARG_KEYS: &[(&str, &[&str])] = &[
+    ("setting-value-dbfs", &["value"]),
+    ("setting-value-percent", &["value"]),
+    ("setting-value-ms", &["value"]),
+    ("setting-range-dbfs", &["min", "max"]),
+    ("setting-range-percent", &["min", "max"]),
+    ("setting-range-ms", &["min", "max"]),
+    ("settings-reset-a11y", &["field"]),
+    ("settings-category-coming-soon-a11y", &["category"]),
+];
+
+/// 028: new `account.ftl` keys with no placeholder.
+const ACCOUNT_028_PLAIN_KEYS: &[&str] = &[
+    "account-summary-title",
+    "account-identity-unavailable",
+    "account-tier-unverified",
+    "account-last-verified",
+    "account-never-verified",
+];
+
+/// 028: new `account.ftl` keys with placeholders.
+const ACCOUNT_028_ARG_KEYS: &[(&str, &[&str])] = &[(
+    "account-last-verified-at",
+    &["day", "month", "year", "time"],
+)];
+
+/// 028: `date-month-short-1` … `date-month-short-12`.
+fn month_keys() -> Vec<String> {
+    (1..=12).map(|n| format!("date-month-short-{n}")).collect()
+}
+
+/// 028 (FR-015, NFR-7.1): every new settings/account key resolves against
+/// en-US.
+#[test]
+fn settings_028_keys_resolve() {
+    for key in SETTINGS_028_PLAIN_KEYS.iter().chain(ACCOUNT_028_PLAIN_KEYS) {
+        assert_ne!(&tr(key), key, "`{key}` missing from locales/en-US");
+    }
+    for key in month_keys() {
+        assert_ne!(
+            tr(&key),
+            key,
+            "`{key}` missing from locales/en-US/account.ftl"
+        );
+    }
+    for (key, args) in SETTINGS_028_ARG_KEYS.iter().chain(ACCOUNT_028_ARG_KEYS) {
+        let owned: Vec<(&str, String)> = args.iter().map(|a| (*a, "3".to_string())).collect();
+        assert_ne!(
+            &tr_args(key, &owned),
+            key,
+            "`{key}` missing from locales/en-US"
+        );
+    }
+    assert_eq!(tr("settings-reset"), "Reset");
+    assert_eq!(tr("date-month-short-9"), "Sep");
+}
+
+/// 028 (F26, FR-015, NFR-7.1): every new key exists in both en-US and pt-BR
+/// with identical placeholders.
+#[test]
+fn settings_028_keys_have_en_us_and_pt_br_parity() {
+    let files: [(&str, &str, &str); 2] = [
+        (
+            "settings.ftl",
+            include_str!("../../../locales/en-US/settings.ftl"),
+            include_str!("../../../locales/pt-BR/settings.ftl"),
+        ),
+        (
+            "account.ftl",
+            include_str!("../../../locales/en-US/account.ftl"),
+            include_str!("../../../locales/pt-BR/account.ftl"),
+        ),
+    ];
+    let months = month_keys();
+    let keys_for = |name: &str| -> Vec<String> {
+        if name == "settings.ftl" {
+            SETTINGS_028_PLAIN_KEYS
+                .iter()
+                .copied()
+                .chain(SETTINGS_028_ARG_KEYS.iter().map(|(k, _)| *k))
+                .map(String::from)
+                .collect()
+        } else {
+            ACCOUNT_028_PLAIN_KEYS
+                .iter()
+                .copied()
+                .chain(ACCOUNT_028_ARG_KEYS.iter().map(|(k, _)| *k))
+                .map(String::from)
+                .chain(months.iter().cloned())
+                .collect()
+        }
+    };
+    for (name, en_us_ftl, pt_br_ftl) in files {
+        let en_us_keys = defined_keys(en_us_ftl);
+        let pt_br_keys = defined_keys(pt_br_ftl);
+        for key in keys_for(name) {
+            assert!(
+                en_us_keys.contains(key.as_str()),
+                "`{key}` is missing from locales/en-US/{name}"
+            );
+            assert!(
+                pt_br_keys.contains(key.as_str()),
+                "`{key}` is missing from locales/pt-BR/{name}"
+            );
+            assert_eq!(
+                placeholders_of(en_us_ftl, &key),
+                placeholders_of(pt_br_ftl, &key),
+                "`{key}` placeholders differ between en-US and pt-BR {name}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// 029-keyboard-shortcut-reference (F1-F5)
+// ---------------------------------------------------------------------
+
+const SHORTCUTS_029_KEYS: &[&str] = &[
+    "nav-keyboard-shortcuts",
+    "shortcuts-sheet-title",
+    "shortcuts-not-bound",
+    "shortcuts-open-printable",
+    "shortcuts-printable-error",
+    "shortcuts-printable-generated",
+    "shortcuts-printable-col-action",
+    "shortcuts-printable-col-shortcut",
+    "shortcuts-conflict-marker",
+    "controls-row",
+    "key-word-space",
+    "key-word-return",
+    "key-word-enter",
+    "key-word-esc",
+    "key-word-tab",
+    "key-word-backspace",
+    "key-word-delete",
+    "key-word-insert",
+    "key-word-home",
+    "key-word-end",
+    "key-word-page-up",
+    "key-word-page-down",
+    "key-word-copy",
+    "key-word-cut",
+    "key-word-paste",
+    "key-word-left",
+    "key-word-right",
+    "key-word-up",
+    "key-word-down",
+    "key-word-ctrl",
+    "key-word-shift",
+    "key-word-alt",
+    "key-word-browser-back",
+    "key-word-shift-left",
+    "key-word-shift-right",
+    "key-word-control-left",
+    "key-word-control-right",
+    "key-word-alt-left",
+    "key-word-alt-right",
+    "key-word-super-left",
+    "key-word-super-right",
+    "key-word-intl-backslash",
+    "key-spoken-command",
+    "key-spoken-option",
+    "key-spoken-arrow-left",
+    "key-spoken-arrow-right",
+    "key-spoken-arrow-up",
+    "key-spoken-arrow-down",
+    "key-spoken-colon",
+    "key-spoken-comma",
+    "key-spoken-minus",
+    "key-spoken-period",
+    "key-spoken-plus",
+    "key-spoken-equals",
+    "key-spoken-semicolon",
+    "key-spoken-backslash",
+    "key-spoken-slash",
+    "key-spoken-pipe",
+    "key-spoken-questionmark",
+    "key-spoken-exclamationmark",
+    "key-spoken-open-bracket",
+    "key-spoken-close-bracket",
+    "key-spoken-open-curly",
+    "key-spoken-close-curly",
+    "key-spoken-backtick",
+    "key-spoken-quote",
+];
+
+/// 029 (F1): every new key resolves under en-US to a real string.
+#[test]
+fn shortcuts_029_keys_resolve() {
+    for key in SHORTCUTS_029_KEYS
+        .iter()
+        .chain(["getting-started-shortcuts"].iter())
+    {
+        let args: Vec<(&'static str, String)> = match *key {
+            "shortcuts-printable-generated" => vec![("date", "2026-10-09".to_string())],
+            "controls-row" => vec![
+                ("action", "Play".to_string()),
+                ("bindings", "Space".to_string()),
+            ],
+            _ => Vec::new(),
+        };
+        let resolved = if args.is_empty() {
+            tr(key)
+        } else {
+            tr_args(key, &args)
+        };
+        assert_ne!(&resolved, key, "`{key}` does not resolve under en-US");
+        assert!(!resolved.trim().is_empty(), "`{key}` resolves to empty");
+    }
+}
+
+/// 029 (F2): parity between en-US and pt-BR, same placeholders.
+#[test]
+fn shortcuts_029_keys_have_en_us_and_pt_br_parity() {
+    let pairs = [
+        (
+            include_str!("../../../locales/en-US/shortcuts.ftl"),
+            include_str!("../../../locales/pt-BR/shortcuts.ftl"),
+            SHORTCUTS_029_KEYS,
+        ),
+        (
+            include_str!("../../../locales/en-US/app.ftl"),
+            include_str!("../../../locales/pt-BR/app.ftl"),
+            &[
+                "getting-started-title",
+                "getting-started-section-loop",
+                "getting-started-key-tempo",
+                "getting-started-tutorial",
+                "getting-started-dismiss",
+                "getting-started-shortcuts",
+            ][..],
+        ),
+    ];
+    for (en_ftl, pt_ftl, keys) in pairs {
+        let en_defined = defined_keys(en_ftl);
+        let pt_defined = defined_keys(pt_ftl);
+        for key in keys {
+            assert!(en_defined.contains(key), "`{key}` missing from en-US");
+            assert!(pt_defined.contains(key), "`{key}` missing from pt-BR");
+            assert_eq!(
+                placeholders_of(en_ftl, key),
+                placeholders_of(pt_ftl, key),
+                "`{key}` placeholders differ between en-US and pt-BR"
+            );
+        }
+    }
+}
+
+/// 029 (F3): no orphan `KeyWord` variant: both Fluent keys are defined.
+#[test]
+fn every_key_word_has_a_string() {
+    for word in modplayer_core::actions::KeyWord::ALL {
+        for key in [word.fluent_key(), word.spoken_key()] {
+            assert!(
+                SHORTCUTS_029_KEYS.contains(&key),
+                "{word:?}: `{key}` is not in the contract key table"
+            );
+            assert_ne!(tr(key), key, "{word:?}: `{key}` does not resolve");
+        }
+    }
+}
+
+/// 029 (F4): the Getting Started card no longer carries shortcut prose.
+#[test]
+fn getting_started_has_no_shortcut_prose() {
+    let en = include_str!("../../../locales/en-US/app.ftl");
+    let pt = include_str!("../../../locales/pt-BR/app.ftl");
+    for (ftl, banned) in [(en, "Shortcuts:"), (pt, "Atalhos:")] {
+        for line in ftl.lines().filter(|l| l.starts_with("getting-started-")) {
+            assert!(!line.contains(banned), "shortcut prose in: {line}");
+        }
+    }
+}
+
+/// Whether `literal` (the text between the quotes) is allowed in the
+/// 029 UI modules: a Fluent key / identifier / file name (lowercase, digits,
+/// `-`, `_`, `.`), a canonical `KEY_NAMES` entry (identifier, not display
+/// text), a BCP 47 locale tag, markup or CSS (contains `<` or `{`, or is an
+/// HTML entity), or has no run of two letters (typographic constants: `+`,
+/// modifier symbols, punctuation).
+fn literal_is_allowed(literal: &str) -> bool {
+    if modplayer_core::KEY_NAMES.contains(&literal) {
+        return true;
+    }
+    if literal.contains('<') || literal.contains('{') || literal.contains("%s") {
+        return true;
+    }
+    if literal.starts_with('&') && literal.ends_with(';') {
+        return true;
+    }
+    // A BCP 47 locale tag such as `en-US` (an identifier, not display text).
+    if let Some((lang, region)) = literal.split_once('-')
+        && (2..=3).contains(&lang.len())
+        && lang.chars().all(|c| c.is_ascii_lowercase())
+        && region.len() == 2
+        && region.chars().all(|c| c.is_ascii_uppercase())
+    {
+        return true;
+    }
+    if !literal.is_empty()
+        && literal
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.'))
+    {
+        return true;
+    }
+    let mut run = 0;
+    for c in literal.chars() {
+        if c.is_alphabetic() {
+            run += 1;
+            if run >= 2 {
+                return false;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    true
+}
+
+/// 029 (F5): the new UI modules hold no literal user-facing strings.
+#[test]
+fn shortcut_modules_contain_no_user_facing_literals() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for name in ["key_label.rs", "shortcut_groups.rs", "shortcut_sheet.rs"] {
+        let text =
+            std::fs::read_to_string(root.join(name)).unwrap_or_else(|e| panic!("read {name}: {e}"));
+        // Everything after the unit-test module is test code.
+        let code = text.split("#[cfg(test)]").next().unwrap_or("");
+        for (n, line) in code.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            // A `'"'` char literal is not the start of a string.
+            let unquoted = trimmed.replace("'\"'", "' '");
+            let mut rest = unquoted.as_str();
+            while let Some(start) = rest.find('"') {
+                let after = &rest[start + 1..];
+                let mut end = None;
+                let mut escaped = false;
+                for (i, c) in after.char_indices() {
+                    if escaped {
+                        escaped = false;
+                    } else if c == '\\' {
+                        escaped = true;
+                    } else if c == '"' {
+                        end = Some(i);
+                        break;
+                    }
+                }
+                let Some(end) = end else { break };
+                let literal = &after[..end];
+                assert!(
+                    literal_is_allowed(literal),
+                    "{name}:{}: user-facing literal {literal:?} (use Fluent)",
+                    n + 1
+                );
+                rest = &after[end + 1..];
+            }
+        }
+    }
+}
+
+/// 030-onboarding-clarity (contracts/fluent-strings.md F1): every
+/// argument-free new key resolves to a non-key value.
+const ONBOARDING_030_KEYS: &[&str] = &[
+    "privacy-back-to-welcome",
+    "privacy-back-to-about",
+    "signin-waiting-indicator",
+    "signin-browser-hint",
+    "signin-summary-title",
+    "signin-summary-continue",
+    "signin-summary-switch",
+    "device-check-back",
+    "setting-show-getting-started",
+    "setting-show-getting-started-desc",
+    "setting-show-getting-started-visible",
+];
+
+/// 030-onboarding-clarity: new keys that take arguments (F2).
+const ONBOARDING_030_ARG_KEYS: &[&str] = &[
+    "signin-waiting-elapsed-seconds",
+    "signin-waiting-elapsed-minutes",
+    "signin-summary-identity",
+];
+
+#[test]
+fn onboarding_030_keys_resolve() {
+    for key in ONBOARDING_030_KEYS {
+        let resolved = tr(key);
+        assert_ne!(&resolved, key, "Fluent key `{key}` did not resolve");
+        assert!(!resolved.trim().is_empty(), "Fluent key `{key}` is empty");
+    }
+}
+
+#[test]
+fn onboarding_030_plural_and_identity_keys() {
+    let n = |key: &str, c: &str| {
+        // Fluent wraps placeables in bidi isolation marks.
+        tr_args(key, &[("count", c.to_string())]).replace(['\u{2068}', '\u{2069}'], "")
+    };
+    assert_eq!(
+        n("signin-waiting-elapsed-seconds", "1"),
+        "Waiting for 1 second"
+    );
+    assert!(n("signin-waiting-elapsed-seconds", "2").ends_with("2 seconds"));
+    assert_eq!(
+        n("signin-waiting-elapsed-minutes", "1"),
+        "Waiting for 1 minute"
+    );
+    assert!(n("signin-waiting-elapsed-minutes", "2").ends_with("2 minutes"));
+    assert!(tr_args("signin-summary-identity", &[("name", "Alex".to_string())]).contains("Alex"));
+}
+
+/// F3 (C2): no new key is defined in the hashed `disclosure.ftl`.
+#[test]
+fn onboarding_030_keys_not_in_disclosure_ftl() {
+    let disclosure = include_str!("../../../locales/en-US/disclosure.ftl");
+    let defined = defined_keys(disclosure);
+    for key in ONBOARDING_030_KEYS.iter().chain(ONBOARDING_030_ARG_KEYS) {
+        assert!(
+            !defined.contains(key),
+            "`{key}` must not be defined in disclosure.ftl (C2)"
+        );
+    }
 }

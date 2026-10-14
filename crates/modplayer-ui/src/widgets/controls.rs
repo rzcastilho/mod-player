@@ -33,8 +33,25 @@ use crate::theme::{controls, tokens};
 /// egui shrink the label's text inside the button instead of moving the
 /// whole button to the next line — never what this design system wants.
 pub fn button(ui: &mut Ui, variant: controls::Variant, text: impl Into<RichText>) -> Response {
+    button_over(ui, variant, text, None)
+}
+
+/// [`button`] drawn over a non-default surface: `over = Some((surface,
+/// label))` replaces the resting surface the hover/pressed blend starts
+/// from and the label colour — for a Quiet control sitting on an `accent`
+/// selected row, whose `text_primary` label would fail the 4.5:1 floor
+/// (025, US3).
+pub fn button_over(
+    ui: &mut Ui,
+    variant: controls::Variant,
+    text: impl Into<RichText>,
+    over: Option<(Color32, Color32)>,
+) -> Response {
     let roles = tokens::roles(ui.visuals());
-    let paint = controls::variant_paint(roles, variant);
+    let mut paint = controls::variant_paint(roles, variant);
+    if let Some((_, label)) = over {
+        paint.label = label;
+    }
 
     // `next_auto_id()` and `ui.add(...)` below must stay adjacent
     // (research R4/R7): nothing that allocates a widget id may run
@@ -47,7 +64,7 @@ pub fn button(ui: &mut Ui, variant: controls::Variant, text: impl Into<RichText>
         .is_some_and(Response::is_pointer_button_down_on);
 
     let resting = if paint.fill == Color32::TRANSPARENT {
-        roles.surface_base
+        over.map_or(roles.surface_base, |(surface, _)| surface)
     } else {
         paint.fill
     };
@@ -88,6 +105,23 @@ pub enum SwitchKind {
 /// (research R1). `kind` controls only the reported accessible role
 /// (data-model.md §8); the visual is identical either way.
 pub fn switch(ui: &mut Ui, kind: SwitchKind, on: &mut bool, label: &str) -> Response {
+    switch_impl(ui, kind, on, label, true)
+}
+
+/// [`switch`] without the visible label: the track alone is drawn and
+/// `label` remains the control's accessible name. For table cells too
+/// narrow to hold the label text (027 plugins table, Enabled column).
+pub fn switch_bare(ui: &mut Ui, kind: SwitchKind, on: &mut bool, label: &str) -> Response {
+    switch_impl(ui, kind, on, label, false)
+}
+
+fn switch_impl(
+    ui: &mut Ui,
+    kind: SwitchKind,
+    on: &mut bool,
+    label: &str,
+    show_label: bool,
+) -> Response {
     let roles = tokens::roles(ui.visuals());
     let metrics = controls::switch_metrics();
 
@@ -97,7 +131,7 @@ pub fn switch(ui: &mut Ui, kind: SwitchKind, on: &mut bool, label: &str) -> Resp
     // know that block's width up front (024 contract R5, T043 M8 — a Stereo
     // tools row's last switch ran past the window). Same measure as
     // `now_playing::wrap_switch_before`: track + item spacing + label galley.
-    if ui.layout().main_wrap && ui.cursor().min.x > ui.max_rect().left() {
+    if show_label && ui.layout().main_wrap && ui.cursor().min.x > ui.max_rect().left() {
         let galley = egui::WidgetText::from(label).into_galley(
             ui,
             None,
@@ -144,7 +178,9 @@ pub fn switch(ui: &mut Ui, kind: SwitchKind, on: &mut bool, label: &str) -> Resp
                 controls::switch_thumb(roles, *on),
             );
         }
-        ui.label(label);
+        if show_label {
+            ui.label(label);
+        }
     });
 
     let rect = inner.response.rect;

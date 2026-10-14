@@ -26,6 +26,9 @@ sha2 = "0.10"
 base64 = "0.22"
 getrandom = "0.3"
 time = "0.3"
+# modplayer-ui only (028-settings-fields-and-account): local-time "last verified" date
+# in the Account summary. Already in Cargo.lock via oauth2.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # modplayer-ui only (004-search-and-library-browse, research R13): decode
 # artwork fetched from the public CDN. JPEG for CDN artwork; PNG for
 # plugin-provided icons/glyphs (011-plugin-ui-contributions, research R11).

@@ -14,7 +14,7 @@ use modplayer_core::actions::{
 use modplayer_core::plugins::PluginId;
 use modplayer_core::{
     ActionKind, ActionRegistry, BindingError, CATALOG, Chord, ChordParseError, HostAction,
-    KEY_NAMES, KeyName, KeymapOverrides, Mods, Platform, Scope, ScopeState, def,
+    KEY_NAMES, KeyName, KeyToken, KeymapOverrides, Mods, Platform, Scope, ScopeState, def,
 };
 use proptest::prelude::*;
 
@@ -524,8 +524,12 @@ fn chord_display_mac_and_other() {
     assert_eq!(c.display(Platform::Mac), "⌘⇧→");
     assert_eq!(c.display(Platform::Other), "Ctrl+Shift+Right");
 
+    let c = chord("Primary+Shift+Alt+L");
+    assert_eq!(c.display(Platform::Mac), "⌘⇧⌥L");
+    assert_eq!(c.display(Platform::Other), "Ctrl+Shift+Alt+L");
+
     let c = chord("Shift+Space");
-    assert_eq!(c.display(Platform::Mac), "⇧␣");
+    assert_eq!(c.display(Platform::Mac), "⇧Space");
     assert_eq!(c.display(Platform::Other), "Shift+Space");
 
     let c = chord("I");
@@ -534,7 +538,134 @@ fn chord_display_mac_and_other() {
 
     let c = chord("Slash");
     assert_eq!(c.display(Platform::Mac), "/");
-    assert_eq!(c.display(Platform::Other), "Slash");
+    assert_eq!(c.display(Platform::Other), "/");
+
+    let c = chord("Enter");
+    assert_eq!(c.display(Platform::Mac), "Return");
+    assert_eq!(c.display(Platform::Other), "Enter");
+
+    let c = chord("Escape");
+    assert_eq!(c.display(Platform::Mac), "Esc");
+    assert_eq!(c.display(Platform::Other), "Esc");
+}
+
+#[test]
+fn space_and_specials_are_words() {
+    for platform in [Platform::Mac, Platform::Other] {
+        assert_eq!(chord("Space").display(platform), "Space");
+        for name in ["Space", "Enter", "Escape", "Tab"] {
+            let label = chord(name).display(platform);
+            for banned in ['␣', '⏎', '⎋', '⇥'] {
+                assert!(!label.contains(banned), "{label} contains {banned}");
+            }
+        }
+    }
+}
+
+#[test]
+fn display_label_table_matches_data_model() {
+    // (key name, Mac label, Other label) — data-model §1.2.
+    let rows: &[(&str, &str, &str)] = &[
+        ("Space", "Space", "Space"),
+        ("Enter", "Return", "Enter"),
+        ("Escape", "Esc", "Esc"),
+        ("Tab", "Tab", "Tab"),
+        ("Left", "←", "Left"),
+        ("Right", "→", "Right"),
+        ("Up", "↑", "Up"),
+        ("Down", "↓", "Down"),
+        ("PageUp", "Page Up", "Page Up"),
+        ("PageDown", "Page Down", "Page Down"),
+        ("Backspace", "Backspace", "Backspace"),
+        ("Delete", "Delete", "Delete"),
+        ("Insert", "Insert", "Insert"),
+        ("Home", "Home", "Home"),
+        ("End", "End", "End"),
+        ("Copy", "Copy", "Copy"),
+        ("Cut", "Cut", "Cut"),
+        ("Paste", "Paste", "Paste"),
+        ("Colon", ":", ":"),
+        ("Comma", ",", ","),
+        ("Minus", "-", "-"),
+        ("Period", ".", "."),
+        ("Plus", "+", "+"),
+        ("Equals", "=", "="),
+        ("Semicolon", ";", ";"),
+        ("Backslash", "\\", "\\"),
+        ("Slash", "/", "/"),
+        ("Pipe", "|", "|"),
+        ("Questionmark", "?", "?"),
+        ("Exclamationmark", "!", "!"),
+        ("OpenBracket", "[", "["),
+        ("CloseBracket", "]", "]"),
+        ("OpenCurlyBracket", "{", "{"),
+        ("CloseCurlyBracket", "}", "}"),
+        ("Backtick", "`", "`"),
+        ("Quote", "'", "'"),
+        ("0", "0", "0"),
+        ("9", "9", "9"),
+        ("A", "A", "A"),
+        ("Z", "Z", "Z"),
+        ("F1", "F1", "F1"),
+        ("F35", "F35", "F35"),
+        ("BrowserBack", "Browser Back", "Browser Back"),
+        ("ShiftLeft", "Left Shift", "Left Shift"),
+        ("ShiftRight", "Right Shift", "Right Shift"),
+        ("ControlLeft", "Left Ctrl", "Left Ctrl"),
+        ("ControlRight", "Right Ctrl", "Right Ctrl"),
+        ("AltLeft", "Left Alt", "Left Alt"),
+        ("AltRight", "Right Alt", "Right Alt"),
+        ("SuperLeft", "Left Super", "Left Super"),
+        ("SuperRight", "Right Super", "Right Super"),
+        ("IntlBackslash", "Intl Backslash", "Intl Backslash"),
+    ];
+    for (name, mac, other) in rows {
+        let c = chord(name);
+        assert_eq!(c.display(Platform::Mac), *mac, "mac {name}");
+        assert_eq!(c.display(Platform::Other), *other, "other {name}");
+    }
+}
+
+fn mods_from_bits(bits: u8) -> Mods {
+    Mods {
+        primary: bits & 1 != 0,
+        shift: bits & 2 != 0,
+        alt: bits & 4 != 0,
+    }
+}
+
+proptest! {
+    #[test]
+    fn display_parts_total(c in chord_strategy()) {
+        for platform in [Platform::Mac, Platform::Other] {
+            let parts = c.display_parts(platform);
+            prop_assert!(parts.mods.len() <= 3);
+            prop_assert!(!c.display(platform).is_empty());
+            let tokens: Vec<KeyToken> = parts.tokens().collect();
+            prop_assert_eq!(tokens.len(), parts.mods.len() + 1);
+            let sep = if platform == Platform::Mac { "" } else { "+" };
+            prop_assert_eq!(parts.separator(), sep);
+            prop_assert_eq!(c.display(platform), parts.to_en_string());
+        }
+    }
+
+    #[test]
+    fn symbols_in_covered_set(bits in 0u8..8, key_idx in 0..KEY_NAMES.len()) {
+        let key = KeyName::parse(KEY_NAMES[key_idx]).unwrap_or_else(|| unreachable!());
+        let c = Chord::new(mods_from_bits(bits), key);
+        for platform in [Platform::Mac, Platform::Other] {
+            for token in c.display_parts(platform).tokens() {
+                if let KeyToken::Symbol(s) = token {
+                    for ch in s.chars() {
+                        prop_assert!(
+                            ch.is_ascii_graphic() || "⌘⇧⌥←→↑↓".contains(ch),
+                            "symbol {s:?} of {} outside covered set", c.encode()
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------

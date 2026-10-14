@@ -335,3 +335,32 @@ fn drain_until<F: FnMut(&mut AccountService) -> bool>(
     }
     events
 }
+
+/// 029 S4: the getting-started card offers a "Keyboard shortcuts" link
+/// that reports `OpenShortcuts`, leaving Dismiss and Tutorial distinct.
+#[test]
+fn getting_started_offers_a_shortcuts_link() {
+    use egui::accesskit::Role;
+    use modplayer_core::tr;
+    use modplayer_ui::getting_started::{self, GettingStartedOutcome};
+
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        assert_eq!(getting_started::show(ui), GettingStartedOutcome::None);
+    });
+    let update = output.platform_output.accesskit_update.take().unwrap();
+    output.drop_without_applying_deltas();
+    let label = tr("getting-started-shortcuts");
+    assert!(
+        update
+            .nodes
+            .iter()
+            .any(|(_, n)| n.role() == Role::Link && n.label() == Some(label.as_str())),
+        "shortcuts control must be a Link"
+    );
+    assert_ne!(
+        GettingStartedOutcome::OpenShortcuts,
+        GettingStartedOutcome::OpenTutorial
+    );
+}

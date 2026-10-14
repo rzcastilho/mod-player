@@ -151,7 +151,7 @@ fn a_reply_for_an_older_generation_is_discarded() {
     let _ = expect_one_search_command(session.tick(t0 + Duration::from_millis(400)));
 
     // The stale reply must not touch the (now second-generation) state.
-    session.apply_reply(request_id, Ok(full_page(3)));
+    session.apply_reply(request_id, Ok(full_page(3)), t0);
     assert_eq!(session.group(SearchKind::Track), &GroupState::Pending);
 }
 
@@ -183,7 +183,7 @@ fn groups_iterate_in_the_fixed_order_regardless_of_reply_order() {
         ],
         unsupported: vec![SearchKind::Artist],
     };
-    session.apply_reply(request_id, Ok(page));
+    session.apply_reply(request_id, Ok(page), t0);
 
     let order: Vec<SearchKind> = session.groups().map(|(kind, _)| kind).collect();
     assert_eq!(
@@ -215,7 +215,7 @@ fn all_four_groups_empty_is_the_no_results_state() {
     let SourceCommand::SearchCatalog { request_id, .. } = cmd else {
         unreachable!()
     };
-    session.apply_reply(request_id, Ok(full_page(0)));
+    session.apply_reply(request_id, Ok(full_page(0)), t0);
     assert!(session.is_no_results());
 }
 
@@ -232,7 +232,7 @@ fn show_more_requests_the_next_offset_and_appends_on_reply() {
     };
     let mut page = full_page(20);
     page.groups[0].next_offset = Some(20);
-    session.apply_reply(request_id, Ok(page));
+    session.apply_reply(request_id, Ok(page), t0);
 
     let cmd = session
         .show_more(SearchKind::Track)
@@ -263,7 +263,7 @@ fn show_more_requests_the_next_offset_and_appends_on_reply() {
         unsupported: vec![],
     };
     second_page.groups[0].next_offset = None;
-    session.apply_reply(page_request_id, Ok(second_page));
+    session.apply_reply(page_request_id, Ok(second_page), t0);
 
     let GroupState::Loaded {
         items,
@@ -295,12 +295,16 @@ fn rate_limited_initial_reply_marks_every_pending_group_refreshing() {
         Err(CatalogError::RateLimited {
             retry_after_ms: Some(2_000),
         }),
+        t0,
     );
 
     assert!(session.refreshing());
     assert_eq!(
         session.group(SearchKind::Track),
-        &GroupState::RateLimited { stale: None }
+        &GroupState::RateLimited {
+            stale: None,
+            resume_offset: None
+        }
     );
 }
 
@@ -315,7 +319,7 @@ fn rate_limited_show_more_reply_keeps_the_previous_page_as_stale() {
     };
     let mut page = full_page(5);
     page.groups[0].next_offset = Some(20);
-    session.apply_reply(request_id, Ok(page));
+    session.apply_reply(request_id, Ok(page), t0);
 
     let cmd = session
         .show_more(SearchKind::Track)
@@ -333,10 +337,11 @@ fn rate_limited_show_more_reply_keeps_the_previous_page_as_stale() {
         Err(CatalogError::RateLimited {
             retry_after_ms: None,
         }),
+        t0,
     );
 
     assert!(session.refreshing());
-    let GroupState::RateLimited { stale } = session.group(SearchKind::Track) else {
+    let GroupState::RateLimited { stale, .. } = session.group(SearchKind::Track) else {
         panic!("expected RateLimited after a show-more rate limit");
     };
     assert_eq!(
@@ -375,7 +380,7 @@ fn an_in_flight_reply_is_discarded_while_offline() {
     };
 
     session.set_offline(true);
-    session.apply_reply(request_id, Ok(full_page(3)));
+    session.apply_reply(request_id, Ok(full_page(3)), t0);
 
     assert_eq!(
         session.group(SearchKind::Track),

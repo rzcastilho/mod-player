@@ -24,6 +24,7 @@ use modplayer_engine::Theme;
 
 pub mod contrast;
 pub mod controls;
+pub mod fonts;
 pub mod markers;
 pub mod style;
 pub mod tokens;
@@ -69,6 +70,7 @@ pub fn apply_tokens(ctx: &Context) {
 /// frame (contract A2), so a toggle is visible on the very next frame
 /// with no flash of the old tables.
 pub fn apply_tokens_for(ctx: &Context, high_contrast: bool) {
+    fonts::ensure_installed(ctx);
     let styles = STYLES.get_or_init(|| {
         [
             Arc::new(style::build_style(EguiTheme::Light, false)),

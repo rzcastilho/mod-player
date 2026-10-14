@@ -819,7 +819,7 @@ fn show_placeholder<B: OutputBackend, H: SourceHost>(
     }
 }
 
-const fn cause_key(cause: SuspendCause) -> &'static str {
+pub(crate) const fn cause_key(cause: SuspendCause) -> &'static str {
     match cause {
         SuspendCause::Hang => "plugin-suspended-cause-hang",
         SuspendCause::CpuShare => "plugin-suspended-cause-cpu-share",

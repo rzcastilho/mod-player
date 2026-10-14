@@ -1,0 +1,24 @@
+# Tool versions and task shortcuts for this repo. Keep `rust` in sync with
+# rust-toolchain.toml and .github/workflows/ci.yml.
+[tools]
+rust = { version = "1.95.0", components = "rustfmt,clippy" }
+
+[tasks.fmt]
+description = "Check formatting"
+run = "cargo fmt --all --check"
+
+[tasks.clippy]
+description = "Lint the workspace"
+run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+
+[tasks.test]
+description = "Run the workspace tests"
+run = "cargo test --workspace"
+
+[tasks.licenses]
+description = "Check SPDX license headers"
+run = "scripts/check-license-headers.sh"
+
+[tasks.ci]
+description = "Run the local equivalent of CI"
+depends = ["fmt", "clippy", "test", "licenses"]

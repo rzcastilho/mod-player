@@ -800,3 +800,401 @@ fn l7_actions_button_rect_is_contained_by_the_row_rect() {
         "the \"…\" button rect {button_rect:?} must be contained by the row rect {row_rect:?}"
     );
 }
+
+// ---------------------------------------------------------------------
+// 025 US3 — row actions stay with their row, quietly, by keyboard
+// (contracts/row-actions-menu.md RM1-RM8)
+// ---------------------------------------------------------------------
+
+fn row_input(width: f32, mut events: Vec<Event>) -> RawInput {
+    // egui 0.36 takes `InputState::modifiers` from `ModifiersChanged`.
+    let modifiers = events
+        .iter()
+        .find_map(|e| match e {
+            Event::Key { modifiers, .. } => Some(*modifiers),
+            _ => None,
+        })
+        .unwrap_or(Modifiers::NONE);
+    events.insert(0, Event::ModifiersChanged(modifiers));
+    RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(width, 600.0))),
+        events,
+        ..Default::default()
+    }
+}
+
+fn key_event(key: egui::Key, modifiers: Modifiers) -> Event {
+    Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers,
+    }
+}
+
+fn click_events(pos: Pos2) -> [Vec<Event>; 2] {
+    let at = |pressed| {
+        vec![Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        }]
+    };
+    [at(true), at(false)]
+}
+
+/// Labelled rects of every accesskit node in `output`, plus the label of
+/// the node holding focus.
+struct Nodes {
+    nodes: Vec<(Role, String, Rect)>,
+    focused: Option<(Role, String)>,
+}
+
+fn read_nodes(mut output: egui::FullOutput) -> Nodes {
+    let update = output
+        .platform_output
+        .accesskit_update
+        .take()
+        .expect("accesskit_update should be populated once enabled");
+    output.drop_without_applying_deltas();
+    let nodes = update
+        .nodes
+        .iter()
+        .filter_map(|(_, n)| {
+            let b = n.bounds()?;
+            Some((
+                n.role(),
+                n.label().unwrap_or_default().to_string(),
+                Rect::from_min_max(
+                    Pos2::new(b.x0 as f32, b.y0 as f32),
+                    Pos2::new(b.x1 as f32, b.y1 as f32),
+                ),
+            ))
+        })
+        .collect();
+    let focused = update
+        .nodes
+        .iter()
+        .find(|(id, _)| *id == update.focus)
+        .map(|(_, n)| (n.role(), n.label().unwrap_or_default().to_string()));
+    Nodes { nodes, focused }
+}
+
+impl Nodes {
+    fn rect(&self, role: Role, label: &str) -> Rect {
+        self.nodes
+            .iter()
+            .find(|(r, l, _)| *r == role && l == label)
+            .map(|(_, _, rect)| *rect)
+            .unwrap_or_else(|| panic!("expected a {role:?} node named {label:?}"))
+    }
+
+    fn menu_items(&self) -> Vec<&(Role, String, Rect)> {
+        let mut items: Vec<_> = self
+            .nodes
+            .iter()
+            .filter(|(r, _, _)| *r == Role::MenuItem)
+            .collect();
+        // Accesskit node order is not layout order: sort top to bottom.
+        items.sort_by(|a, b| a.2.min.y.total_cmp(&b.2.min.y));
+        items
+    }
+}
+
+struct RowHarness {
+    ctx: Context,
+    cache: ArtworkCache,
+    entity: RowEntity,
+    name: String,
+    opener: String,
+    width: f32,
+}
+
+impl RowHarness {
+    fn new(entity: RowEntity, width: f32) -> Self {
+        let ctx = Context::default();
+        ctx.enable_accesskit();
+        let name = rows::accessible_name(&entity);
+        let opener = modplayer_core::tr_args("row-actions", &[("name", name.clone())]);
+        Self {
+            ctx,
+            cache: ArtworkCache::new(),
+            entity,
+            name,
+            opener,
+            width,
+        }
+    }
+
+    /// Run one frame with `events`, then one empty settling frame (egui
+    /// popups size themselves a frame after opening). Returns the row event
+    /// of the first frame and the accesskit nodes of the settled one.
+    fn frame(&mut self, events: Vec<Event>) -> (Option<RowEvent>, Nodes) {
+        let mut event = None;
+        self.ctx
+            .run_ui(row_input(self.width, events), |ui| {
+                event = list_row(ui, &mut self.cache, &self.entity, false);
+            })
+            .drop_without_applying_deltas();
+        let output = self.ctx.run_ui(row_input(self.width, vec![]), |ui| {
+            let _ = list_row(ui, &mut self.cache, &self.entity, false);
+        });
+        (event, read_nodes(output))
+    }
+
+    /// Click the row body (selects + focuses the row).
+    fn focus_row(&mut self) {
+        let (_, nodes) = self.frame(vec![]);
+        let rect = nodes.rect(Role::ListItem, &self.name);
+        let [down, up] = click_events(rect.center());
+        self.frame(down);
+        self.frame(up);
+    }
+
+    /// Focus the row and open its menu with Shift+F10.
+    fn open_via_shift_f10(&mut self) -> Nodes {
+        self.focus_row();
+        self.frame(vec![key_event(egui::Key::F10, Modifiers::SHIFT)])
+            .1
+    }
+
+    fn focused_item_index(nodes: &Nodes) -> Option<usize> {
+        let (role, label) = nodes.focused.clone()?;
+        if role != Role::MenuItem {
+            return None;
+        }
+        nodes.menu_items().iter().position(|(_, l, _)| *l == label)
+    }
+}
+
+fn other_kinds() -> Vec<RowEntity> {
+    use modplayer_audio_source::{ArtistId, ArtistRef, PlaylistId, PlaylistRef};
+    vec![
+        widest_track_entity("rm2-track"),
+        RowEntity::Artist(ArtistRef {
+            id: ArtistId::new("spotify:artist:rm2").unwrap(),
+            name: "An Artist With A Very Long Name Indeed, Over And Over Again".into(),
+            artwork_url: None,
+        }),
+        RowEntity::Playlist(PlaylistRef {
+            id: PlaylistId::new("spotify:playlist:rm2").unwrap(),
+            name: "A Playlist With A Very Long Name Indeed, Over And Over Again".into(),
+            owner_name: "Somebody With A Long Owner Name".into(),
+            editable: true,
+            artwork_url: None,
+            track_count: 12,
+            revision: None,
+        }),
+    ]
+}
+
+/// **RM1** (FR-009): at rest the opener paints no fill and no outline.
+#[test]
+fn rm1_opener_is_quiet_at_rest_and_always_visible() {
+    let mut h = RowHarness::new(track_entity("rm1"), 800.0);
+    h.frame(vec![]);
+    let mut output = h.ctx.run_ui(row_input(800.0, vec![]), |ui| {
+        let _ = list_row(ui, &mut h.cache, &h.entity, false);
+    });
+    let update = output.platform_output.accesskit_update.take().unwrap();
+    let opener_rect = read_opener_rect(&update, &h.opener);
+    let visible_fill = output.shapes.iter().any(|s| match &s.shape {
+        Shape::Rect(r) => {
+            r.rect.expand(0.5).contains_rect(opener_rect)
+                && opener_rect.expand(0.5).contains_rect(r.rect)
+                && (r.fill != Color32::TRANSPARENT || r.stroke.width > 0.0)
+        }
+        _ => false,
+    });
+    output.drop_without_applying_deltas();
+    assert!(
+        !visible_fill,
+        "Quiet opener must have no resting fill/outline"
+    );
+    assert!(opener_rect.width() > 0.0);
+}
+
+fn read_opener_rect(update: &egui::accesskit::TreeUpdate, label: &str) -> Rect {
+    let b = update
+        .nodes
+        .iter()
+        .find(|(_, n)| n.role() == Role::Button && n.label() == Some(label))
+        .and_then(|(_, n)| n.bounds())
+        .expect("opener node");
+    Rect::from_min_max(
+        Pos2::new(b.x0 as f32, b.y0 as f32),
+        Pos2::new(b.x1 as f32, b.y1 as f32),
+    )
+}
+
+/// **RM2** (FR-007, SC-003): the opener sits inside its row and inside the
+/// viewport at every width and text scale, for every row kind.
+#[test]
+fn rm2_opener_stays_inside_row_and_viewport_at_every_width_and_scale() {
+    let mut entities = vec![track_entity("rm2-plain")];
+    entities.extend(other_kinds());
+    for entity in entities {
+        for width in [400.0_f32, 480.0, 560.0, 960.0 - 72.0, 1400.0] {
+            for scale in [1.0_f32, 2.0] {
+                let mut h = RowHarness::new(entity.clone(), width);
+                h.ctx.set_zoom_factor(1.0);
+                h.ctx.all_styles_mut(|s| {
+                    for font in s.text_styles.values_mut() {
+                        font.size *= scale;
+                    }
+                });
+                h.frame(vec![]);
+                let (_, nodes) = h.frame(vec![]);
+                let row = nodes.rect(Role::ListItem, &h.name);
+                let opener = nodes.rect(Role::Button, &h.opener);
+                let viewport = Rect::from_min_size(Pos2::ZERO, egui::vec2(width, 600.0));
+                assert!(
+                    row.expand(0.5).contains_rect(opener),
+                    "{} @ {width}px x{scale}: opener {opener:?} outside row {row:?}",
+                    h.name
+                );
+                assert!(
+                    viewport.expand(0.5).contains_rect(opener),
+                    "{} @ {width}px x{scale}: opener {opener:?} outside viewport",
+                    h.name
+                );
+            }
+        }
+    }
+}
+
+/// **RM3** (FR-007): row height does not depend on width.
+#[test]
+fn rm3_row_height_is_width_independent() {
+    for entity in other_kinds() {
+        let heights: Vec<f32> = [400.0_f32, 560.0, 1400.0]
+            .iter()
+            .map(|w| {
+                let mut h = RowHarness::new(entity.clone(), *w);
+                h.frame(vec![]);
+                let (_, nodes) = h.frame(vec![]);
+                nodes.rect(Role::ListItem, &h.name).height()
+            })
+            .collect();
+        assert!(
+            heights.iter().all(|h| (h - heights[0]).abs() < 0.5),
+            "{heights:?}"
+        );
+    }
+}
+
+/// **RM4** (FR-007) + **RM5**: Shift+F10 on a focused row opens the menu
+/// anchored to that row's opener.
+#[test]
+fn rm4_rm5_shift_f10_opens_menu_anchored_to_the_row() {
+    let mut h = RowHarness::new(track_entity("rm4"), 800.0);
+    let nodes = h.open_via_shift_f10();
+    let items = nodes.menu_items();
+    assert_eq!(items.len(), 6, "Shift+F10 must open the six-item menu");
+    let row = nodes.rect(Role::ListItem, &h.name);
+    let opener = nodes.rect(Role::Button, &h.opener);
+    let first = items[0].2;
+    assert!(
+        (first.min.y - row.min.y).abs() <= row.height() + 1.0,
+        "menu {first:?} must sit next to its row {row:?}"
+    );
+    assert!(
+        (first.min.x - opener.max.x).abs() <= opener.width() + 200.0
+            && first.min.x >= opener.min.x - 200.0,
+        "menu {first:?} must be adjacent to opener {opener:?}"
+    );
+}
+
+/// **RM5**: secondary click and Enter on the focused opener open the menu.
+#[test]
+fn rm5_secondary_click_and_opener_enter_open_the_menu() {
+    let mut h = RowHarness::new(track_entity("rm5"), 800.0);
+    let (_, nodes) = h.frame(vec![]);
+    let pos = nodes.rect(Role::ListItem, &h.name).center();
+    let secondary = |pressed| Event::PointerButton {
+        pos,
+        button: PointerButton::Secondary,
+        pressed,
+        modifiers: Modifiers::NONE,
+    };
+    h.frame(vec![secondary(true)]);
+    let nodes = h.frame(vec![secondary(false)]).1;
+    assert_eq!(
+        nodes.menu_items().len(),
+        6,
+        "secondary click opens the menu"
+    );
+
+    // Enter on a focused opener: Tab from the row reaches it.
+    let mut h = RowHarness::new(track_entity("rm5b"), 800.0);
+    h.focus_row();
+    let (_, nodes) = h.frame(vec![key_event(egui::Key::Tab, Modifiers::NONE)]);
+    assert_eq!(nodes.focused, Some((Role::Button, h.opener.clone())));
+    let nodes = h
+        .frame(vec![key_event(egui::Key::Enter, Modifiers::NONE)])
+        .1;
+    assert_eq!(nodes.menu_items().len(), 6, "Enter on the opener opens it");
+}
+
+/// **RM6**: ↓↑ wrap, Home/End jump, Enter activates, Escape closes.
+#[test]
+fn rm6_arrow_wrap_home_end_activate_and_escape() {
+    let mut h = RowHarness::new(track_entity("rm6"), 800.0);
+    let nodes = h.open_via_shift_f10();
+    assert_eq!(RowHarness::focused_item_index(&nodes), Some(0));
+
+    let press = |h: &mut RowHarness, key| h.frame(vec![key_event(key, Modifiers::NONE)]);
+    let (_, n) = press(&mut h, egui::Key::ArrowUp);
+    assert_eq!(RowHarness::focused_item_index(&n), Some(5), "0 wraps to 5");
+    let (_, n) = press(&mut h, egui::Key::ArrowDown);
+    assert_eq!(RowHarness::focused_item_index(&n), Some(0), "5 wraps to 0");
+    let (_, n) = press(&mut h, egui::Key::ArrowDown);
+    assert_eq!(RowHarness::focused_item_index(&n), Some(1));
+    let (_, n) = press(&mut h, egui::Key::End);
+    assert_eq!(RowHarness::focused_item_index(&n), Some(5));
+    let (_, n) = press(&mut h, egui::Key::Home);
+    assert_eq!(RowHarness::focused_item_index(&n), Some(0));
+
+    let (event, _) = press(&mut h, egui::Key::Enter);
+    assert_eq!(
+        event,
+        Some(RowEvent::Action(RowAction::PlayNow)),
+        "Enter activates the focused first item"
+    );
+}
+
+/// **RM6/RM7**: Escape closes without action and focus returns to the row.
+#[test]
+fn rm6_rm7_escape_closes_without_action_and_focus_returns_to_row() {
+    let mut h = RowHarness::new(track_entity("rm7"), 800.0);
+    h.open_via_shift_f10();
+    let (event, _) = h.frame(vec![key_event(egui::Key::Escape, Modifiers::NONE)]);
+    assert_eq!(event, None, "Escape must not act");
+    let (_, nodes) = h.frame(vec![]);
+    assert!(nodes.menu_items().is_empty(), "menu closed");
+    assert_eq!(
+        nodes.focused,
+        Some((Role::ListItem, h.name.clone())),
+        "focus returns to the row"
+    );
+}
+
+/// **RM7**: after activating an item, focus returns to the row.
+#[test]
+fn rm7_activate_returns_focus_to_the_row() {
+    let mut h = RowHarness::new(track_entity("rm7b"), 800.0);
+    h.open_via_shift_f10();
+    h.frame(vec![key_event(egui::Key::Enter, Modifiers::NONE)]);
+    let (_, nodes) = h.frame(vec![]);
+    assert_eq!(nodes.focused, Some((Role::ListItem, h.name.clone())));
+}
+
+/// **RM8**: an unavailable (greyed) row still offers all six actions.
+#[test]
+fn rm8_greyed_rows_keep_all_six_actions() {
+    let mut h = RowHarness::new(widest_track_entity("rm8"), 800.0);
+    let nodes = h.open_via_shift_f10();
+    assert_eq!(nodes.menu_items().len(), 6);
+}

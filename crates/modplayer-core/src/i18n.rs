@@ -51,7 +51,14 @@ pub fn tr_args(key: &str, args: &[(&'static str, String)]) -> String {
     let lang = langid!("en-US");
     let mut map: HashMap<Cow<'static, str>, FluentValue<'_>> = HashMap::with_capacity(args.len());
     for (name, value) in args {
-        map.insert(Cow::Borrowed(*name), FluentValue::from(value.clone()));
+        // A `count` argument is passed as a number so Fluent plural
+        // selectors (`[one]` / `*[other]`) apply; every other argument
+        // stays a string.
+        let fluent_value = match (*name, value.parse::<u32>()) {
+            ("count", Ok(n)) => FluentValue::from(n),
+            _ => FluentValue::from(value.clone()),
+        };
+        map.insert(Cow::Borrowed(*name), fluent_value);
     }
     let resolved = LOCALES
         .try_lookup_with_args(&lang, key, &map)

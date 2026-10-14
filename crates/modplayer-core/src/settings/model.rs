@@ -12,6 +12,7 @@
 //! other and reports which fields (if any) fell back to a default.
 
 use std::collections::BTreeMap;
+use std::ops::RangeInclusive;
 
 use modplayer_engine::{BufferPreset, CeilingDb, DeviceId, SafeVolume, Theme, VolumePercent};
 use serde::{Deserialize, Serialize};
@@ -220,11 +221,36 @@ impl Default for NowPlayingPanels {
 /// `[markers] nudge_step_ms`'s default (data-model.md §5).
 const DEFAULT_NUDGE_STEP_MS: u16 = 10;
 
+/// The valid marker nudge-step range in milliseconds, shared by the
+/// settings file clamp and the Settings UI (028-settings-fields-and-account).
+///
+/// ```
+/// use modplayer_core::settings::NUDGE_STEP_MS_RANGE;
+/// assert_eq!((*NUDGE_STEP_MS_RANGE.start(), *NUDGE_STEP_MS_RANGE.end()), (1, 1000));
+/// ```
+pub const NUDGE_STEP_MS_RANGE: RangeInclusive<u16> = 1..=1000;
+
 /// Clamp a raw (possibly out-of-range, possibly negative) TOML integer
-/// into `1..=1000` (data-model.md §5 "clamped silently").
+/// into [`NUDGE_STEP_MS_RANGE`] (data-model.md §5 "clamped silently").
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn clamp_nudge_step_ms(raw: i64) -> u16 {
-    raw.clamp(1, 1_000) as u16
+    raw.clamp(
+        i64::from(*NUDGE_STEP_MS_RANGE.start()),
+        i64::from(*NUDGE_STEP_MS_RANGE.end()),
+    ) as u16
+}
+
+#[cfg(test)]
+mod nudge_range_tests {
+    use super::*;
+
+    #[test]
+    fn clamp_nudge_step_ms_behaviour_unchanged() {
+        assert_eq!(clamp_nudge_step_ms(0), 1);
+        assert_eq!(clamp_nudge_step_ms(-5), 1);
+        assert_eq!(clamp_nudge_step_ms(1001), 1000);
+        assert_eq!(clamp_nudge_step_ms(10), 10);
+    }
 }
 
 /// A field that fell back to its default because the file held an

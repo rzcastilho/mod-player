@@ -192,7 +192,10 @@ fn rail_shows_exactly_the_five_sections_in_order_no_badges() {
     let (_, update) = render_chrome_frame(&ctx, chrome, &mut shell);
     let update = update.expect("accesskit_update should be populated once enabled");
 
-    let labels = nav_labels();
+    // 029: the five sections, then the never-selected "Keyboard shortcuts"
+    // action item after a divider.
+    let mut labels = nav_labels();
+    labels.push(tr("nav-keyboard-shortcuts"));
     let mut buttons: Vec<(String, f32)> = update
         .nodes
         .iter()
@@ -520,4 +523,175 @@ fn step_indicator_is_one_correctly_valued_progress_node() {
             );
         }
     }
+}
+
+// -- 029 contracts S1-S3: the "Keyboard shortcuts" nav item --
+
+/// Run one chrome frame with extra input events; returns the frame's
+/// AccessKit update.
+fn chrome_frame_with(
+    ctx: &Context,
+    shell: &mut Shell,
+    events: Vec<egui::Event>,
+) -> Option<egui::accesskit::TreeUpdate> {
+    let mut input = screen_input();
+    input.events = events;
+    let chrome = Chrome::for_frame(LaunchStep::Main, false);
+    let mut output = ctx.run_ui(input, |ui| {
+        shell::show_chrome(ui, chrome, shell);
+        CentralPanel::default().show(ui, |ui| {
+            ui.label("content");
+        });
+    });
+    let update = output.platform_output.accesskit_update.take();
+    output.drop_without_applying_deltas();
+    update
+}
+
+fn shortcuts_item_center(update: &egui::accesskit::TreeUpdate) -> Pos2 {
+    let name = tr("nav-keyboard-shortcuts");
+    let node = update
+        .nodes
+        .iter()
+        .find(|(_, node)| node.label() == Some(name.as_str()))
+        .expect("the Keyboard shortcuts nav item is present");
+    let bounds = node.1.bounds().expect("bounds");
+    Pos2::new(
+        ((bounds.x0 + bounds.x1) / 2.0) as f32,
+        ((bounds.y0 + bounds.y1) / 2.0) as f32,
+    )
+}
+
+fn click_events(pos: Pos2) -> [Vec<egui::Event>; 2] {
+    let button = |pressed| {
+        vec![egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }]
+    };
+    [button(true), button(false)]
+}
+
+/// S1: the item follows the five sections (below them), is focusable and
+/// named, and is never selected.
+#[test]
+fn keyboard_shortcuts_item_after_settings_never_selected() {
+    let ctx = fresh_accesskit_context();
+    let mut shell = Shell::default();
+    chrome_frame_with(&ctx, &mut shell, vec![]);
+    let update = chrome_frame_with(&ctx, &mut shell, vec![]).expect("accesskit update");
+
+    let top_of = |label: &str| -> f64 {
+        update
+            .nodes
+            .iter()
+            .find(|(_, node)| node.label() == Some(label))
+            .and_then(|(_, node)| node.bounds())
+            .map(|b| b.y0)
+            .unwrap_or_else(|| panic!("no node labelled {label:?}"))
+    };
+    assert!(top_of(&tr("nav-keyboard-shortcuts")) > top_of(&tr("nav-settings")));
+
+    let (_, node) = update
+        .nodes
+        .iter()
+        .find(|(_, node)| node.label() == Some(tr("nav-keyboard-shortcuts").as_str()))
+        .unwrap();
+    assert_ne!(
+        node.is_selected(),
+        Some(true),
+        "action item is never selected"
+    );
+    assert!(
+        node.supports_action(egui::accesskit::Action::Focus),
+        "item must be focusable"
+    );
+}
+
+/// S2: activating the item requests the sheet and leaves the section.
+#[test]
+fn shortcuts_item_opens_sheet_without_changing_section() {
+    let ctx = fresh_accesskit_context();
+    let mut shell = Shell {
+        section: Section::Plugins,
+        ..Shell::default()
+    };
+    chrome_frame_with(&ctx, &mut shell, vec![]);
+    let update = chrome_frame_with(&ctx, &mut shell, vec![]).expect("accesskit update");
+    let pos = shortcuts_item_center(&update);
+    assert!(!shell.shortcut_sheet_requested);
+    for events in click_events(pos) {
+        chrome_frame_with(&ctx, &mut shell, events);
+    }
+    assert!(shell.shortcut_sheet_requested);
+    assert_eq!(shell.section, Section::Plugins);
+}
+
+/// S3: the item exists whenever the rail does; it has no dependency on
+/// getting-started dismissal (the shell never sees that state).
+#[test]
+fn shortcuts_item_present_after_card_dismissed() {
+    let ctx = fresh_accesskit_context();
+    let mut shell = Shell::default();
+    let update = chrome_frame_with(&ctx, &mut shell, vec![]).expect("accesskit update");
+    let name = tr("nav-keyboard-shortcuts");
+    assert!(
+        update
+            .nodes
+            .iter()
+            .any(|(_, node)| node.label() == Some(name.as_str()))
+    );
+    // And absent when the rail is (a launch gate).
+    let mut output = ctx.run_ui(screen_input(), |ui| {
+        shell::show_chrome(
+            ui,
+            Chrome::for_frame(LaunchStep::Welcome, false),
+            &mut shell,
+        );
+    });
+    let gate = output.platform_output.accesskit_update.take().unwrap();
+    output.drop_without_applying_deltas();
+    assert!(
+        !gate
+            .nodes
+            .iter()
+            .any(|(_, node)| node.label() == Some(name.as_str()))
+    );
+}
+
+/// 029 T049 (NFR-7.1): with every string padded by 40 %, the Keyboard
+/// shortcuts item stays inside the rail's horizontal extent (same right edge
+/// as the Settings item's row) and does not overlap the Settings item.
+#[test]
+fn shortcuts_item_fits_under_40_percent_pseudo_expansion() {
+    modplayer_core::i18n::with_pseudo_expansion(40, || {
+        let ctx = fresh_accesskit_context();
+        let mut shell = Shell::default();
+        chrome_frame_with(&ctx, &mut shell, vec![]);
+        let update = chrome_frame_with(&ctx, &mut shell, vec![]).expect("accesskit update");
+        let bounds_of = |label: &str| {
+            update
+                .nodes
+                .iter()
+                .find(|(_, node)| node.label() == Some(label))
+                .and_then(|(_, node)| node.bounds())
+                .unwrap_or_else(|| panic!("no node labelled {label:?}"))
+        };
+        let item = bounds_of(&tr("nav-keyboard-shortcuts"));
+        let settings = bounds_of(&tr("nav-settings"));
+        assert!(
+            item.y0 >= settings.y1,
+            "item overlaps Settings: {item:?} vs {settings:?}"
+        );
+        assert!(
+            item.x1 <= f64::from(SCREEN_WIDTH) && item.x0 >= 0.0,
+            "item leaves the window: {item:?}"
+        );
+        assert!(
+            (item.x1 - settings.x1).abs() < 1.0 && (item.x0 - settings.x0).abs() < 1.0,
+            "item width differs from the rail items: {item:?} vs {settings:?}"
+        );
+    });
 }

@@ -13,12 +13,10 @@ use std::time::{Duration, Instant};
 use modplayer_audio_source::{CatalogError, LibraryPage, LibrarySet, SourceCommand};
 
 use super::index::SyncOutcome;
+use crate::backoff::backoff_delay;
 
 /// contracts/library-and-search-core.md §4.
 pub const SYNC_INTERVAL: Duration = Duration::from_secs(15 * 60);
-/// contracts/library-and-search-core.md §4: `15 s x 2^attempt, max 4 min`.
-const SYNC_BACKOFF_BASE: Duration = Duration::from_secs(15);
-const SYNC_BACKOFF_MAX: Duration = Duration::from_secs(4 * 60);
 /// contracts/library-and-search-core.md §4.
 pub const SYNC_PAGE: u16 = 200;
 
@@ -285,16 +283,6 @@ impl SyncScheduler {
             }
         }
     }
-}
-
-fn backoff_delay(attempt: u8, retry_after_ms: Option<u32>) -> Duration {
-    if let Some(ms) = retry_after_ms {
-        return Duration::from_millis(u64::from(ms)).min(SYNC_BACKOFF_MAX);
-    }
-    let factor = 1u64
-        .checked_shl(u32::from(attempt.min(10)))
-        .unwrap_or(1 << 10);
-    (SYNC_BACKOFF_BASE * factor as u32).min(SYNC_BACKOFF_MAX)
 }
 
 #[cfg(test)]

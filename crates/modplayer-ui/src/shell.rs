@@ -85,6 +85,10 @@ pub struct Shell {
     /// clears it to request keyboard focus on the search box the same
     /// frame.
     pub focus_search_requested: bool,
+    /// Set by the nav rail's "Keyboard shortcuts" item (029, contracts
+    /// S1/S2); `App` consumes and clears it the same frame to open the
+    /// shortcut sheet. `section` is never changed by it.
+    pub shortcut_sheet_requested: bool,
 }
 
 impl Default for Shell {
@@ -92,6 +96,7 @@ impl Default for Shell {
         Self {
             section: Section::Library,
             focus_search_requested: false,
+            shortcut_sheet_requested: false,
         }
     }
 }
@@ -126,6 +131,12 @@ impl Shell {
             if response.clicked() {
                 self.section = section;
             }
+        }
+        // 029 (S1-S3): an action item, not a section — never selected.
+        theme::divider(ui);
+        let response = crate::widgets::controls::nav_item(ui, false, &tr("nav-keyboard-shortcuts"));
+        if response.clicked() {
+            self.shortcut_sheet_requested = true;
         }
     }
 }
@@ -519,8 +530,9 @@ mod tests {
                 );
             }
         }
-        // 5 nav buttons + 3 Dismiss buttons (one per notification raised above).
-        assert_eq!(buttons_checked, 8);
+        // 5 section buttons + the 029 "Keyboard shortcuts" item + 3 Dismiss
+        // buttons (one per notification raised above).
+        assert_eq!(buttons_checked, 9);
     }
 
     /// Run `render` in a fresh headless context with AccessKit enabled,
@@ -691,7 +703,8 @@ mod tests {
             1
         );
 
-        // Authorizing: "Open the browser again" + "Cancel".
+        // Authorizing: the named spinner (030 P2) + "Open the browser
+        // again" + "Cancel".
         let mut authorizing = fresh_account_service();
         authorizing.start_sign_in();
         let mut authorizing_screen = SignInScreen::default();
@@ -699,7 +712,7 @@ mod tests {
             accessible_widget_count(|ui| {
                 sign_in::show(ui, &mut authorizing, &mut authorizing_screen);
             }),
-            2
+            3
         );
 
         // Tier result: Free — "Open upgrade page" + "Continue".
@@ -723,18 +736,22 @@ mod tests {
             2
         );
 
-        // Settings > About, main sub-view: "Privacy notice" + "Disclosure".
+        // Settings > About, main sub-view: "Privacy notice" + "Disclosure" +
+        // the (disabled) "Show getting-started card" button.
         let mut about_screen = AboutScreen::default();
         assert_eq!(
-            accessible_widget_count(|ui| about::show(ui, &mut about_screen)),
-            2
+            accessible_widget_count(|ui| {
+                about::show(ui, &mut about_screen, false);
+            }),
+            3
         );
 
         // The Privacy sub-view's "Back" button — the exact same function
         // About's own Privacy branch calls.
         assert_eq!(
             accessible_widget_count(|ui| {
-                let _ = crate::privacy_notice::show(ui);
+                let _ =
+                    crate::privacy_notice::show(ui, crate::privacy_notice::PrivacyOrigin::About);
             }),
             1
         );
@@ -746,7 +763,7 @@ mod tests {
         let mut active = active_account_service();
         assert_eq!(
             accessible_widget_count(|ui| {
-                let _ = crate::settings::account::show(ui, &mut active);
+                let _ = crate::settings::account::show(ui, &mut active, None);
             }),
             2
         );
@@ -755,7 +772,7 @@ mod tests {
         let mut signed_out_account = fresh_account_service();
         assert_eq!(
             accessible_widget_count(|ui| {
-                let _ = crate::settings::account::show(ui, &mut signed_out_account);
+                let _ = crate::settings::account::show(ui, &mut signed_out_account, None);
             }),
             1
         );
@@ -771,15 +788,17 @@ mod tests {
             2
         );
 
-        // Welcome, disclosure sub-view (US1, T039/T041): "Privacy notice"
-        // + "I understand, continue" + "Decline".
+        // Welcome, disclosure sub-view (US1, T039/T041): "I understand,
+        // continue" + "Decline". The privacy notice and terms are real
+        // links (`Role::Link`, 030 W2), not buttons, so they are not
+        // counted here; the link roles are pinned in `onboarding_clarity`.
         let mut welcome_controller = fresh_playback_controller();
         let mut welcome_screen = crate::welcome::WelcomeScreen::default();
         assert_eq!(
             accessible_widget_count(|ui| {
                 welcome_screen.show(ui, &mut welcome_controller);
             }),
-            3
+            2
         );
     }
 

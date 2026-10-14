@@ -63,6 +63,22 @@ impl SettingsCategory {
             SettingsCategory::About => "settings-cat-about",
         }
     }
+
+    /// Whether this category has real content. `false` for the
+    /// placeholder-only categories shown as "coming soon".
+    ///
+    /// ```
+    /// use modplayer_core::SettingsCategory;
+    /// assert!(SettingsCategory::Audio.is_available());
+    /// assert!(!SettingsCategory::Offline.is_available());
+    /// assert!(!SettingsCategory::PrivacyDiagnostics.is_available());
+    /// ```
+    pub fn is_available(self) -> bool {
+        !matches!(
+            self,
+            SettingsCategory::Offline | SettingsCategory::PrivacyDiagnostics
+        )
+    }
 }
 
 /// One searchable setting (data-model.md §5.4).
@@ -81,10 +97,9 @@ pub struct SettingDescriptor {
 /// placeholder content only and so has no entries here — Controls gained
 /// its one descriptor in 007-keyboard-actions-and-shortcuts
 /// (contracts/ui-actions.md §4: the shortcut map itself is one
-/// `SettingDescriptor`, not one per action). About is
-/// descriptor-free by design even though it has real content
-/// (`about-product`/`about-version`/… are read-only, not searchable
-/// settings, plan.md "Project Structure"). Playback's screen itself lands
+/// `SettingDescriptor`, not one per action). About has one
+/// descriptor, `about.show_getting_started` (030-onboarding-clarity); its
+/// other content is read-only and not searchable. Playback's screen itself lands
 /// with US1 (T062); the `device_name` descriptor is registered now so it
 /// is searchable from the start (003-streaming-playback-and-queue
 /// contracts/transport-and-queue.md §5).
@@ -172,6 +187,12 @@ pub const DESCRIPTORS: &[SettingDescriptor] = &[
         id: "language.locale",
         title_key: "setting-locale",
         description_key: "setting-locale-desc",
+    },
+    SettingDescriptor {
+        category: SettingsCategory::About,
+        id: "about.show_getting_started",
+        title_key: "setting-show-getting-started",
+        description_key: "setting-show-getting-started-desc",
     },
     SettingDescriptor {
         category: SettingsCategory::Developer,
@@ -297,6 +318,16 @@ mod tests {
         assert_eq!(ids.len(), count_before, "duplicate descriptor id");
     }
 
+    /// A4: the About restore row is searchable.
+    #[test]
+    fn search_finds_show_getting_started() {
+        assert!(
+            search("getting")
+                .iter()
+                .any(|d| d.id == "about.show_getting_started")
+        );
+    }
+
     #[test]
     fn placeholder_only_categories_contribute_no_descriptors() {
         // 007-keyboard-actions-and-shortcuts, T069: Controls dropped from
@@ -306,12 +337,21 @@ mod tests {
             SettingsCategory::Plugins,
             SettingsCategory::Offline,
             SettingsCategory::PrivacyDiagnostics,
-            SettingsCategory::About,
         ] {
             assert!(
                 !DESCRIPTORS.iter().any(|d| d.category == category),
                 "{category:?} should contribute no descriptors"
             );
+        }
+    }
+
+    /// F25: an unavailable category contributes no descriptors.
+    #[test]
+    fn unavailable_categories_have_no_descriptors() {
+        for c in SettingsCategory::ALL {
+            if !c.is_available() {
+                assert!(!DESCRIPTORS.iter().any(|d| d.category == c), "{c:?}");
+            }
         }
     }
 

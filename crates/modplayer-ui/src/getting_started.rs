@@ -2,8 +2,9 @@
 
 //! The dismissible "Getting started" card (013-key-and-tempo-plugin,
 //! contracts/getting-started-card.md): names both bundled plugins
-//! (Section Loop, Key & Tempo) and their default shortcuts, and links to
-//! the placeholder plugin tutorial. Host-native and stateless — it holds
+//! (Section Loop, Key & Tempo) in one line each, and links to the
+//! keyboard-shortcut sheet and the placeholder plugin tutorial. It prints
+//! no key chords of its own; the shortcut sheet is the one place they live. Host-native and stateless — it holds
 //! no controller/session reference of its own and never calls
 //! `open_url` itself (design note 11: only `App` does that).
 
@@ -19,6 +20,8 @@ use crate::theme;
 pub enum GettingStartedOutcome {
     None,
     OpenTutorial,
+    /// 029 (S4): open the shortcut sheet.
+    OpenShortcuts,
     Dismiss,
 }
 
@@ -45,6 +48,13 @@ pub fn show(ui: &mut Ui) -> GettingStartedOutcome {
             });
             if tutorial.clicked() {
                 outcome = GettingStartedOutcome::OpenTutorial;
+            }
+            let shortcuts = ui.button(tr("getting-started-shortcuts"));
+            ui.ctx().accesskit_node_builder(shortcuts.id, |b| {
+                b.set_role(Role::Link);
+            });
+            if shortcuts.clicked() {
+                outcome = GettingStartedOutcome::OpenShortcuts;
             }
             if ui.button(tr("getting-started-dismiss")).clicked() {
                 outcome = GettingStartedOutcome::Dismiss;

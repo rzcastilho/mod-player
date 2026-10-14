@@ -435,3 +435,34 @@ fn walk_files(dir: &Path) -> Vec<PathBuf> {
     }
     files
 }
+
+/// 029 S17: the shortcut sheet's printable builder is built only from
+/// `ShortcutGroup`s, a platform, a locale tag and a date string — its
+/// signature admits no session, account or settings value — and its
+/// source names none of them.
+#[test]
+fn printable_builder_takes_no_session_or_settings() {
+    use modplayer_core::actions::Platform;
+    use modplayer_ui::shortcut_groups::ShortcutGroup;
+
+    // Compile-time pin of the signature.
+    let _: fn(&[ShortcutGroup], Platform, &str, &str) -> String =
+        modplayer_ui::shortcut_sheet::printable_html;
+
+    let source = include_str!("../src/shortcut_sheet.rs");
+    let production = source.split("#[cfg(test)]").next().unwrap_or(source);
+    for forbidden in [
+        "AccountService",
+        "SessionState",
+        "SettingsStore",
+        "TokenSet",
+        "access_token",
+        "refresh_token",
+        "Profile",
+    ] {
+        assert!(
+            !production.contains(forbidden),
+            "shortcut_sheet.rs must not reference {forbidden}"
+        );
+    }
+}

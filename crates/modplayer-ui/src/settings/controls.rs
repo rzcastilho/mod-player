@@ -10,16 +10,17 @@
 //! underneath every mutation here, Phase 2).
 
 use egui::{
-    Button, Event, EventFilter, Id, Key, Modifiers, RichText, TextEdit, Ui, WidgetInfo, WidgetType,
+    Button, Event, EventFilter, Id, Key, Modifiers, Rect, Response, Sense, TextEdit, Ui,
+    WidgetInfo, WidgetType,
 };
 use modplayer_audio_io::OutputBackend;
 use modplayer_audio_source::SourceHost;
-use modplayer_core::actions::{
-    ActionCategory, ActionId, ActionKind, Chord, Platform, RowCategory, RowLabel,
-};
+use modplayer_core::actions::{ActionId, ActionKind, Chord, Platform};
 use modplayer_core::{PlaybackController, tr, tr_args};
 
 use crate::actions::{self, Claim, key_name_from_egui, mods_from_egui};
+use crate::key_label::KeyLabel;
+use crate::shortcut_groups;
 use crate::theme;
 
 /// Draw one `section`-role heading (014-design-tokens-and-type-scale, US2,
@@ -164,61 +165,7 @@ fn canonical_capture_chord(
     Some(Chord::new(mods, logical))
 }
 
-/// Which heading group a row falls under (011-plugin-ui-contributions,
-/// contracts/action-registry-plugins.md G15): a host category, or a
-/// named owning plugin.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum RowGroup {
-    Host(ActionCategory),
-    Plugin(String),
-}
-
-/// One catalog row's data, snapshotted from `controller.actions().rows()`
-/// before any widget can mutate the registry through a button in the
-/// same frame (`ActionRow` borrows the registry; holding that borrow
-/// across a `controller.add_binding`/`remove_binding` call would not
-/// compile). Widened from the 007 `HostAction`-only shape
-/// (011-plugin-ui-contributions, contracts/action-registry-plugins.md
-/// G15) so a plugin's own actions render through this exact same row.
-struct RowSnapshot {
-    id: ActionId,
-    label: String,
-    kind: ActionKind,
-    enabled: bool,
-    bindings: Vec<Chord>,
-    conflicts: Vec<Chord>,
-    group: RowGroup,
-}
-
-fn snapshot_rows<B: OutputBackend, H: SourceHost>(
-    controller: &PlaybackController<B, H>,
-) -> Vec<RowSnapshot> {
-    controller
-        .actions()
-        .rows()
-        .map(|row| {
-            let label = match row.label {
-                RowLabel::Fluent(key) => tr(key),
-                RowLabel::Literal(s) => s,
-            };
-            let group = match row.category {
-                RowCategory::Host(category) => RowGroup::Host(category),
-                RowCategory::Plugin { name } => RowGroup::Plugin(name),
-            };
-            RowSnapshot {
-                id: row.id,
-                label,
-                kind: row.kind,
-                enabled: row.enabled,
-                bindings: row.bindings.to_vec(),
-                conflicts: row.conflicts,
-                group,
-            }
-        })
-        .collect()
-}
-
-/// `id`'s display label, resolved the same way [`snapshot_rows`] resolves
+/// `id`'s display label, resolved the same way the shortcut snapshot resolves
 /// a row's own — used to name a *conflict partner* (`show_chip`), which
 /// is looked up fresh against the live registry rather than carried in
 /// `RowSnapshot` (a chip's conflict partner is a different row, not
@@ -273,12 +220,8 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     screen: &mut ControlsScreen,
     focus: Option<&str>,
 ) {
-    let platform = if ui.ctx().os().is_mac() {
-        Platform::Mac
-    } else {
-        Platform::Other
-    };
-    let rows = snapshot_rows(controller);
+    let platform = shortcut_groups::platform_of(ui.ctx());
+    let groups = shortcut_groups::snapshot(controller.actions());
 
     section_heading(ui, &tr("controls-heading"));
 
@@ -296,59 +239,51 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     show_reset_all(ui, controller, screen);
     theme::divider(ui);
 
-    let query = screen.filter.to_lowercase();
-    let mut any_match = false;
-    for category in ActionCategory::ALL {
-        let category_matches = tr(category.label_key()).to_lowercase().contains(&query);
-        let category_rows: Vec<&RowSnapshot> = rows
-            .iter()
-            .filter(|row| row.group == RowGroup::Host(category))
-            .filter(|row| category_matches || row.label.to_lowercase().contains(&query))
-            .collect();
-        if category_rows.is_empty() {
-            continue;
-        }
-        any_match = true;
-        section_heading(ui, &tr(category.label_key()));
-        for row in category_rows {
-            show_row(ui, controller, screen, row, platform);
-        }
-    }
+    let visible = shortcut_groups::filter_groups(&groups, &screen.filter, platform);
 
-    // One heading per owning plugin, in `rows()`'s own order (already
-    // sorted by display name, contracts/action-registry-plugins.md G15) —
-    // `dedup`-free grouping by walking the already-grouped snapshot once.
-    let mut seen_plugins: Vec<&str> = Vec::new();
-    for row in &rows {
-        let RowGroup::Plugin(name) = &row.group else {
-            continue;
-        };
-        if seen_plugins.contains(&name.as_str()) {
-            continue;
-        }
-        seen_plugins.push(name.as_str());
-
-        let heading_matches = name.to_lowercase().contains(&query);
-        let plugin_rows: Vec<&RowSnapshot> = rows
-            .iter()
-            .filter(|r| matches!(&r.group, RowGroup::Plugin(n) if n == name))
-            .filter(|r| heading_matches || r.label.to_lowercase().contains(&query))
-            .collect();
-        if plugin_rows.is_empty() {
-            continue;
-        }
-        any_match = true;
-        section_heading(
-            ui,
-            &tr_args("controls-plugin-group", &[("plugin", name.clone())]),
-        );
-        for row in plugin_rows {
-            show_row(ui, controller, screen, row, platform);
-        }
-    }
-
-    if !any_match {
+    if visible.is_empty() {
         ui.label(tr("controls-no-match"));
+        return;
+    }
+
+    // The page's floating scroll bar overlays the right edge; keep the
+    // groups (and the right column's wrapped conflict notes) clear of it.
+    // A child UI, because the full-width divider above already widened
+    // this one's min rect, so `set_max_width` could not narrow it.
+    let scroll = ui.spacing().scroll;
+    let mut rect = ui.available_rect_before_wrap();
+    rect.max.x = (rect.max.x - scroll.bar_width - scroll.bar_outer_margin).max(rect.min.x);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+        if shortcut_groups::use_two_columns(ui.available_width()) {
+            let weights: Vec<usize> = visible.iter().map(|(_, rows)| 1 + rows.len()).collect();
+            let split = shortcut_groups::column_break(&weights);
+            let (left, right) = visible.split_at(split);
+            ui.columns(2, |columns| {
+                for (column, part) in columns.iter_mut().zip([left, right]) {
+                    for (group, rows) in part {
+                        show_group(column, controller, screen, group, rows, platform);
+                    }
+                }
+            });
+        } else {
+            for (group, rows) in &visible {
+                show_group(ui, controller, screen, group, rows, platform);
+            }
+        }
+    });
+}
+
+fn show_group<B: OutputBackend, H: SourceHost>(
+    ui: &mut Ui,
+    controller: &mut PlaybackController<B, H>,
+    screen: &mut ControlsScreen,
+    group: &shortcut_groups::ShortcutGroup,
+    rows: &[shortcut_groups::FilteredRow],
+    platform: Platform,
+) {
+    section_heading(ui, &group.heading);
+    for filtered in rows {
+        show_row(ui, controller, screen, filtered, platform);
     }
 }
 
@@ -356,95 +291,147 @@ fn filter_box_id() -> Id {
     Id::new("controls-filter-box")
 }
 
+/// A row's reveal bookkeeping, kept in `egui::Memory` between frames
+/// (research R4): the row's rect last frame, whether focus sat on the
+/// row element or any of its controls, and whether the controls were
+/// shown.
+#[derive(Debug, Clone, Copy)]
+struct RowState {
+    rect: Rect,
+    focus_within: bool,
+    revealed: bool,
+}
+
 /// One action's row: label (+ "(inactive)" when disabled/the owning
 /// plugin is not Active, de-emphasized — contracts/action-registry-
 /// plugins.md G15 "a row whose plugin is not Active renders greyed"),
-/// kind, one chip per binding, "Add binding" (or the open capture
-/// control), and "Reset to default" (contracts/ui-actions.md §4).
+/// a kind label for continuous actions only, one chip per binding, and —
+/// only while the row is revealed (pointer over it, focus within it, or
+/// a capture open on it) — `×` per chip, "Add binding" (or the open
+/// capture control) and "Reset to default" (contracts C6–C13).
 fn show_row<B: OutputBackend, H: SourceHost>(
     ui: &mut Ui,
     controller: &mut PlaybackController<B, H>,
     screen: &mut ControlsScreen,
-    row: &RowSnapshot,
+    filtered: &shortcut_groups::FilteredRow,
     platform: Platform,
 ) {
-    ui.horizontal_wrapped(|ui| {
+    let row = filtered.row;
+    let conflict_notes: Vec<(Chord, String)> = row
+        .conflicts
+        .iter()
+        .filter_map(|&chord| {
+            controller
+                .actions()
+                .conflict_partner(row.id.clone(), chord)
+                .map(|other| (chord, conflict_message(controller, &other)))
+        })
+        .collect();
+
+    let state_id = Id::new(("controls-row-state", &row.id));
+    let previous: Option<RowState> = ui.memory(|memory| memory.data.get_temp(state_id));
+    let pointer = ui.input(|input| input.pointer.hover_pos());
+    let hovered = previous
+        .zip(pointer)
+        .is_some_and(|(state, pos)| state.rect.contains(pos));
+    let capturing = screen.capture.as_ref() == Some(&row.id);
+    let revealed = capturing || hovered || previous.is_some_and(|state| state.focus_within);
+
+    let spoken_bindings = if row.bindings.is_empty() {
+        tr("shortcuts-not-bound")
+    } else {
+        row.bindings
+            .iter()
+            .map(|&chord| KeyLabel::new(chord, platform).spoken)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    let mut focus_within = false;
+    let out = ui.horizontal_wrapped(|ui| {
         let label = row.label.clone();
-        let label_text = if row.enabled {
-            label.clone()
-        } else {
-            format!("{label} {}", tr("controls-inactive"))
-        };
-        let text = RichText::new(label_text);
-        let text = if row.enabled {
-            text
-        } else {
-            text.color(ui.visuals().weak_text_color())
-        };
-        ui.label(text);
+        let name =
+            shortcut_groups::paint_name_with_sense(ui, row, Sense::focusable_noninteractive());
+        let row_name = tr_args(
+            "controls-row",
+            &[
+                ("action", label.clone()),
+                ("bindings", spoken_bindings.clone()),
+            ],
+        );
+        ui.ctx().accesskit_node_builder(name.id, |b| {
+            b.set_label(row_name.clone());
+        });
+        focus_within |= name.has_focus();
 
-        let kind_key = match row.kind {
-            ActionKind::Trigger => "controls-kind-trigger",
-            ActionKind::Continuous => "controls-kind-continuous",
-        };
-        ui.label(tr(kind_key));
-
-        for &chord in &row.bindings {
-            let conflicting = row.conflicts.contains(&chord);
-            show_chip(ui, controller, row.id.clone(), chord, platform, conflicting);
+        if row.kind == ActionKind::Continuous {
+            ui.label(tr("controls-kind-continuous"));
         }
 
-        if screen.capture.as_ref() == Some(&row.id) {
+        shortcut_groups::paint_bindings(
+            ui,
+            row,
+            platform,
+            &conflict_notes,
+            &filtered.key_hits,
+            &mut |ui, chord| {
+                if revealed {
+                    let remove = show_remove(ui, controller, row.id.clone(), chord, platform);
+                    focus_within |= remove.has_focus();
+                }
+            },
+        );
+
+        if capturing {
             show_capture_control(ui, controller, screen, row.id.clone(), &row.bindings);
-        } else if ui.button(tr("controls-add-binding")).clicked() {
-            open_capture(ui, screen, row.id.clone());
+        } else if revealed {
+            let add = ui.button(tr("controls-add-binding"));
+            focus_within |= add.has_focus();
+            if add.clicked() {
+                open_capture(ui, screen, row.id.clone());
+            }
         }
-
-        let reset_label = tr_args("controls-reset-action", &[("action", label)]);
-        if ui.button(reset_label).clicked() {
-            controller.reset_binding(row.id.clone());
+        if revealed {
+            let reset_label = tr_args("controls-reset-action", &[("action", label)]);
+            let reset = ui.button(reset_label);
+            focus_within |= reset.has_focus();
+            if reset.clicked() {
+                controller.reset_binding(row.id.clone());
+            }
         }
     });
+
+    let state = RowState {
+        rect: out.response.rect,
+        focus_within,
+        revealed,
+    };
+    if previous.is_some_and(|p| p.revealed != revealed) {
+        ui.ctx().request_repaint();
+    }
+    ui.memory_mut(|memory| memory.data.insert_temp(state_id, state));
 }
 
-/// One binding chip: a non-interactive label showing the platform display
-/// string (accessible name `controls-binding-chip { $binding }`), a `⚠` +
-/// a tier-aware "conflicts with …" note ([`conflict_message`]) when
-/// `chord` is currently flagged as conflicting (`conflicting`, from the
-/// row's own snapshotted `ActionRow::conflicts` — US3, contracts/
-/// ui-actions.md §4, contracts/action-registry-plugins.md G15), and a `×`
-/// button that removes it immediately (FR-008).
-fn show_chip<B: OutputBackend, H: SourceHost>(
+/// The `×` button of one binding chip: removes it immediately (FR-008).
+/// The chip label and its `⚠` conflict note are painted by
+/// [`shortcut_groups::paint_bindings`].
+fn show_remove<B: OutputBackend, H: SourceHost>(
     ui: &mut Ui,
     controller: &mut PlaybackController<B, H>,
     action: ActionId,
     chord: Chord,
     platform: Platform,
-    conflicting: bool,
-) {
-    let conflict_partner = conflicting
-        .then(|| controller.actions().conflict_partner(action.clone(), chord))
-        .flatten();
-
-    ui.horizontal(|ui| {
-        let display = chord.display(platform);
-        ui.label(tr_args(
-            "controls-binding-chip",
-            &[("binding", display.clone())],
-        ));
-
-        if let Some(other) = conflict_partner {
-            let message = conflict_message(controller, &other);
-            ui.label(format!("⚠ {message}"));
-        }
-
-        let remove = ui.small_button("×");
-        let remove_name = tr_args("controls-remove-binding", &[("binding", display)]);
-        remove.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, remove_name.clone()));
-        if remove.clicked() {
-            controller.remove_binding(action.clone(), chord);
-        }
-    });
+) -> Response {
+    let remove = ui.small_button("×");
+    let remove_name = tr_args(
+        "controls-remove-binding",
+        &[("binding", KeyLabel::new(chord, platform).spoken)],
+    );
+    remove.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, remove_name.clone()));
+    if remove.clicked() {
+        controller.remove_binding(action, chord);
+    }
+    remove
 }
 
 /// Per-`egui::Memory` id: does the capture control shown this frame need
@@ -550,11 +537,7 @@ fn show_capture_control<B: OutputBackend, H: SourceHost>(
             // carry its `⚠` until next frame — surface the conflict-
             // partner name inline, right here, in this same frame.
             if let Some(other) = controller.actions().conflict_partner(action.clone(), chord) {
-                let display = chord.display(if ui.ctx().os().is_mac() {
-                    Platform::Mac
-                } else {
-                    Platform::Other
-                });
+                let display = KeyLabel::new(chord, shortcut_groups::platform_of(ui.ctx())).visible;
                 let message = conflict_message(controller, &other);
                 ui.label(format!(
                     "{} ⚠ {message}",

@@ -9,8 +9,8 @@ mod window;
 
 pub use model::{
     AudioSettings, DeviceName, DeviceNameError, DisclosureAcknowledgement, InvalidField,
-    NowPlayingPanels, PanelPersisted, PanelPlacement, RawNowPlayingPanels, RawPanel, RawSettings,
-    RawWindow, SCHEMA_VERSION, generate_connect_device_id,
+    NUDGE_STEP_MS_RANGE, NowPlayingPanels, PanelPersisted, PanelPlacement, RawNowPlayingPanels,
+    RawPanel, RawSettings, RawWindow, SCHEMA_VERSION, generate_connect_device_id,
 };
 pub use store::{CONFIG_DIR_ENV, LoadOutcome, SaveError, SettingsStore, SettingsWarning};
 pub use window::{

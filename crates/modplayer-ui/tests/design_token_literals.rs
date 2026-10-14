@@ -503,3 +503,63 @@ fn scan_actually_reaches_both_crates() {
         "expected to find crates/modplayer/src/main.rs — modplayer root is broken"
     );
 }
+
+/// 028-settings-fields-and-account (F29, FR-016): the shared settings-field
+/// builder is inside the scan's file set, so its zero-literal state is
+/// enforced by `no_colour_or_font_literals_outside_theme`.
+#[test]
+fn settings_field_builder_is_scanned() {
+    let field = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("settings")
+        .join("field.rs");
+    assert!(field.is_file(), "{} must exist", field.display());
+    assert!(
+        scan_all_files()
+            .iter()
+            .any(|p| p.ends_with("settings/field.rs")),
+        "the literal scan must cover settings/field.rs"
+    );
+}
+
+/// 029-keyboard-shortcut-reference (T048, NFR-6.2): the key-label, group and
+/// sheet modules are in the general scan's file set; `theme/fonts.rs` lives
+/// under the excluded `theme/` directory, so all four are scanned here by
+/// name for colour literals (the printable sheet's black-on-white CSS is
+/// string content with named CSS keywords, never a `#rrggbb` literal).
+#[test]
+fn shortcut_reference_modules_have_no_colour_literals() {
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let targets = [
+        "key_label.rs",
+        "shortcut_groups.rs",
+        "shortcut_sheet.rs",
+        "theme/fonts.rs",
+    ];
+    let mut hits = Vec::new();
+    for rel in targets {
+        let path = src.join(rel);
+        let contents = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()));
+        let mut tracker = CfgTestTracker::new();
+        for (idx, line) in contents.lines().enumerate() {
+            if tracker.advance(line) || is_excluded_line(line) {
+                continue;
+            }
+            if let Some(matched) = colour_hit(line) {
+                hits.push(Hit {
+                    path: path.clone(),
+                    line: idx + 1,
+                    text: line.to_string(),
+                    matched,
+                });
+            }
+        }
+    }
+    let report: Vec<String> = hits.iter().map(Hit::to_string).collect();
+    assert!(
+        hits.is_empty(),
+        "colour literals found:\n{}",
+        report.join("\n")
+    );
+}

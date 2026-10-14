@@ -316,3 +316,129 @@ fn ring_and_selection_do_not_overlap() {
 
     output.drop_without_applying_deltas();
 }
+
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
+/// 025 US3 (RM1, FR-009): the row "…" opener is Quiet — no fill at rest,
+/// the 015 hover blend on hover, and a keyboard-focus ring when focused.
+#[test]
+fn row_actions_opener_quiet_hover_and_focus_ring_states() {
+    use egui::{Event, PointerButton, Pos2};
+    use modplayer_audio_source::{Availability, TrackId, TrackRef};
+    use modplayer_ui::artwork::ArtworkCache;
+    use modplayer_ui::rows::{RowEntity, list_row};
+
+    let ctx = Context::default();
+    modplayer_ui::theme::apply_tokens(&ctx);
+    ctx.enable_accesskit();
+    let mut cache = ArtworkCache::new();
+    let entity = RowEntity::Track(TrackRef::new(
+        TrackId::new("spotify:track:is").unwrap(),
+        "Title".to_string(),
+        vec!["Artist".to_string()],
+        None,
+        None,
+        1000,
+        Availability::Available,
+    ));
+    let name = modplayer_ui::rows::accessible_name(&entity);
+    let label = modplayer_core::tr_args("row-actions", &[("name", name)]);
+    let input = |events: Vec<Event>| RawInput {
+        screen_rect: Some(Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(800.0, 600.0),
+        )),
+        events,
+        ..Default::default()
+    };
+    let opener_rect = |out: &mut egui::FullOutput| -> Rect {
+        let update = out.platform_output.accesskit_update.take().unwrap();
+        let b = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == egui::accesskit::Role::Button && n.label() == Some(&label))
+            .and_then(|(_, n)| n.bounds())
+            .expect("opener node");
+        Rect::from_min_max(
+            Pos2::new(b.x0 as f32, b.y0 as f32),
+            Pos2::new(b.x1 as f32, b.y1 as f32),
+        )
+    };
+    let fill_at = |shapes: &[ClippedShape], rect: Rect| -> Option<Color32> {
+        shapes.iter().find_map(|c| match &c.shape {
+            Shape::Rect(r)
+                if r.rect.expand(0.5).contains_rect(rect)
+                    && rect.expand(0.5).contains_rect(r.rect)
+                    && r.fill != Color32::TRANSPARENT =>
+            {
+                Some(r.fill)
+            }
+            _ => None,
+        })
+    };
+
+    let mut out = ctx.run_ui(input(vec![]), |ui| {
+        let _ = list_row(ui, &mut cache, &entity, false);
+    });
+    let rect = opener_rect(&mut out);
+    assert_eq!(fill_at(&out.shapes, rect), None, "no fill at rest");
+    out.drop_without_applying_deltas();
+
+    // Hover: two frames so the button reads last pass's hover.
+    let hover = || vec![Event::PointerMoved(rect.center())];
+    for _ in 0..2 {
+        let out = ctx.run_ui(input(hover()), |ui| {
+            let _ = list_row(ui, &mut cache, &entity, false);
+        });
+        if let Some(fill) = fill_at(&out.shapes, rect) {
+            assert_ne!(fill, Color32::TRANSPARENT);
+        }
+        out.drop_without_applying_deltas();
+    }
+    let out = ctx.run_ui(input(hover()), |ui| {
+        let _ = list_row(ui, &mut cache, &entity, false);
+    });
+    assert!(
+        fill_at(&out.shapes, rect).is_some(),
+        "Quiet opener must gain the hover blend on hover"
+    );
+    out.drop_without_applying_deltas();
+
+    // Keyboard focus: ring stroked outside the opener.
+    let press = |pressed| Event::PointerButton {
+        pos: Pos2::new(rect.center().x, rect.center().y),
+        button: PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    for e in [press(true), press(false)] {
+        ctx.run_ui(input(vec![e]), |ui| {
+            let _ = list_row(ui, &mut cache, &entity, false);
+        })
+        .drop_without_applying_deltas();
+    }
+    // Menu open steals focus into it; close with Escape, then Tab to the
+    // opener.
+    let key = |k| Event::Key {
+        key: k,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    };
+    for k in [egui::Key::Escape, egui::Key::Tab] {
+        ctx.run_ui(input(vec![key(k)]), |ui| {
+            let _ = list_row(ui, &mut cache, &entity, false);
+        })
+        .drop_without_applying_deltas();
+    }
+    let out = ctx.run_ui(input(vec![]), |ui| {
+        let _ = list_row(ui, &mut cache, &entity, false);
+        paint_focus_ring(ui.ctx());
+    });
+    let ring = ring_shape_rect(&out.shapes).expect("focused opener paints the ring");
+    assert!(
+        ring.contains_rect(rect),
+        "ring {ring:?} must enclose opener {rect:?}"
+    );
+    out.drop_without_applying_deltas();
+}

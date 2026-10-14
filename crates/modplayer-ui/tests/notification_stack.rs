@@ -313,13 +313,12 @@ fn library_tab_names() -> Vec<String> {
 fn plugin_header_names() -> Vec<String> {
     [
         "plugins-col-name",
-        "plugins-col-version",
         "plugins-col-source",
         "plugins-col-enabled",
         "plugins-col-health",
         "plugins-col-permissions",
-        "plugins-col-cpu",
-        "plugins-col-memory",
+        "plugins-col-resource",
+        "plugins-col-actions",
     ]
     .into_iter()
     .map(tr)
@@ -408,12 +407,14 @@ fn plugins_protected_rects(
     controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
 ) -> Vec<Rect> {
     let mut shell = Shell::default();
+    let mut plugins_state = plugins_view::PluginsViewState::default();
+    let mut plugins_memory = modplayer_ui::section_memory::SectionMemory::default();
     let nodes = run_frame(ctx, sized_input(w, h), |ui| {
         Panel::left(Id::new("shell-nav-rail")).show(ui, |ui| {
             shell.nav_rail(ui);
         });
         CentralPanel::default().show(ui, |ui| {
-            plugins_view::show(ui, controller);
+            plugins_view::show(ui, controller, &mut plugins_state, &mut plugins_memory);
         });
     });
     let mut names = nav_rail_names();

@@ -8,9 +8,12 @@
 use egui::{TextEdit, Ui};
 use modplayer_audio_io::OutputBackend;
 use modplayer_audio_source::SourceHost;
-use modplayer_core::{PlaybackController, tr};
+use modplayer_core::settings::NUDGE_STEP_MS_RANGE;
+use modplayer_core::{AudioSettings, PlaybackController, tr};
 
-use crate::theme;
+use crate::settings::field::{self, FieldSpec, ResetState, Unit};
+use crate::theme::tokens::space;
+use crate::widgets::controls::panel_card;
 
 /// Owned across frames (mirrors `AboutScreen`/`DeveloperScreen`'s own
 /// sub-state) so a draft edit survives repaint and the last-known effective
@@ -21,6 +24,9 @@ pub struct PlaybackScreen {
     draft: String,
     effective_name: String,
     too_long: bool,
+    /// A custom name is stored (`[playback] device_name` is `Some`); the
+    /// Reset offer keys off this, not the effective name (research R4).
+    custom_name: bool,
 }
 
 impl PlaybackScreen {
@@ -33,6 +39,12 @@ impl PlaybackScreen {
             draft: effective_name.clone(),
             effective_name,
             too_long: false,
+            custom_name: controller
+                .settings_store()
+                .load()
+                .settings
+                .device_name
+                .is_some(),
         }
     }
 }
@@ -47,35 +59,55 @@ pub fn show<B: OutputBackend, H: SourceHost>(
     screen: &mut PlaybackScreen,
     focus: Option<&str>,
 ) {
-    let name_label = ui.label(tr("setting-device-name"));
-    ui.label(tr("setting-device-name-hint"));
-
-    let response = ui
-        .add(TextEdit::singleline(&mut screen.draft).hint_text(screen.effective_name.clone()))
-        .labelled_by(name_label.id);
-    if focus == Some("playback.device_name") {
-        response.request_focus();
-    }
-    if response.lost_focus() {
-        match controller.set_device_name(&screen.draft) {
-            Ok(()) => {
-                screen.too_long = false;
-                screen.effective_name = controller.device_name();
-                // An empty/whitespace commit restores the default; show it
-                // in the field itself (not just the placeholder) so the
-                // effective name is never hidden behind blank text.
-                screen.draft = screen.effective_name.clone();
-            }
-            Err(_) => {
-                screen.too_long = true;
+    panel_card(ui, &tr("settings-group-connect-device"), |ui| {
+        let mut spec = FieldSpec::new("playback.device_name", tr("setting-device-name"));
+        spec.help = Some(tr("setting-device-name-hint"));
+        spec.reset = if screen.custom_name {
+            ResetState::Offered
+        } else {
+            ResetState::Hidden
+        };
+        let output = field::row(ui, &spec, |ui| {
+            ui.add(TextEdit::singleline(&mut screen.draft).hint_text(screen.effective_name.clone()))
+        });
+        if let Some(id) = output.label_id {
+            output.control.clone().labelled_by(id);
+        }
+        let response = output.control;
+        if focus == Some("playback.device_name") {
+            response.request_focus();
+        }
+        if output.reset_clicked {
+            screen.draft.clear();
+        }
+        if response.lost_focus() || output.reset_clicked {
+            match controller.set_device_name(&screen.draft) {
+                Ok(()) => {
+                    screen.too_long = false;
+                    screen.custom_name = !screen.draft.trim().is_empty();
+                    screen.effective_name = controller.device_name();
+                    // An empty/whitespace commit restores the default; show it
+                    // in the field itself (not just the placeholder) so the
+                    // effective name is never hidden behind blank text.
+                    screen.draft = screen.effective_name.clone();
+                }
+                Err(_) => {
+                    screen.too_long = true;
+                }
             }
         }
-    }
-    if screen.too_long {
-        ui.label(tr("setting-device-name-too-long"));
-    }
+        if screen.too_long {
+            ui.label(tr("setting-device-name-too-long"));
+        }
+    });
+    ui.add_space(space::LG);
 
-    show_nudge_step(ui, controller);
+    panel_card(ui, &tr("settings-group-markers"), |ui| {
+        let response = show_nudge_step(ui, controller);
+        if focus == Some("markers.nudge_step_ms") {
+            response.request_focus();
+        }
+    });
 }
 
 /// The `[markers] nudge_step_ms` field (006, contracts/ui-markers.md §7):
@@ -89,25 +121,38 @@ fn show_nudge_step<B: OutputBackend, H: SourceHost>(
     ui: &mut Ui,
     controller: &mut PlaybackController<B, H>,
 ) -> egui::Response {
-    let label = ui.label(tr("setting-nudge-step"));
-    // FR-006, U2: field-description prose, capped at the 72-character
-    // measure (research R17).
-    ui.scope(|ui| {
-        ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
-        ui.label(tr("setting-nudge-step-desc"));
-    });
     let mut value = i64::from(controller.nudge_step_ms());
-    let response = ui
-        .add(
+    let mut spec = FieldSpec::new("markers.nudge_step_ms", tr("setting-nudge-step"));
+    spec.reset = ResetState::compute(
+        &controller.nudge_step_ms(),
+        &AudioSettings::default().nudge_step_ms,
+    );
+    spec.help = Some(tr("setting-nudge-step-desc"));
+    let (min, max) = (*NUDGE_STEP_MS_RANGE.start(), *NUDGE_STEP_MS_RANGE.end());
+    spec.range = Some(field::format_range(
+        Unit::Ms,
+        f64::from(min),
+        f64::from(max),
+    ));
+    let output = field::row(ui, &spec, |ui| {
+        ui.add(
             egui::DragValue::new(&mut value)
-                .range(1..=1_000)
-                .suffix(" ms")
+                .range(i64::from(min)..=i64::from(max))
+                .custom_formatter(|n, _| field::format_value(Unit::Ms, n))
+                .custom_parser(|text| field::parse_value(Unit::Ms, text))
                 .update_while_editing(true),
         )
-        .labelled_by(label.id);
-    if response.changed() {
+    });
+    if let Some(id) = output.label_id {
+        output.control.clone().labelled_by(id);
+    }
+    let reset_clicked = output.reset_clicked;
+    let response = output.control;
+    if reset_clicked {
+        controller.set_nudge_step_ms(AudioSettings::default().nudge_step_ms);
+    } else if response.changed() {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let ms = value.clamp(1, 1_000) as u16;
+        let ms = value.clamp(i64::from(min), i64::from(max)) as u16;
         controller.set_nudge_step_ms(ms);
     }
     response
@@ -179,24 +224,20 @@ mod tests {
         });
         output.drop_without_applying_deltas();
 
-        // Frame 2: clear the existing "10" (egui's own "select all text on
+        // Frame 2: clear the existing "10 ms" (egui's own "select all text on
         // gained focus" isn't reliable in a headless test's `run_ui`, so
         // clear it explicitly) and type "500".
         let mut input = default_input();
-        input.events.push(egui::Event::Key {
-            key: egui::Key::Backspace,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        });
-        input.events.push(egui::Event::Key {
-            key: egui::Key::Backspace,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        });
+        // The edit buffer is the unit-bearing text ("10 ms", five chars).
+        for _ in 0.."10 ms".len() {
+            input.events.push(egui::Event::Key {
+                key: egui::Key::Backspace,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
         input.events.push(egui::Event::Text("500".to_string()));
         let output = ctx.run_ui(input, |ui| {
             show_nudge_step(ui, &mut controller);

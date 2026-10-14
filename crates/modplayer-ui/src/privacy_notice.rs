@@ -11,10 +11,36 @@ use modplayer_core::tr;
 
 use crate::theme;
 
-/// Draw the privacy notice. Returns `true` once "Back" is clicked, so the
-/// caller (`welcome.rs`, and later `settings/about.rs`) can pop back to
-/// whichever screen opened this one.
-pub fn show(ui: &mut Ui) -> bool {
+/// Which screen opened the privacy notice, so the back control can name
+/// where it returns to (030 C5).
+///
+/// ```
+/// use modplayer_ui::privacy_notice::PrivacyOrigin;
+/// let origin = PrivacyOrigin::About;
+/// assert_ne!(origin, PrivacyOrigin::Welcome);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivacyOrigin {
+    /// Opened from the first-launch welcome screen.
+    Welcome,
+    /// Opened from Settings › About.
+    About,
+}
+
+/// Draw the privacy notice. Returns `true` once the back control is
+/// clicked, so the caller (`welcome.rs`, `settings/about.rs`) can pop back
+/// to whichever screen opened this one. The control is labelled for
+/// `origin` (`privacy-back-to-welcome` / `privacy-back-to-about`).
+///
+/// ```no_run
+/// # use modplayer_ui::privacy_notice::{self, PrivacyOrigin};
+/// # fn demo(ui: &mut egui::Ui) {
+/// if privacy_notice::show(ui, PrivacyOrigin::About) {
+///     // Return to Settings › About.
+/// }
+/// # }
+/// ```
+pub fn show(ui: &mut Ui, origin: PrivacyOrigin) -> bool {
     ui.heading(tr("privacy-title"));
     ScrollArea::vertical().show(ui, |ui| {
         // FR-006, U2: the privacy notice is prose, capped at the
@@ -22,5 +48,9 @@ pub fn show(ui: &mut Ui) -> bool {
         ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
         ui.label(tr("privacy-body"));
     });
-    ui.button(tr("privacy-back")).clicked()
+    let back_key = match origin {
+        PrivacyOrigin::Welcome => "privacy-back-to-welcome",
+        PrivacyOrigin::About => "privacy-back-to-about",
+    };
+    ui.button(tr(back_key)).clicked()
 }

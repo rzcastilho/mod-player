@@ -9,6 +9,8 @@
 //! headlessly through `ScriptedHost` + `FakeBackend` exactly like
 //! `now_playing.rs`/`queue_view.rs`'s own behavioural tests.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1048,14 +1050,22 @@ fn search_and_settle(
 }
 
 #[test]
-fn search_box_exposes_a_text_input_labelled_search() {
+fn search_box_exposes_a_text_input_named_by_search_field_label() {
     let (mut controller, _handle, _dir) = active_controller("search-box");
     let mut artwork = modplayer_ui::artwork::ArtworkCache::new();
     let mut focus = false;
     let mut state = modplayer_ui::search_view::SearchViewState::default();
+    let mut memory = modplayer_ui::section_memory::SectionMemory::default();
 
     let nodes = render_nodes(|ui| {
-        modplayer_ui::search_view::show(ui, &mut controller, &mut artwork, &mut focus, &mut state);
+        modplayer_ui::search_view::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut focus,
+            &mut state,
+            &mut memory,
+        );
     });
 
     let text_inputs: Vec<_> = nodes.iter().filter(|n| n.role == Role::TextInput).collect();
@@ -1064,10 +1074,15 @@ fn search_box_exposes_a_text_input_labelled_search() {
         1,
         "expected exactly one Role::TextInput node, got {text_inputs:?}"
     );
+    assert_eq!(
+        text_inputs[0].label.as_deref(),
+        Some(tr("search-field-label").as_str()),
+        "the search box's accessible name must be `search-field-label` (026 F1): {:?}",
+        text_inputs[0]
+    );
     assert!(
-        text_inputs[0].labelled_by_something,
-        "the search box must be associated with its \"{}\" label: {:?}",
-        tr("search-placeholder"),
+        !text_inputs[0].labelled_by_something,
+        "the search box carries its own label, not a separate label node (026 F1): {:?}",
         text_inputs[0]
     );
 }
@@ -1080,11 +1095,29 @@ fn group_headers_expose_role_header_and_the_fixed_names() {
     let mut artwork = modplayer_ui::artwork::ArtworkCache::new();
     let mut focus = false;
     let mut state = modplayer_ui::search_view::SearchViewState::default();
+    let mut memory = modplayer_ui::section_memory::SectionMemory::default();
     let nodes = render_nodes(|ui| {
-        modplayer_ui::search_view::show(ui, &mut controller, &mut artwork, &mut focus, &mut state);
+        modplayer_ui::search_view::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut focus,
+            &mut state,
+            &mut memory,
+        );
     });
 
-    find_one(&nodes, Role::Header, &tr("search-group-tracks"));
+    find_one(
+        &nodes,
+        Role::Header,
+        &tr_args(
+            "search-group-header",
+            &[
+                ("group", tr("search-group-tracks")),
+                ("count", "2".to_string()),
+            ],
+        ),
+    );
     // Empty groups (Albums/Artists/Playlists) must not render a header at
     // all (contracts/ui-surface.md §2: "omitted when Empty/Unsupported/
     // Idle").
@@ -1101,8 +1134,16 @@ fn show_more_button_exposes_its_accessible_name_when_a_further_page_exists() {
     let mut artwork = modplayer_ui::artwork::ArtworkCache::new();
     let mut focus = false;
     let mut state = modplayer_ui::search_view::SearchViewState::default();
+    let mut memory = modplayer_ui::section_memory::SectionMemory::default();
     let nodes = render_nodes(|ui| {
-        modplayer_ui::search_view::show(ui, &mut controller, &mut artwork, &mut focus, &mut state);
+        modplayer_ui::search_view::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut focus,
+            &mut state,
+            &mut memory,
+        );
     });
 
     let expected = tr_args("search-show-more", &[("group", tr("search-group-tracks"))]);
@@ -1118,8 +1159,16 @@ fn each_row_exposes_a_list_item_and_an_actions_button() {
     let mut artwork = modplayer_ui::artwork::ArtworkCache::new();
     let mut focus = false;
     let mut state = modplayer_ui::search_view::SearchViewState::default();
+    let mut memory = modplayer_ui::section_memory::SectionMemory::default();
     let nodes = render_nodes(|ui| {
-        modplayer_ui::search_view::show(ui, &mut controller, &mut artwork, &mut focus, &mut state);
+        modplayer_ui::search_view::show(
+            ui,
+            &mut controller,
+            &mut artwork,
+            &mut focus,
+            &mut state,
+            &mut memory,
+        );
     });
 
     let row_name = "Track 0 — Artist";
@@ -1475,6 +1524,94 @@ fn detail_back_button_exposes_its_accessible_name() {
         let back = find_one(nodes, Role::Button, &tr("detail-back"));
         assert!(!back.disabled, "{back:?}");
     }
+}
+
+/// 025 H11: the collection header is a `Group` named by the title; the
+/// facts are exposed as text; Play and "…" carry their names; Play exposes
+/// its disabled state for an empty collection.
+#[test]
+fn collection_header_exposes_group_facts_play_and_menu() {
+    let (mut controller, handle, _dir) = active_controller("header-a11y");
+    let id = ArtistId::new("spotify:artist:h").unwrap();
+    let artist = ArtistRef {
+        id: id.clone(),
+        name: "The Artist".to_string(),
+        artwork_url: None,
+    };
+    handle.script_hydrate(HydratedReply {
+        artists: vec![artist.clone()],
+        ..Default::default()
+    });
+    handle.script_library(
+        LibrarySet::FollowedArtists,
+        vec![Ok(LibraryPage {
+            set: LibrarySet::FollowedArtists,
+            items: vec![LibraryItem::Artist(artist)],
+            next_page: None,
+            sync_token: None,
+        })],
+    );
+    for set in [
+        LibrarySet::SavedTracks,
+        LibrarySet::SavedAlbums,
+        LibrarySet::Playlists,
+    ] {
+        handle.script_library(set, vec![Ok(empty_page(set))]);
+    }
+    controller.library_retry_sync();
+    for _ in 0..12 {
+        controller.tick();
+    }
+    handle.script_track_list(
+        TrackListSource::ArtistTop(id.clone()),
+        Ok(TrackList {
+            source: TrackListSource::ArtistTop(id.clone()),
+            tracks: vec![],
+        }),
+    );
+
+    let mut artwork = ArtworkCache::new();
+    let target = DetailTarget::Artist(id);
+    let mut state = detail_view::DetailViewState::default();
+    let mut draw = |controller: &mut PlaybackController<FakeBackend, ScriptedHost>| {
+        render_nodes(|ui| {
+            let _ = detail_view::show(
+                ui,
+                controller,
+                &mut artwork,
+                &target,
+                &mut state,
+                &mut modplayer_ui::section_memory::SectionMemory::default(),
+            );
+        })
+    };
+    draw(&mut controller);
+    controller.tick();
+    let nodes = draw(&mut controller);
+
+    find_one(&nodes, Role::Group, "The Artist");
+    let play = find_one(
+        &nodes,
+        Role::Button,
+        &tr_args("detail-play-name", &[("name", "The Artist".to_string())]),
+    );
+    assert!(play.disabled, "empty collection: Play disabled: {play:?}");
+    let more = find_one(
+        &nodes,
+        Role::Button,
+        &tr_args("row-actions", &[("name", "The Artist".to_string())]),
+    );
+    assert!(!more.disabled, "{more:?}");
+    let facts = format!("{} · ", tr("detail-kind-artist"));
+    assert!(
+        nodes.iter().any(|n| {
+            n.label
+                .as_deref()
+                .or(n.value.as_deref())
+                .is_some_and(|t| t.starts_with(&facts))
+        }),
+        "facts text node missing: {nodes:?}"
+    );
 }
 
 // 005-now-playing-waveform (T037, contracts/ui-waveform.md §1/§7): the
@@ -2302,6 +2439,36 @@ fn platform_now() -> Platform {
     }
 }
 
+/// Render the Controls page with the pointer over `action`'s row, so its
+/// hover-revealed controls (029 C9/C10) are present in the returned nodes.
+fn render_controls_hovering(
+    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+    screen: &mut ControlsScreen,
+    action: HostAction,
+) -> Vec<AccessNode> {
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let needle = tr(action.label_key());
+    let first = render_nodes_on(&ctx, default_input(), |ui| {
+        controls::show(ui, controller, screen, None)
+    });
+    let pos = first
+        .iter()
+        .filter(|n| n.accessible_name().is_some_and(|l| l.contains(&needle)))
+        .find_map(|n| n.bounds)
+        .expect("row element")
+        .center();
+    let mut nodes = Vec::new();
+    for _ in 0..2 {
+        let mut input = default_input();
+        input.events.push(Event::PointerMoved(pos));
+        nodes = render_nodes_on(&ctx, input, |ui| {
+            controls::show(ui, controller, screen, None)
+        });
+    }
+    nodes
+}
+
 #[test]
 fn controls_filter_box_is_labelled() {
     let (mut controller, _dir) = fresh_bare_controller("controls-filter-a11y");
@@ -2326,14 +2493,14 @@ fn controls_filter_box_is_labelled() {
 fn controls_reset_all_and_row_controls_expose_accessible_names_and_stay_enabled() {
     let (mut controller, _dir) = fresh_bare_controller("controls-row-a11y");
     let mut screen = ControlsScreen::default();
-    let nodes = render_nodes(|ui| controls::show(ui, &mut controller, &mut screen, None));
+    let nodes = render_controls_hovering(&mut controller, &mut screen, HostAction::NavLibrary);
 
     let reset_all = find_one(&nodes, Role::Button, &tr("controls-reset-all"));
     assert!(!reset_all.disabled);
 
     assert!(
         !find_all(&nodes, Role::Button, &tr("controls-add-binding")).is_empty(),
-        "every row must expose an \"Add binding\" button"
+        "a revealed row must expose an \"Add binding\" button"
     );
 
     let action = HostAction::NavLibrary;
@@ -2349,11 +2516,12 @@ fn controls_reset_all_and_row_controls_expose_accessible_names_and_stay_enabled(
 fn controls_binding_chip_and_remove_button_expose_accessible_names() {
     let (mut controller, _dir) = fresh_bare_controller("controls-chip-a11y");
     let mut screen = ControlsScreen::default();
-    let nodes = render_nodes(|ui| controls::show(ui, &mut controller, &mut screen, None));
+    let action = HostAction::ToggleLoop;
+    let nodes = render_controls_hovering(&mut controller, &mut screen, action);
 
     let chord = Chord::parse("L").unwrap_or_else(|_| unreachable!()); // ToggleLoop's default.
-    let display = chord.display(platform_now());
-    let chip_text = tr_args("controls-binding-chip", &[("binding", display.clone())]);
+    let spoken = modplayer_ui::key_label::KeyLabel::new(chord, platform_now()).spoken;
+    let chip_text = tr_args("controls-binding-chip", &[("binding", spoken.clone())]);
     assert!(
         nodes
             .iter()
@@ -2361,9 +2529,22 @@ fn controls_binding_chip_and_remove_button_expose_accessible_names() {
         "the binding chip must expose its accessible name: {nodes:?}"
     );
 
-    let remove_name = tr_args("controls-remove-binding", &[("binding", display)]);
+    let remove_name = tr_args("controls-remove-binding", &[("binding", spoken.clone())]);
     let remove = find_one(&nodes, Role::Button, &remove_name);
     assert!(!remove.disabled);
+
+    // 029 C11: the row element is named `controls-row { action } { bindings }`.
+    let row_name = tr_args(
+        "controls-row",
+        &[("action", tr(action.label_key())), ("bindings", spoken)],
+    );
+    assert!(
+        nodes
+            .iter()
+            .any(|n| n.accessible_name() == Some(row_name.as_str())),
+        "the row element must expose `{row_name}`: {nodes:?}"
+    );
+    assert_interactive_nodes_named(&nodes, "controls page with a revealed row");
 }
 
 #[test]
@@ -2389,12 +2570,12 @@ fn controls_disabled_row_shows_inactive_suffix_and_keeps_controls_enabled() {
     let action = HostAction::TempoStepUp;
     controller.set_action_enabled(action, false);
     let mut screen = ControlsScreen::default();
-    let nodes = render_nodes(|ui| controls::show(ui, &mut controller, &mut screen, None));
+    let nodes = render_controls_hovering(&mut controller, &mut screen, action);
     let expected_label = format!("{} {}", tr(action.label_key()), tr("controls-inactive"));
     assert!(
-        nodes
-            .iter()
-            .any(|n| n.accessible_name() == Some(expected_label.as_str())),
+        nodes.iter().any(|n| n
+            .accessible_name()
+            .is_some_and(|name| name.contains(expected_label.as_str()))),
         "a disabled row's label must expose the `(inactive)` suffix: {nodes:?}"
     );
 
@@ -2487,7 +2668,11 @@ fn fixture_controller_for_a11y(
 #[test]
 fn plugins_section_controls_named() {
     let (mut controller, _dir) = fixture_controller_for_a11y("plugins-section");
-    let nodes = render_nodes(|ui| modplayer_ui::plugins_view::show(ui, &mut controller));
+    let mut state = modplayer_ui::plugins_view::PluginsViewState::default();
+    let mut memory = modplayer_ui::section_memory::SectionMemory::default();
+    let nodes = render_nodes(|ui| {
+        modplayer_ui::plugins_view::show(ui, &mut controller, &mut state, &mut memory);
+    });
 
     let checkboxes: Vec<_> = nodes.iter().filter(|n| n.role == Role::CheckBox).collect();
     // 17 fixtures (010-transport-focus adds `focus-a`/`focus-b`;
@@ -2534,6 +2719,118 @@ fn plugins_section_controls_named() {
         ok_labels.len(),
         18,
         "expected 18 `ok` health labels: {nodes:?}"
+    );
+}
+
+/// 027 T17, FR-010: Tab walks each row's controls in reading order —
+/// Enabled → permissions disclosure → panel controls — and rows run top to
+/// bottom. Header labels are never focusable. (Restart and the
+/// expansion-area controls sit after the same cells; they need a suspended
+/// plugin / two panels and are covered by `tests/plugins_view.rs`.)
+#[test]
+fn tab_order_within_row() {
+    let (mut controller, _dir) = fixture_controller_for_a11y("plugins-tab-order");
+    let id = plugin_id_by_identifier(&mut controller, "org.modplayer.fixture.ui-panel");
+    let shared = std::sync::Arc::clone(controller.shared());
+    controller.plugins_mut().spawn(id, &shared);
+    assert!(wait_plugin_active(&mut controller, id));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while controller.plugin_panels_view().docked.is_empty() {
+        assert!(Instant::now() < deadline, "panel never registered");
+        controller.tick();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let plugin = controller
+        .plugins_view()
+        .rows
+        .iter()
+        .find(|r| r.id == id)
+        .map(|r| r.name.clone())
+        .expect("ui-panel row");
+
+    let mut state = modplayer_ui::plugins_view::PluginsViewState::default();
+    let mut memory = modplayer_ui::section_memory::SectionMemory::default();
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    // (role, accessible name, top y) of each newly focused node.
+    let mut order: Vec<(Role, String, f32)> = Vec::new();
+    for _ in 0..200 {
+        let mut input = default_input();
+        input.events.push(Event::Key {
+            key: Key::Tab,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::default(),
+        });
+        let mut output = ctx.run_ui(input, |ui| {
+            modplayer_ui::plugins_view::show(ui, &mut controller, &mut state, &mut memory);
+        });
+        let update = output
+            .platform_output
+            .accesskit_update
+            .take()
+            .expect("accesskit_update should be populated once enabled");
+        output.drop_without_applying_deltas();
+        let Some((_, node)) = update.nodes.iter().find(|(nid, _)| *nid == update.focus) else {
+            continue;
+        };
+        let name = node
+            .label()
+            .or_else(|| node.value())
+            .unwrap_or_default()
+            .to_string();
+        let y = node.bounds().map_or(0.0, |b| b.y0 as f32);
+        if node.role() == Role::Window {
+            continue; // nothing focused yet: AccessKit reports the root
+        }
+        if order.last().is_none_or(|(_, n, _)| *n != name) {
+            if order.iter().any(|(_, n, _)| *n == name) {
+                break; // wrapped around to the start
+            }
+            order.push((node.role(), name, y));
+        }
+    }
+    assert!(order.len() >= 19, "Tab must reach every row: {order:?}");
+
+    // Only interactive widgets take focus — never a header/cell label.
+    for (role, name, _) in &order {
+        assert!(
+            matches!(role, Role::CheckBox | Role::Button),
+            "`{name}` ({role:?}) must not be focusable"
+        );
+    }
+    // Rows top to bottom.
+    assert!(
+        order.windows(2).all(|w| w[1].2 + 1.0 >= w[0].2),
+        "focus must run top to bottom: {order:?}"
+    );
+    // Within the ui-panel row: Enabled, permissions, then panel controls.
+    let pos = |pred: &dyn Fn(&(Role, String, f32)) -> bool| {
+        order
+            .iter()
+            .position(pred)
+            .unwrap_or_else(|| panic!("control not focusable: {order:?}"))
+    };
+    let enabled = pos(&|(r, n, _)| *r == Role::CheckBox && n.contains(&plugin));
+    let permissions =
+        pos(&|(r, n, _)| *r == Role::Button && n.contains(&plugin) && !n.contains("Controls"));
+    let panel_controls: Vec<usize> = order
+        .iter()
+        .enumerate()
+        .filter(|(_, (r, n, _))| {
+            *r == Role::Button && n.contains(&plugin) && n.contains("Controls")
+        })
+        .map(|(i, _)| i)
+        .collect();
+    assert!(!panel_controls.is_empty(), "panel controls focusable");
+    assert!(
+        enabled < permissions,
+        "Enabled before permissions: {order:?}"
+    );
+    assert!(
+        panel_controls.iter().all(|&i| permissions < i),
+        "permissions before panel controls: {order:?}"
     );
 }
 
@@ -2910,4 +3207,616 @@ fn getting_started_controls_accessible() {
     // X1: Dismiss is an ordinary named, enabled button.
     let dismiss = find_one(&nodes, Role::Button, &tr("getting-started-dismiss"));
     assert!(!dismiss.disabled, "{dismiss:?}");
+}
+
+/// 025 US3 (RM9, FR-012): a row's "…" opener is a Button named
+/// `row-actions{name}` and its six menu items are `MenuItem`s named by
+/// their action labels.
+#[test]
+fn row_actions_opener_and_menu_items_expose_names_and_roles() {
+    use modplayer_audio_source::{Availability, TrackId};
+    use modplayer_ui::rows::{RowEntity, list_row};
+
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut cache = ArtworkCache::new();
+    let track = TrackRef::new(
+        TrackId::new("spotify:track:a11y").unwrap(),
+        "Title".to_string(),
+        vec!["Artist".to_string()],
+        None,
+        None,
+        1000,
+        Availability::Available,
+    );
+    let entity = RowEntity::Track(track);
+    let name = modplayer_ui::rows::accessible_name(&entity);
+    let opener = tr_args("row-actions", &[("name", name)]);
+    let input = |events: Vec<Event>| RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0))),
+        events,
+        ..Default::default()
+    };
+    let nodes_of = |mut out: egui::FullOutput| {
+        let update = out.platform_output.accesskit_update.take().unwrap();
+        out.drop_without_applying_deltas();
+        update
+            .nodes
+            .into_iter()
+            .map(|(_, n)| {
+                (
+                    n.role(),
+                    n.label().unwrap_or_default().to_string(),
+                    n.bounds(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let nodes = nodes_of(ctx.run_ui(input(vec![]), |ui| {
+        let _ = list_row(ui, &mut cache, &entity, false);
+    }));
+    let b = nodes
+        .iter()
+        .find(|(r, l, _)| *r == Role::Button && *l == opener)
+        .and_then(|(_, _, b)| *b)
+        .expect("opener is a Button named row-actions{name}");
+    let centre = Pos2::new(((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32);
+    for pressed in [true, false] {
+        ctx.run_ui(
+            input(vec![Event::PointerButton {
+                pos: centre,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            }]),
+            |ui| {
+                let _ = list_row(ui, &mut cache, &entity, false);
+            },
+        )
+        .drop_without_applying_deltas();
+    }
+    let nodes = nodes_of(ctx.run_ui(input(vec![]), |ui| {
+        let _ = list_row(ui, &mut cache, &entity, false);
+    }));
+    let mut items: Vec<String> = nodes
+        .iter()
+        .filter(|(r, _, _)| *r == Role::MenuItem)
+        .map(|(_, l, _)| l.clone())
+        .collect();
+    items.sort();
+    let mut expected: Vec<String> = [
+        "action-play-now",
+        "action-play-next",
+        "action-add-to-queue",
+        "action-add-to-playlist",
+        "action-save-to-library",
+        "action-pin-offline",
+    ]
+    .iter()
+    .map(|k| tr(k))
+    .collect();
+    expected.sort();
+    assert_eq!(items, expected, "six MenuItems named by their labels");
+}
+
+// ---------------------------------------------------------------------
+// 028 settings fields and account: the AccessKit sweep over the new names
+// ---------------------------------------------------------------------
+
+/// Every interactive node carries a non-empty accessible name.
+fn assert_interactive_nodes_named(nodes: &[AccessNode], what: &str) {
+    for node in nodes {
+        if matches!(
+            node.role,
+            Role::Button
+                | Role::CheckBox
+                | Role::ComboBox
+                | Role::Slider
+                | Role::SpinButton
+                | Role::Switch
+                | Role::TextInput
+        ) {
+            assert!(
+                node.labelled_by_something
+                    || node.accessible_name().is_some_and(|n| !n.trim().is_empty()),
+                "{what}: unnamed {:?} node: {node:?}",
+                node.role
+            );
+        }
+    }
+}
+
+/// Reset buttons: named "Reset {field} to default" with no stray
+/// isolation marks, and every other interactive node still named.
+#[test]
+fn settings_reset_buttons_expose_accessible_names() {
+    let (store, _dir) = fresh_store("028-reset-names");
+    let mut controller =
+        PlaybackController::new(FakeBackend::new(vec![]), ScriptedHost::new(), store);
+    controller.set_ceiling(modplayer_engine::CeilingDb::new(-3.0));
+    controller.set_nudge_step_ms(40);
+    let mut cached = controller.settings_store().load().settings;
+    let mut screen = modplayer_ui::settings::playback::PlaybackScreen::new(&controller);
+
+    let audio = render_nodes(|ui| {
+        let _ = modplayer_ui::settings::audio::show(ui, &mut controller, &mut cached, None);
+    });
+    let playback = render_nodes(|ui| {
+        modplayer_ui::settings::playback::show(ui, &mut controller, &mut screen, None)
+    });
+    for (what, nodes, key) in [
+        ("audio", &audio, "setting-limiter-ceiling"),
+        ("playback", &playback, "setting-nudge-step"),
+    ] {
+        let expected = tr_args("settings-reset-a11y", &[("field", tr(key))])
+            .replace(['\u{2068}', '\u{2069}'], "");
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.role == Role::Button && n.accessible_name() == Some(expected.as_str())),
+            "{what}: no Reset button named `{expected}`: {nodes:?}"
+        );
+        assert_interactive_nodes_named(nodes, what);
+    }
+}
+
+/// "Coming soon" badge: Offline and Privacy & diagnostics are announced as
+/// "{category}, coming soon"; a complete category keeps its plain name.
+#[test]
+fn unavailable_categories_are_announced_as_coming_soon() {
+    use modplayer_core::settings_registry::SettingsCategory;
+    let mut state = modplayer_ui::settings::category_row::CategoryRowState::default();
+    let nodes = render_nodes(|ui| {
+        let _ = modplayer_ui::settings::category_row::show(ui, SettingsCategory::Audio, &mut state);
+    });
+    assert_interactive_nodes_named(&nodes, "category row");
+    let all_names: Vec<String> = nodes
+        .iter()
+        .filter_map(|n| n.accessible_name())
+        .map(|n| n.replace(['\u{2068}', '\u{2069}'], ""))
+        .collect();
+    for category in [
+        SettingsCategory::Offline,
+        SettingsCategory::PrivacyDiagnostics,
+    ] {
+        let expected = tr_args(
+            "settings-category-coming-soon-a11y",
+            &[("category", tr(category.label_key()))],
+        )
+        .replace(['\u{2068}', '\u{2069}'], "");
+        // Inline or, when the row overflows at 800 px, in the More menu
+        // (closed here), so accept either the exact name or an overflow.
+        let inline = all_names.contains(&expected);
+        let overflowed = all_names
+            .iter()
+            .any(|n| n.starts_with(&tr("settings-more")));
+        assert!(
+            inline || overflowed,
+            "`{expected}` neither inline nor behind More: {all_names:?}"
+        );
+    }
+    let audio = tr(SettingsCategory::Audio.label_key());
+    assert!(
+        !all_names
+            .iter()
+            .any(|n| n.contains(&tr("settings-coming-soon")) && n.starts_with(&audio)),
+        "Audio is complete and carries no badge"
+    );
+}
+
+/// Account summary card and the sign-out modal expose named, reachable
+/// controls and a heading for the card.
+#[test]
+fn account_summary_and_signout_modal_expose_accessible_names() {
+    let mut service = common::active_account("028-a11y");
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let render = |ctx: &Context, service: &mut modplayer_account::AccountService, input| {
+        render_nodes_on(ctx, input, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                let _ = modplayer_ui::settings::account::show(ui, service, None);
+            });
+        })
+    };
+    let _ = render(&ctx, &mut service, default_input());
+    let nodes = render(&ctx, &mut service, default_input());
+    assert!(
+        nodes.iter().any(|n| n.role == Role::Heading
+            && n.accessible_name() == Some(tr("account-summary-title").as_str())),
+        "summary card heading: {nodes:?}"
+    );
+    assert_interactive_nodes_named(&nodes, "account");
+
+    // Open the sign-out dialog by clicking the page's Sign out button.
+    let centre = nodes
+        .iter()
+        .find(|n| {
+            n.role == Role::Button && n.accessible_name() == Some(tr("account-sign-out").as_str())
+        })
+        .and_then(|n| n.bounds)
+        .expect("Sign out button")
+        .center();
+    for pressed in [true, false] {
+        let mut raw = default_input();
+        raw.events.push(Event::PointerButton {
+            pos: centre,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::default(),
+        });
+        let _ = render(&ctx, &mut service, raw);
+    }
+    let _ = render(&ctx, &mut service, default_input());
+    let nodes = render(&ctx, &mut service, default_input());
+    for key in ["signout-confirm-title", "signout-cancel", "signout-confirm"] {
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.accessible_name() == Some(tr(key).as_str())),
+            "dialog node `{key}`: {nodes:?}"
+        );
+    }
+    assert_interactive_nodes_named(&nodes, "sign-out dialog");
+}
+
+// 029 keyboard shortcut reference (S13): the sheet, nav item and link.
+
+/// Every interactive node in the shortcut sheet, the "Keyboard shortcuts"
+/// nav item and the getting-started link has a non-empty accessible
+/// name, and each action row announces its action and bindings.
+#[test]
+fn shortcut_sheet_nav_item_and_link_are_named() {
+    use modplayer_core::actions::{ActionRegistry, KeymapOverrides};
+    use modplayer_ui::shortcut_sheet::{self, ShortcutSheetState};
+
+    let registry = ActionRegistry::new(KeymapOverrides::default());
+    let ctx = fresh_ctx();
+    ctx.enable_accesskit();
+    let mut state = ShortcutSheetState::default();
+    state.open();
+    let mut nodes = Vec::new();
+    for _ in 0..4 {
+        nodes = render_nodes_on(&ctx, default_input(), |ui| {
+            let _ = shortcut_sheet::show(ui.ctx(), &mut state, &registry);
+        });
+    }
+    let interactive = [Role::Button, Role::Link, Role::CheckBox, Role::TextInput];
+    for node in nodes.iter().filter(|n| interactive.contains(&n.role)) {
+        assert!(
+            node.accessible_name().is_some_and(|n| !n.is_empty()),
+            "unnamed interactive node in the sheet: {node:?}"
+        );
+    }
+    let open_printable = tr("shortcuts-open-printable");
+    assert!(
+        nodes
+            .iter()
+            .any(|n| n.role == Role::Button && n.accessible_name() == Some(open_printable.as_str()))
+    );
+    let toggle_name = tr("action-transport-toggle");
+    assert!(
+        nodes
+            .iter()
+            .any(|n| n.accessible_name().is_some_and(|name| name
+                .replace(['\u{2068}', '\u{2069}'], "")
+                .starts_with(&format!("{toggle_name}:")))),
+        "rows announce action and bindings"
+    );
+
+    // Nav item.
+    let nodes = render_nodes(|ui| {
+        let mut shell = Shell::default();
+        shell.nav_rail(ui);
+    });
+    let nav = tr("nav-keyboard-shortcuts");
+    assert!(
+        nodes
+            .iter()
+            .any(|n| n.role == Role::Button && n.accessible_name() == Some(nav.as_str()))
+    );
+
+    // Getting-started link.
+    let nodes = render_nodes(|ui| {
+        let _ = getting_started::show(ui);
+    });
+    let link = tr("getting-started-shortcuts");
+    assert!(
+        nodes
+            .iter()
+            .any(|n| n.role == Role::Link && n.accessible_name() == Some(link.as_str()))
+    );
+}
+
+// ---------------------------------------------------------------------
+// 030-onboarding-clarity (T044, NFR-6.1/NFR-6.2, contracts K1/K2): every
+// control the onboarding polish adds or changes has a non-empty accessible
+// name, is reachable with Tab, and activates with Space or Enter.
+// ---------------------------------------------------------------------
+
+mod onboarding_sweep {
+    use super::*;
+    use modplayer_ui::device_check::{DeviceCheckOrigin, DeviceCheckOutcome, DeviceCheckScreen};
+    use modplayer_ui::privacy_notice::{self, PrivacyOrigin};
+    use modplayer_ui::settings::about::{self, AboutOutcome, AboutScreen};
+    use modplayer_ui::sign_in::{self, SignInScreen, SummaryOutcome};
+    use modplayer_ui::welcome::WelcomeScreen;
+
+    const SIZE: (f32, f32) = (960.0, 640.0);
+
+    fn raw(events: Vec<Event>) -> RawInput {
+        RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(SIZE.0, SIZE.1))),
+            time: Some(0.0),
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn key(key: Key, pressed: bool) -> Event {
+        Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }
+    }
+
+    /// One frame: the nodes plus the accessible name of the focused node.
+    fn frame(
+        ctx: &Context,
+        input: RawInput,
+        render: &mut impl FnMut(&mut egui::Ui) -> bool,
+    ) -> (Vec<AccessNode>, Option<String>, bool) {
+        let mut signal = false;
+        let mut output = ctx.run_ui(input, |ui| signal = render(ui));
+        let update = output
+            .platform_output
+            .accesskit_update
+            .take()
+            .expect("accesskit_update should be populated once enabled");
+        output.drop_without_applying_deltas();
+        let focus_id = update.focus;
+        let mut focus = None;
+        let nodes = update
+            .nodes
+            .iter()
+            .map(|(id, node)| {
+                if *id == focus_id {
+                    focus = node.label().or_else(|| node.value()).map(str::to_string);
+                }
+                AccessNode {
+                    role: node.role(),
+                    label: node.label().map(str::to_string),
+                    value: node.value().map(str::to_string),
+                    description: node.description().map(str::to_string),
+                    toggled: node.toggled(),
+                    selected: node.is_selected(),
+                    disabled: node.is_disabled(),
+                    labelled_by_something: !node.labelled_by().is_empty(),
+                    bounds: node.bounds().map(|b| {
+                        Rect::from_min_max(
+                            Pos2::new(b.x0 as f32, b.y0 as f32),
+                            Pos2::new(b.x1 as f32, b.y1 as f32),
+                        )
+                    }),
+                }
+            })
+            .collect();
+        (nodes, focus, signal)
+    }
+
+    fn ctx() -> Context {
+        let ctx = fresh_ctx();
+        ctx.enable_accesskit();
+        ctx
+    }
+
+    /// The control `name` exists once with `role` and a non-empty name, Tab
+    /// reaches it, and both Enter and Space activate it. `make` builds a
+    /// fresh screen per key; `done` decides, from the frame after the key
+    /// and whether the render closure signalled, that it activated.
+    fn sweep<F: FnMut(&mut egui::Ui) -> bool>(
+        role: Role,
+        name: &str,
+        mut make: impl FnMut() -> F,
+        done: impl Fn(&[AccessNode], bool) -> bool,
+    ) {
+        assert!(!name.trim().is_empty(), "accessible name is non-empty");
+        for activator in [Key::Enter, Key::Space] {
+            let ctx = ctx();
+            let mut render = make();
+            let (nodes, _, _) = frame(&ctx, raw(vec![]), &mut render);
+            assert_eq!(
+                find_all(&nodes, role, name).len(),
+                1,
+                "exactly one {role:?} named `{name}`"
+            );
+            let mut reached = false;
+            for _ in 0..16 {
+                let _ = frame(&ctx, raw(vec![key(Key::Tab, true)]), &mut render);
+                let (_, focus, _) = frame(&ctx, raw(vec![]), &mut render);
+                if focus.as_deref() == Some(name) {
+                    reached = true;
+                    break;
+                }
+            }
+            assert!(reached, "Tab reaches `{name}`");
+            let (_, _, first) = frame(
+                &ctx,
+                raw(vec![key(activator, true), key(activator, false)]),
+                &mut render,
+            );
+            let (nodes, _, second) = frame(&ctx, raw(vec![]), &mut render);
+            assert!(
+                done(&nodes, first || second),
+                "{activator:?} activates `{name}`"
+            );
+        }
+    }
+
+    fn any_signal(_: &[AccessNode], signal: bool) -> bool {
+        signal
+    }
+
+    #[test]
+    fn welcome_privacy_link_is_named_reachable_and_activates() {
+        let back = tr("privacy-back-to-welcome");
+        sweep(
+            Role::Link,
+            &tr("disclosure-privacy-link"),
+            || {
+                let (store, dir) = fresh_store("a11y-welcome");
+                let mut controller =
+                    PlaybackController::new(FakeBackend::new(vec![]), ScriptedHost::new(), store);
+                let mut screen = WelcomeScreen::default();
+                move |ui: &mut egui::Ui| {
+                    let _keep = &dir;
+                    let _ = screen.show(ui, &mut controller);
+                    false
+                }
+            },
+            |nodes, _| !find_all(nodes, Role::Button, &back).is_empty(),
+        );
+    }
+
+    #[test]
+    fn privacy_back_labels_are_named_reachable_and_activate() {
+        for (origin, key) in [
+            (PrivacyOrigin::Welcome, "privacy-back-to-welcome"),
+            (PrivacyOrigin::About, "privacy-back-to-about"),
+        ] {
+            sweep(
+                Role::Button,
+                &tr(key),
+                || move |ui: &mut egui::Ui| privacy_notice::show(ui, origin),
+                any_signal,
+            );
+        }
+    }
+
+    #[test]
+    fn device_check_back_is_named_reachable_and_activates() {
+        for origin in [DeviceCheckOrigin::LaunchFlow, DeviceCheckOrigin::Settings] {
+            sweep(
+                Role::Button,
+                &tr("device-check-back"),
+                || {
+                    let (store, dir) = fresh_store("a11y-device-check");
+                    let mut controller = PlaybackController::new(
+                        FakeBackend::new(vec![fake_device()]),
+                        ScriptedHost::new(),
+                        store,
+                    );
+                    let mut screen = DeviceCheckScreen::new(
+                        None,
+                        modplayer_engine::BufferPreset::Balanced,
+                        origin,
+                    );
+                    move |ui: &mut egui::Ui| {
+                        let _keep = &dir;
+                        screen.show(ui, &mut controller) == DeviceCheckOutcome::Back
+                    }
+                },
+                any_signal,
+            );
+        }
+    }
+
+    #[test]
+    fn summary_continue_is_named_reachable_and_activates() {
+        sweep(
+            Role::Button,
+            &tr("signin-summary-continue"),
+            || {
+                let mut account = common::active_account("a11y-continue");
+                move |ui: &mut egui::Ui| {
+                    sign_in::show_summary(ui, &mut account) == SummaryOutcome::Continue
+                }
+            },
+            any_signal,
+        );
+    }
+
+    #[test]
+    fn summary_switch_is_named_reachable_and_opens_the_confirmation() {
+        let title = tr("signout-confirm-title");
+        sweep(
+            Role::Button,
+            &tr("signin-summary-switch"),
+            || {
+                let mut account = common::active_account("a11y-switch");
+                move |ui: &mut egui::Ui| {
+                    let _ = sign_in::show_summary(ui, &mut account);
+                    false
+                }
+            },
+            |nodes, _| {
+                nodes.iter().any(|n| {
+                    n.accessible_name()
+                        .is_some_and(|name| name.contains(title.as_str()))
+                })
+            },
+        );
+    }
+
+    #[test]
+    fn about_restore_button_is_named_reachable_and_activates() {
+        sweep(
+            Role::Button,
+            &tr("setting-show-getting-started"),
+            || {
+                let mut screen = AboutScreen::default();
+                move |ui: &mut egui::Ui| {
+                    about::show(ui, &mut screen, true) == AboutOutcome::RestoreGettingStarted
+                }
+            },
+            any_signal,
+        );
+    }
+
+    #[test]
+    fn pending_spinner_and_status_message_have_accessible_names() {
+        let ctx = ctx();
+
+        // Pending sign-in: the spinner is a named progress indicator.
+        let mut account = common::signed_out_account("a11y-pending");
+        let _ = account.start_sign_in();
+        let mut screen = SignInScreen::default();
+        let mut render = |ui: &mut egui::Ui| {
+            let _ = sign_in::show(ui, &mut account, &mut screen);
+            false
+        };
+        let (nodes, _, _) = frame(&ctx, raw(vec![]), &mut render);
+        let spinner = find_one(
+            &nodes,
+            Role::ProgressIndicator,
+            &tr("signin-waiting-indicator"),
+        );
+        assert!(
+            spinner
+                .accessible_name()
+                .is_some_and(|n| !n.trim().is_empty())
+        );
+
+        // Cancelled: the reason is one named, polite status node.
+        let ctx = self::ctx();
+        let mut account = common::signed_out_account("a11y-status");
+        let _ = account.start_sign_in();
+        account.cancel_sign_in();
+        let mut screen = SignInScreen::default();
+        let mut render = |ui: &mut egui::Ui| {
+            let _ = sign_in::show(ui, &mut account, &mut screen);
+            false
+        };
+        let (nodes, _, _) = frame(&ctx, raw(vec![]), &mut render);
+        let statuses: Vec<_> = nodes.iter().filter(|n| n.role == Role::Status).collect();
+        assert_eq!(statuses.len(), 1, "one status node");
+        assert!(
+            statuses[0]
+                .accessible_name()
+                .is_some_and(|n| !n.trim().is_empty())
+        );
+    }
 }

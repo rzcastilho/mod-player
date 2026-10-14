@@ -33,13 +33,14 @@ use modplayer_core::{
 use crate::actions;
 use crate::artwork::ArtworkCache;
 use crate::detail_view::{self, DetailOutcome, DetailTarget};
-use crate::device_check::DeviceCheckScreen;
+use crate::device_check::{DeviceCheckOrigin, DeviceCheckOutcome, DeviceCheckScreen};
 use crate::getting_started::{self, GettingStartedOutcome};
 use crate::layout::{self, WindowSizeTracker};
 use crate::library_view::{self, LibraryOutcome};
 use crate::section_memory;
 use crate::settings::SettingsScreen;
 use crate::shell::{self, Section, Shell};
+use crate::shortcut_sheet::{self, SheetOutcome, ShortcutSheetState};
 use crate::sign_in::{self, SignInScreen, TierResult};
 use crate::ticker::Ticker;
 use crate::waveform::WaveformState;
@@ -75,11 +76,16 @@ pub struct App<B: OutputBackend, H: SourceHost> {
     shell: Shell,
     settings: SettingsScreen,
     /// The Device Check overlay, when open — either the launch gate's
-    /// (`should_show_device_check()` at launch/after sign-in) or a
+    /// (built on the gate's first frame, dropped when the gate leaves
+    /// `DeviceCheck`, research R16) or a
     /// Settings-triggered "Test output device" preview (independent of the
     /// launch gate: `settings::show` hands one back regardless of
     /// confirmation state).
     device_check: Option<DeviceCheckScreen>,
+    /// 030 C16: Back from the first-launch device check shows the sign-in
+    /// summary instead. UI-only, never persisted; cleared whenever the
+    /// launch step is no longer `DeviceCheck`.
+    sign_in_summary: bool,
     /// The in-flight `request_playback_state()` for the transfer banner's
     /// "Playing on <device>" name (US3 T077, FR-016/019, research R3),
     /// `None` when nothing is outstanding. Re-requested every frame the
@@ -104,6 +110,8 @@ pub struct App<B: OutputBackend, H: SourceHost> {
     /// cleared on a new query) — constructed once and reused like
     /// `library_view`/`settings`.
     search_view: search_view::SearchViewState,
+    /// 027: the Plugins table's permissions/panels disclosure state.
+    plugins_view_state: plugins_view::PluginsViewState,
     /// The detail view's own frame-persistent state (US2: row selection,
     /// cleared on a target change) — constructed once and reused like
     /// `library_view`/`settings`.
@@ -126,6 +134,28 @@ pub struct App<B: OutputBackend, H: SourceHost> {
     /// — constructed once and reused like `shell`/`settings`; reset on
     /// sign-out/revocation via `reset_session_ui` (never persisted, M6).
     section_memory: section_memory::SectionMemory,
+    /// 029: the keyboard shortcut sheet's open/closed state; never
+    /// persisted (S12).
+    shortcut_sheet: ShortcutSheetState,
+}
+
+/// Whether an open Device Check screen from `origin` may stay open on a
+/// frame whose launch step is `step` (030 research R16). A launch-flow
+/// screen belongs to the `DeviceCheck` gate and is dropped as soon as the
+/// gate is something else, so the main shell never draws it as an overlay
+/// whose Back would skip the C16 summary. A Settings preview is independent
+/// of the gate.
+///
+/// ```
+/// use modplayer_account::LaunchStep;
+/// use modplayer_ui::app::retains_device_check;
+/// use modplayer_ui::device_check::DeviceCheckOrigin;
+/// assert!(retains_device_check(LaunchStep::DeviceCheck, DeviceCheckOrigin::LaunchFlow));
+/// assert!(!retains_device_check(LaunchStep::Main, DeviceCheckOrigin::LaunchFlow));
+/// assert!(retains_device_check(LaunchStep::Main, DeviceCheckOrigin::Settings));
+/// ```
+pub fn retains_device_check(step: LaunchStep, origin: DeviceCheckOrigin) -> bool {
+    origin == DeviceCheckOrigin::Settings || step == LaunchStep::DeviceCheck
 }
 
 impl<B: OutputBackend, H: SourceHost> App<B, H> {
@@ -147,12 +177,6 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
             .disclosure
             .map(|ack| ack.acknowledged_version)
             .unwrap_or(0);
-        let device_check = controller.should_show_device_check().then(|| {
-            DeviceCheckScreen::new(
-                controller.active_device().map(|d| d.id.clone()),
-                controller.preset(),
-            )
-        });
         let settings = SettingsScreen::new(&controller);
 
         // FR-017 (US4, T100): a session found at launch whose secure store
@@ -196,17 +220,23 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
             sign_in: SignInScreen::default(),
             shell: Shell::default(),
             settings,
-            device_check,
+            // The launch gate builds its own screen on its first frame
+            // (`show_launch_gate_device_check`); nothing is built up front,
+            // so a non-gated launch never sees it (research R16).
+            device_check: None,
+            sign_in_summary: false,
             pending_device_name_request: None,
             artwork: ArtworkCache::new(),
             library_view: library_view::LibraryViewState::default(),
             library_detail: None,
             search_view: search_view::SearchViewState::default(),
+            plugins_view_state: plugins_view::PluginsViewState::default(),
             detail_view: detail_view::DetailViewState::default(),
             waveform: WaveformState::default(),
             window_size: WindowSizeTracker::new(restored_size),
             notification_stack: notifications::StackState::default(),
             section_memory: section_memory::SectionMemory::default(),
+            shortcut_sheet: ShortcutSheetState::default(),
         }
     }
 
@@ -303,6 +333,9 @@ impl<B: OutputBackend, H: SourceHost> eframe::App for App<B, H> {
         // step (research R1: dispatch consumes *this* frame's input before
         // `account.tick()` runs).
         let pre = shell::Chrome::for_frame(self.launch_step(), self.device_check.is_some());
+        // 029 (S11): Esc with focus inside the sheet closes it and is
+        // consumed before the dispatcher can act on it.
+        shortcut_sheet::consume_escape(&ctx, &mut self.shortcut_sheet);
         if pre.navigation_enabled() {
             let scope = self.scope_state();
             let invocations = actions::dispatch(&ctx, &claims, self.controller.actions(), &scope);
@@ -336,8 +369,23 @@ impl<B: OutputBackend, H: SourceHost> eframe::App for App<B, H> {
         // neither is added at all otherwise, so egui never reserves its
         // space (FR-004).
         let step = self.launch_step();
+        if step != LaunchStep::DeviceCheck {
+            self.sign_in_summary = false;
+        }
+        if self
+            .device_check
+            .as_ref()
+            .is_some_and(|screen| !retains_device_check(step, screen.origin()))
+        {
+            self.device_check = None;
+        }
         let chrome = shell::Chrome::for_frame(step, self.device_check.is_some());
         shell::show_chrome(ui, chrome, &mut self.shell);
+        // 029 (S2): the nav item opens the sheet this frame; the section
+        // is untouched.
+        if std::mem::take(&mut self.shell.shortcut_sheet_requested) {
+            self.shortcut_sheet.open();
+        }
 
         // Bottom-right, newest-first, non-modal — never blocks navigation
         // or playback, and never covers the header/tab strip/category
@@ -433,6 +481,16 @@ impl<B: OutputBackend, H: SourceHost> eframe::App for App<B, H> {
         // The app-wide focus ring (015-control-variants, research R3,
         // contract F4): one pass, after every panel, so no view file
         // paints a ring. Last statement of `App::ui`.
+        // 029 (S6-S14): drawn each frame while open; `open_url` for its
+        // printable export happens only here.
+        if let SheetOutcome::OpenPrintable(url) = shortcut_sheet::show(
+            ui.ctx(),
+            &mut self.shortcut_sheet,
+            self.controller.actions(),
+        ) {
+            ui.ctx().open_url(OpenUrl::new_tab(url));
+        }
+
         widgets::controls::paint_focus_ring(ui.ctx());
     }
 
@@ -646,14 +704,34 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
     /// `App::new`/a prior frame built, or builds a fresh one, mirroring
     /// 001's `launch()`-time construction.
     fn show_launch_gate_device_check(&mut self, ui: &mut Ui) {
+        if self.sign_in_summary {
+            match sign_in::show_summary(ui, &mut self.account) {
+                sign_in::SummaryOutcome::None => {}
+                sign_in::SummaryOutcome::Continue => self.sign_in_summary = false,
+                sign_in::SummaryOutcome::Events(events) => {
+                    let ctx = ui.ctx().clone();
+                    for event in events {
+                        self.handle_account_event(&ctx, event);
+                    }
+                }
+            }
+            return;
+        }
         let mut screen = self.device_check.take().unwrap_or_else(|| {
             DeviceCheckScreen::new(
                 self.controller.active_device().map(|d| d.id.clone()),
                 self.controller.preset(),
+                DeviceCheckOrigin::LaunchFlow,
             )
         });
-        if !screen.show(ui, &mut self.controller) {
-            self.device_check = Some(screen);
+        match screen.show(ui, &mut self.controller) {
+            DeviceCheckOutcome::Open => self.device_check = Some(screen),
+            DeviceCheckOutcome::Closed => {}
+            DeviceCheckOutcome::Back => {
+                // Keep the screen so Continue returns to the same selection.
+                self.device_check = Some(screen);
+                self.sign_in_summary = true;
+            }
         }
     }
 
@@ -669,7 +747,7 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
     /// straight to `SectionMemory::end_frame`.
     fn show_main(&mut self, ui: &mut Ui) -> Option<section_memory::ViewKey> {
         if let Some(mut screen) = self.device_check.take() {
-            if !screen.show(ui, &mut self.controller) {
+            if screen.show(ui, &mut self.controller) == DeviceCheckOutcome::Open {
                 self.device_check = Some(screen);
             }
             return None;
@@ -682,20 +760,18 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
             // detail-navigation stack layered over it (T065).
             Section::Library => self.show_library(ui),
             Section::Search => {
-                let key = section_memory::ViewKey::Search;
-                let scroll = self.section_memory.scroll_area(&key);
-                let output = scroll.show(ui, |ui| {
-                    search_view::show(
-                        ui,
-                        &mut self.controller,
-                        &mut self.artwork,
-                        &mut self.shell.focus_search_requested,
-                        &mut self.search_view,
-                    );
-                });
-                self.section_memory
-                    .record(key.clone(), output.state.offset.y);
-                Some(key)
+                // 026: the view owns the single results `ScrollArea` (the
+                // field row stays fixed above it) and records its offset
+                // under `ViewKey::Search` itself.
+                search_view::show(
+                    ui,
+                    &mut self.controller,
+                    &mut self.artwork,
+                    &mut self.shell.focus_search_requested,
+                    &mut self.search_view,
+                    &mut self.section_memory,
+                );
+                Some(section_memory::ViewKey::Search)
             }
             Section::NowPlaying => {
                 now_playing::show(
@@ -712,14 +788,15 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
             // section is visible, on top of the global ≥ 30 Hz loop above.
             Section::Plugins => {
                 ui.ctx().request_repaint_after(Duration::from_millis(500));
-                let key = section_memory::ViewKey::Plugins;
-                let scroll = self.section_memory.scroll_area(&key);
-                let output = scroll.show(ui, |ui| {
-                    plugins_view::show(ui, &mut self.controller);
-                });
-                self.section_memory
-                    .record(key.clone(), output.state.offset.y);
-                Some(key)
+                // 027: the view owns its `ScrollArea` and records the
+                // offset under `ViewKey::Plugins` itself.
+                plugins_view::show(
+                    ui,
+                    &mut self.controller,
+                    &mut self.plugins_view_state,
+                    &mut self.section_memory,
+                );
+                Some(section_memory::ViewKey::Plugins)
             }
             Section::Settings => {
                 let (device_check, events) = settings::show(
@@ -781,6 +858,7 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
                     ui.ctx()
                         .open_url(OpenUrl::new_tab(GETTING_STARTED_TUTORIAL_URL));
                 }
+                GettingStartedOutcome::OpenShortcuts => self.shortcut_sheet.open(),
                 GettingStartedOutcome::Dismiss => {
                     self.controller.dismiss_getting_started();
                 }

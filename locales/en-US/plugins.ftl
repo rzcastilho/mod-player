@@ -10,23 +10,38 @@
 plugins-title = Plugins
 plugins-empty = No plugins installed. Launch with plugin fixtures enabled to see the sample plugins.
 plugins-col-name = Name
-plugins-col-version = Version
 plugins-col-source = Source
 plugins-col-enabled = Enabled
 plugins-col-health = Health
 plugins-col-permissions = Permissions
-plugins-col-cpu = CPU
-plugins-col-memory = Memory
+plugins-col-resource = Resource use
+plugins-col-actions = Actions
 plugins-source-bundled = bundled
-plugins-health-ok = ok
-plugins-health-warning = warning
+plugins-health-ok = healthy
+plugins-health-warning = degraded
 plugins-health-suspended = suspended
 plugins-enable-toggle = Enable { $plugin }
 plugins-invalid-manifest = invalid manifest: { $reason }
-plugins-cpu = { $pct } %
-plugins-memory = { $used } MB / 64 MB
 plugins-dash = —
-plugins-list-separator = ,{" "}
+
+## 027-plugins-list-as-table (contracts/fluent-strings.md).
+
+plugins-resource-cpu = CPU { $used } % / { $budget } %
+plugins-resource-memory = Mem { $used } MB / { $budget } MB
+plugins-resource-cpu-none = CPU —
+plugins-resource-memory-none = Mem —
+plugins-over-budget = over budget
+plugins-suspended-reason-unknown = reason unavailable
+plugins-permissions-show = Show { $count } permissions of { $plugin }
+plugins-permissions-hide = Hide { $count } permissions of { $plugin }
+plugins-panels-count = Panels ({ $count })
+plugins-panels-show = Show panels of { $plugin }
+plugins-panels-hide = Hide panels of { $plugin }
+plugins-panel-show-a11y = Show { $title } panel of { $plugin }
+plugins-panel-hide-a11y = Hide { $title } panel of { $plugin }
+plugins-panel-enable-a11y = Enable { $title } panel of { $plugin }
+plugins-panel-disable-a11y = Disable { $title } panel of { $plugin }
+plugins-restart-a11y = Restart { $plugin }
 
 ## Permission catalog (Part 5 §4 of docs/ModPlayer-Software-Specification.md;
 ## data-model.md §1.1 `Permission::explanation_key`). All 25 entries; the

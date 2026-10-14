@@ -58,10 +58,11 @@ launch-gate-placeholder-sign-in = Sign-in screen coming soon.
 # 013-key-and-tempo-plugin (US4, contracts/getting-started-card.md §2):
 # the dismissible Getting Started card at the top of the Library view.
 getting-started-title = Getting started
-getting-started-section-loop = Section Loop — drop A and B around a passage and drill it hands-free. Shortcuts: I set A, O set B, L loop, [ / ] nudge.
-getting-started-key-tempo = Key & Tempo — transpose a song or slow it down without changing the rest. Shortcuts: + / - tempo step; key controls in the panel.
+getting-started-section-loop = Section Loop — drop A and B around a passage and drill it hands-free.
+getting-started-key-tempo = Key & Tempo — transpose a song or slow it down without changing the rest.
 getting-started-tutorial = Open plugin tutorial
 getting-started-dismiss = Dismiss
+getting-started-shortcuts = Keyboard shortcuts
 
 ## 020-shell-navigation-and-gates: launch gate step indicator
 gate-step-welcome = Welcome
@@ -69,3 +70,7 @@ gate-step-sign-in = Sign in
 gate-step-audio-output-check = Audio output check
 # $current, $total: integers; $label: one of the three step labels above
 gate-step-progress = Step { $current } of { $total }: { $label }
+
+# 030-onboarding-clarity (C5): the privacy notice's origin-specific back control.
+privacy-back-to-welcome = Back to welcome
+privacy-back-to-about = Back to About

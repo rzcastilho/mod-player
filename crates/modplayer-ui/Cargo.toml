@@ -26,6 +26,9 @@ egui.workspace = true
 fluent-templates.workspace = true
 ureq.workspace = true
 image.workspace = true
+chrono.workspace = true
+# Account summary formats the `last_validated_at` timestamp (028).
+time.workspace = true
 # Plugin settings-field values (011-plugin-ui-contributions US4,
 # `SettingsField::default`/`SettingsRegistry` values, contracts/overlays-
 # settings-notify.md S3/S4): `settings/plugins.rs` reads/writes them as
@@ -34,7 +37,6 @@ image.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
-time.workspace = true
 modplayer-audio-source-synthetic = { path = "../modplayer-audio-source-synthetic", version = "0.1.0" }
 # waveform::coords round-trip proptest (005, Constitution VIII).
 proptest.workspace = true

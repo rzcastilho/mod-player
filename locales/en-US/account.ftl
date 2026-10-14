@@ -45,10 +45,7 @@ tier-unknown = Unknown
 
 ## Settings > Account (contracts/ui-surface.md "Settings > Account")
 
-account-display-name = Signed in as { $name }
 account-tier = Subscription tier
-account-last-validated = Last checked { $when }
-account-never-validated = Never checked online
 account-signed-out = You are not signed in.
 account-sign-in = Sign in
 
@@ -82,3 +79,43 @@ session-revoked = ModPlayer's access to your account was revoked. Sign in again 
 store-unreadable = ModPlayer couldn't read your saved sign-in from your { $store }.
 signed-out = Signed out. Deleted: { $categories }
 signout-incomplete = Couldn't fully clear: { $category }
+
+## 028-settings-fields-and-account: account summary (contracts/fluent-strings.md)
+
+account-summary-title = Signed-in account
+account-identity-unavailable = Name unavailable
+account-tier-unverified = Not verified yet
+account-last-verified = Last verified
+account-last-verified-at = { $day } { $month } { $year }, { $time }
+account-never-verified = Never verified online
+
+date-month-short-1 = Jan
+date-month-short-2 = Feb
+date-month-short-3 = Mar
+date-month-short-4 = Apr
+date-month-short-5 = May
+date-month-short-6 = Jun
+date-month-short-7 = Jul
+date-month-short-8 = Aug
+date-month-short-9 = Sep
+date-month-short-10 = Oct
+date-month-short-11 = Nov
+date-month-short-12 = Dec
+
+# 030-onboarding-clarity (C6, C7): pending sign-in.
+signin-waiting-indicator = Waiting for your browser
+signin-browser-hint = A Spotify sign-in page should have opened in your default browser. Finish signing in there, then come back.
+signin-waiting-elapsed-seconds = { $count ->
+    [one] Waiting for { $count } second
+   *[other] Waiting for { $count } seconds
+}
+signin-waiting-elapsed-minutes = { $count ->
+    [one] Waiting for { $count } minute
+   *[other] Waiting for { $count } minutes
+}
+
+# 030-onboarding-clarity (C16): sign-in summary view (device-check Back during first launch).
+signin-summary-title = Signed in
+signin-summary-identity = Signed in as { $name }
+signin-summary-continue = Continue
+signin-summary-switch = Use a different account

@@ -250,6 +250,10 @@ pub fn section_label(s: &str) -> egui::RichText {
         .extra_letter_spacing(0.52)
 }
 
+/// "Use the widget's own state-dependent text colour": the sentinel for a
+/// `LayoutJob` section that must still track hover/selected/disabled.
+pub const INHERIT_TEXT_COLOR: egui::Color32 = egui::Color32::PLACEHOLDER;
+
 /// 72 × the `body` role's `'0'` advance width (FR-006, research R17): the
 /// prose measure, a maximum, never a minimum.
 pub fn body_measure(ctx: &egui::Context) -> f32 {

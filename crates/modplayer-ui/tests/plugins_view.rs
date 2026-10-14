@@ -217,7 +217,11 @@ fn render_plugins(
     ctx: &Context,
     controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
 ) -> Vec<AccessNode> {
-    render_nodes_on(ctx, |ui| plugins_view::show(ui, controller))
+    let mut state = plugins_view::PluginsViewState::default();
+    let mut memory = modplayer_ui::section_memory::SectionMemory::default();
+    render_nodes_on(ctx, |ui| {
+        plugins_view::show(ui, controller, &mut state, &mut memory);
+    })
 }
 
 fn find_all<'a>(nodes: &'a [AccessNode], role: Role, name: &str) -> Vec<&'a AccessNode> {
@@ -245,6 +249,18 @@ fn click_at(
     controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
     pos: Pos2,
 ) {
+    let mut state = plugins_view::PluginsViewState::default();
+    click_at_with_state(ctx, controller, &mut state, pos);
+}
+
+/// [`click_at`] against a caller-owned [`plugins_view::PluginsViewState`],
+/// so disclosure clicks persist for the assertions that follow.
+fn click_at_with_state(
+    ctx: &Context,
+    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+    state: &mut plugins_view::PluginsViewState,
+    pos: Pos2,
+) {
     let mut press = default_input();
     press.events.push(Event::PointerButton {
         pos,
@@ -252,7 +268,10 @@ fn click_at(
         pressed: true,
         modifiers: egui::Modifiers::default(),
     });
-    let output = ctx.run_ui(press, |ui| plugins_view::show(ui, controller));
+    let mut memory = modplayer_ui::section_memory::SectionMemory::default();
+    let output = ctx.run_ui(press, |ui| {
+        plugins_view::show(ui, controller, state, &mut memory);
+    });
     output.drop_without_applying_deltas();
 
     let mut release = default_input();
@@ -262,7 +281,9 @@ fn click_at(
         pressed: false,
         modifiers: egui::Modifiers::default(),
     });
-    let output = ctx.run_ui(release, |ui| plugins_view::show(ui, controller));
+    let output = ctx.run_ui(release, |ui| {
+        plugins_view::show(ui, controller, state, &mut memory);
+    });
     output.drop_without_applying_deltas();
 }
 
@@ -326,13 +347,12 @@ fn rows_show_every_column_sorted_by_name() {
     // Column headers (contracts/ui-plugins.md §2).
     for key in [
         "plugins-col-name",
-        "plugins-col-version",
         "plugins-col-source",
         "plugins-col-enabled",
         "plugins-col-health",
         "plugins-col-permissions",
-        "plugins-col-cpu",
-        "plugins-col-memory",
+        "plugins-col-resource",
+        "plugins-col-actions",
     ] {
         find_one(&nodes, Role::Label, &tr(key));
     }
@@ -377,7 +397,17 @@ fn rows_show_every_column_sorted_by_name() {
     let mut ys: Vec<(f32, &str)> = expected_order
         .iter()
         .map(|name| {
-            let node = find_one(&nodes, Role::Label, name);
+            // The Name cell is one label: name + two spaces + version (T7).
+            let matches: Vec<_> = nodes
+                .iter()
+                .filter(|n| {
+                    n.role == Role::Label
+                        && n.accessible_name()
+                            .is_some_and(|t| t == *name || t.starts_with(&format!("{name}  ")))
+                })
+                .collect();
+            assert_eq!(matches.len(), 1, "one name cell for `{name}`");
+            let node = matches[0];
             (
                 node.bounds.expect("name label must have bounds").min.y,
                 *name,
@@ -397,27 +427,8 @@ fn rows_show_every_column_sorted_by_name() {
         "expected at least one `bundled` source label: {nodes:?}"
     );
 
-    // Permissions column, catalog order, single- and multi-permission
-    // cases (contracts/ui-plugins.md §2). Four fixtures (hang, throw,
-    // leak, observer) hold only `playback.observe`.
-    assert_eq!(
-        find_all(&nodes, Role::Label, &tr("permission-playback-observe")).len(),
-        4,
-        "expected 4 single-permission rows reading just `playback.observe`'s explanation: {nodes:?}"
-    );
-    // Flood and focus-b (010-transport-focus) hold the identical two-
-    // permission pair, so this explanation string renders twice.
-    let flood_permissions = format!(
-        "{}{}{}",
-        tr("permission-playback-observe"),
-        tr("plugins-list-separator"),
-        tr("permission-transport-control")
-    );
-    assert_eq!(
-        find_all(&nodes, Role::Label, &flood_permissions).len(),
-        2,
-        "expected flood and focus-b to share the same two-permission explanation: {nodes:?}"
-    );
+    // Permissions column: the count now (the explanations move into the
+    // disclosure, US2 — asserted by `permissions_*` there).
 
     // Every non-invalid fixture, plus both bundled packages, is
     // `Disabled` pre-launch, so its health is `Ok` and its CPU/memory are
@@ -618,8 +629,12 @@ fn panel_controls_listed() {
     // Baseline: title label, `Hide` (not yet closed) and `Disable` (not
     // yet persisted-disabled) — contracts/ui-panels.md L6.
     let nodes = render_plugins(&ctx, &mut controller);
-    find_one(&nodes, Role::Label, "Controls");
-    let hide = find_one(&nodes, Role::Button, &tr("plugin-panel-hide"));
+    let plugin_name = ui_panel_row_name(&mut controller);
+    let hide = find_one(
+        &nodes,
+        Role::Button,
+        &panel_a11y("plugins-panel-hide-a11y", "Controls", &plugin_name),
+    );
     let hide_pos = hide.bounds.expect("Hide button must have bounds").center();
 
     // Click Hide: session-only, calls `plugin_panel_close`, no event to
@@ -630,7 +645,11 @@ fn panel_controls_listed() {
         "a closed panel must not render in the dock"
     );
     let nodes = render_plugins(&ctx, &mut controller);
-    let show = find_one(&nodes, Role::Button, &tr("plugin-panel-show"));
+    let show = find_one(
+        &nodes,
+        Role::Button,
+        &panel_a11y("plugins-panel-show-a11y", "Controls", &plugin_name),
+    );
     let show_pos = show.bounds.expect("Show button must have bounds").center();
 
     // Click Show: reopens it.
@@ -640,7 +659,11 @@ fn panel_controls_listed() {
         "Show must restore the panel to the dock"
     );
     let nodes = render_plugins(&ctx, &mut controller);
-    let disable = find_one(&nodes, Role::Button, &tr("plugin-panel-disable"));
+    let disable = find_one(
+        &nodes,
+        Role::Button,
+        &panel_a11y("plugins-panel-disable-a11y", "Controls", &plugin_name),
+    );
     let disable_pos = disable
         .bounds
         .expect("Disable button must have bounds")
@@ -654,7 +677,11 @@ fn panel_controls_listed() {
         "a disabled panel must not render in the dock"
     );
     let nodes = render_plugins(&ctx, &mut controller);
-    find_one(&nodes, Role::Button, &tr("plugin-panel-enable"));
+    find_one(
+        &nodes,
+        Role::Button,
+        &panel_a11y("plugins-panel-enable-a11y", "Controls", &plugin_name),
+    );
 }
 
 #[test]
@@ -766,4 +793,882 @@ fn click_notification_action(
         *interaction = notifications::show(ui, center, stack_state);
     });
     output.drop_without_applying_deltas();
+}
+
+// -----------------------------------------------------------------------
+// 027-plugins-list-as-table, US1 (contracts/plugins-table.md T1–T7, T16, T19)
+// -----------------------------------------------------------------------
+
+/// Render the Plugins view in a root ui exactly `width` points wide (one
+/// frame) and return the AccessKit nodes plus the root ui's `max_rect`.
+fn render_plugins_at_width(
+    ctx: &Context,
+    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+    width: f32,
+    hover: Option<Pos2>,
+) -> (Vec<AccessNode>, Rect) {
+    let mut state = plugins_view::PluginsViewState::default();
+    let mut memory = modplayer_ui::section_memory::SectionMemory::default();
+    let mut input = RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(width, 2000.0))),
+        ..Default::default()
+    };
+    if let Some(pos) = hover {
+        input.events.push(Event::PointerMoved(pos));
+    }
+    let mut available = Rect::NOTHING;
+    let mut output = ctx.run_ui(input, |ui| {
+        available = ui.max_rect();
+        plugins_view::show(ui, controller, &mut state, &mut memory);
+    });
+    let update = output
+        .platform_output
+        .accesskit_update
+        .take()
+        .expect("accesskit_update should be populated once enabled");
+    output.drop_without_applying_deltas();
+    let nodes = update
+        .nodes
+        .iter()
+        .map(|(_, node)| AccessNode {
+            role: node.role(),
+            label: node.label().map(str::to_string),
+            value: node.value().map(str::to_string),
+            toggled: node.toggled(),
+            disabled: node.is_disabled(),
+            bounds: node.bounds().map(|b| {
+                Rect::from_min_max(
+                    Pos2::new(b.x0 as f32, b.y0 as f32),
+                    Pos2::new(b.x1 as f32, b.y1 as f32),
+                )
+            }),
+        })
+        .collect();
+    (nodes, available)
+}
+
+/// Every leaf control/label of the table (not the scroll container).
+fn leaf_nodes(nodes: &[AccessNode]) -> Vec<&AccessNode> {
+    nodes
+        .iter()
+        .filter(|n| matches!(n.role, Role::Label | Role::CheckBox | Role::Button))
+        .filter(|n| n.bounds.is_some())
+        .collect()
+}
+
+fn assert_table_fits(width: f32, label: &str) {
+    let (mut controller, _dir, _psd, _tsd) = fixture_controller(label);
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+    let (nodes, available) = render_plugins_at_width(&ctx, &mut controller, width, None);
+
+    let leaves = leaf_nodes(&nodes);
+    assert!(
+        leaves.len() > 19 * 4,
+        "19 rows of cells must render: {}",
+        leaves.len()
+    );
+    for node in &leaves {
+        let b = node.bounds.expect("filtered");
+        assert!(
+            b.min.x >= available.min.x - 0.5 && b.max.x <= available.max.x + 0.5,
+            "`{:?}` ({b:?}) overflows the available rect {available:?} at {width} pt",
+            node.accessible_name()
+        );
+    }
+    for (i, a) in leaves.iter().enumerate() {
+        for b in &leaves[i + 1..] {
+            let (ra, rb) = (
+                a.bounds.expect("filtered").shrink(0.5),
+                b.bounds.expect("filtered").shrink(0.5),
+            );
+            assert!(
+                !ra.intersects(rb),
+                "`{:?}` {ra:?} overlaps `{:?}` {rb:?} at {width} pt",
+                a.accessible_name(),
+                b.accessible_name()
+            );
+        }
+    }
+}
+
+/// T3–T5, SC-001/SC-002: all 17 fixtures (+ 2 bundled) at the minimum
+/// window width, no cell overflows or overlaps another.
+#[test]
+fn seventeen_fixtures_fit_at_min_window_width() {
+    assert_table_fits(960.0, "fit-960");
+}
+
+/// T20, FR-011: with every string padded by 40 % (`apply_pseudo_expansion`)
+/// the table still fits at the minimum window width; truncation absorbs the
+/// growth instead of overflowing or overlapping.
+#[test]
+fn pseudo_expansion_fits_at_min_window_width() {
+    modplayer_core::i18n::with_pseudo_expansion(40, || {
+        assert_table_fits(960.0, "fit-960-pseudo");
+    });
+}
+
+/// T3–T5, SC-001/SC-002: the same at the section's content floor.
+#[test]
+fn seventeen_fixtures_fit_at_section_floor() {
+    assert_table_fits(560.0, "fit-560");
+}
+
+fn header_x(nodes: &[AccessNode], key: &str) -> f32 {
+    find_one(nodes, Role::Label, &tr(key))
+        .bounds
+        .expect("header label must have bounds")
+        .min
+        .x
+}
+
+/// T2, T3: seven headers in order, and each column's cells start at the
+/// header's x.
+#[test]
+fn header_aligns_with_columns() {
+    let (mut controller, _dir, _psd, _tsd) = fixture_controller("header-align");
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+    let (nodes, _) = render_plugins_at_width(&ctx, &mut controller, 960.0, None);
+
+    let keys = [
+        "plugins-col-name",
+        "plugins-col-source",
+        "plugins-col-enabled",
+        "plugins-col-health",
+        "plugins-col-permissions",
+        "plugins-col-resource",
+        "plugins-col-actions",
+    ];
+    let xs: Vec<f32> = keys.iter().map(|k| header_x(&nodes, k)).collect();
+    assert!(
+        xs.windows(2).all(|w| w[0] < w[1]),
+        "headers must run left to right in order: {xs:?}"
+    );
+    // The retired Version / CPU / Memory headers (their keys are gone).
+    for removed in ["Version", "CPU", "Memory"] {
+        assert!(
+            find_all(&nodes, Role::Label, removed).is_empty(),
+            "`{removed}` header was removed"
+        );
+    }
+
+    let near = |a: f32, b: f32, what: &str| {
+        assert!((a - b).abs() <= 0.5, "{what}: cell x {a} vs header x {b}");
+    };
+    let name = nodes
+        .iter()
+        .find(|n| {
+            n.role == Role::Label
+                && n.accessible_name()
+                    .is_some_and(|t| t.starts_with("Well-behaved fixture"))
+        })
+        .expect("Well-behaved fixture name cell");
+    near(name.bounds.expect("bounds").min.x, xs[0], "name");
+    for source in find_all(&nodes, Role::Label, &tr("plugins-source-bundled")) {
+        near(source.bounds.expect("bounds").min.x, xs[1], "source");
+    }
+    let checkboxes: Vec<_> = nodes.iter().filter(|n| n.role == Role::CheckBox).collect();
+    assert_eq!(checkboxes.len(), 19);
+    for checkbox in checkboxes {
+        near(checkbox.bounds.expect("bounds").min.x, xs[2], "enabled");
+    }
+    for health in find_all(&nodes, Role::Label, &tr("plugins-health-ok")) {
+        // The word follows the decorative dot inside the Health extent.
+        let x = health.bounds.expect("bounds").min.x;
+        assert!(
+            x >= xs[3] && x < xs[4],
+            "health word x {x} outside its column"
+        );
+    }
+    for dash in find_all(&nodes, Role::Label, &tr("plugins-dash")) {
+        near(dash.bounds.expect("bounds").min.x, xs[5], "resource");
+    }
+}
+
+/// T6, T7: a name too long for its column truncates, its accessible name
+/// stays the full text (name + version), and hovering shows the full text.
+#[test]
+fn long_name_truncates_with_tooltip_and_full_accessible_name() {
+    let (mut controller, _dir, _psd, _tsd) = fixture_controller("long-name");
+    let row = controller
+        .plugins_view()
+        .rows
+        .into_iter()
+        .find(|r| r.name == "Effects observer fixture")
+        .expect("effects-observer fixture row");
+    let full = format!("{}  {}", row.name, row.version);
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+    ctx.all_styles_mut(|s| {
+        s.interaction.tooltip_delay = 0.0;
+        s.interaction.show_tooltips_only_when_still = false;
+    });
+
+    let (nodes, _) = render_plugins_at_width(&ctx, &mut controller, 560.0, None);
+    let name = find_one(&nodes, Role::Label, &full);
+    let bounds = name.bounds.expect("bounds");
+    let source_x = header_x(&nodes, "plugins-col-source");
+    assert!(
+        bounds.max.x <= source_x,
+        "truncated name {bounds:?} must end before the Source column at {source_x}"
+    );
+
+    // Hover it: the full text appears exactly once more, as the one
+    // tooltip (egui's own elided-label tooltip is off — the 027 manual
+    // walk, M3, saw it stacked under ours).
+    let pos = bounds.center();
+    let _ = render_plugins_at_width(&ctx, &mut controller, 560.0, Some(pos));
+    let (nodes, _) = render_plugins_at_width(&ctx, &mut controller, 560.0, Some(pos));
+    assert_eq!(
+        find_all(&nodes, Role::Label, &full).len(),
+        2,
+        "hovering a truncated name must show the full text as one tooltip"
+    );
+
+    // A short name does not get a tooltip.
+    let (nodes, _) = render_plugins_at_width(&ctx, &mut controller, 960.0, None);
+    let short = nodes
+        .iter()
+        .find(|n| {
+            n.role == Role::Label
+                && n.accessible_name()
+                    .is_some_and(|t| t.starts_with("Flood fixture"))
+        })
+        .expect("Flood fixture name cell");
+    let pos = short.bounds.expect("bounds").center();
+    let _ = render_plugins_at_width(&ctx, &mut controller, 960.0, Some(pos));
+    let (nodes, _) = render_plugins_at_width(&ctx, &mut controller, 960.0, Some(pos));
+    let short_full = short.accessible_name().expect("name").to_string();
+    assert_eq!(
+        find_all(&nodes, Role::Label, &short_full).len(),
+        1,
+        "an untruncated name must not grow a tooltip"
+    );
+}
+
+/// T16: the invalid row's reason is one label spanning Health..Resource,
+/// with no per-column cells of its own there.
+#[test]
+fn invalid_row_span() {
+    let (mut controller, _dir, _psd, _tsd) = fixture_controller("invalid-span");
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+    let (nodes, _) = render_plugins_at_width(&ctx, &mut controller, 960.0, None);
+
+    let reason = "The required permission 'teleport.everywhere' is not in the permission catalog.";
+    let label = find_one(
+        &nodes,
+        Role::Label,
+        &tr_args(
+            "plugins-invalid-manifest",
+            &[("reason", reason.to_string())],
+        ),
+    );
+    let b = label.bounds.expect("bounds");
+    let health_x = header_x(&nodes, "plugins-col-health");
+    let actions_x = header_x(&nodes, "plugins-col-actions");
+    assert!((b.min.x - health_x).abs() <= 0.5, "starts at Health");
+    assert!(b.max.x <= actions_x, "ends before Actions");
+}
+
+/// T1: no rows → only the heading and the empty label; no header labels,
+/// no scroll area.
+#[test]
+fn empty_state_has_no_header_or_scroll_area() {
+    let (mut controller, _dir) = plain_controller("empty-no-header");
+    *controller.plugins_mut() = PluginHost::discover_packages(Vec::new());
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+    let (nodes, _) = render_plugins_at_width(&ctx, &mut controller, 960.0, None);
+
+    find_one(&nodes, Role::Label, &tr("plugins-empty"));
+    for key in [
+        "plugins-col-name",
+        "plugins-col-source",
+        "plugins-col-enabled",
+        "plugins-col-health",
+        "plugins-col-permissions",
+        "plugins-col-resource",
+        "plugins-col-actions",
+    ] {
+        assert!(find_all(&nodes, Role::Label, &tr(key)).is_empty(), "{key}");
+    }
+    assert!(
+        nodes.iter().all(|n| n.role != Role::ScrollView),
+        "the empty state must not create a scroll area"
+    );
+}
+
+/// T19, FR-009, SC-004: `plugins_view.rs` holds no colour literal; every
+/// colour comes from a theme role.
+#[test]
+fn plugins_view_has_no_colour_literals() {
+    let source = include_str!("../src/plugins_view.rs");
+    let code: String = source
+        .lines()
+        .map(|line| line.split("//").next().unwrap_or(""))
+        .filter(|line| !line.trim_start().starts_with("use "))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(!code.contains("Color32::from_"), "Color32::from_* literal");
+    assert!(!code.contains("rgb("), "rgb( literal");
+    assert!(!code.contains("hex_color!"), "hex_color! literal");
+    let mut rest = code.as_str();
+    while let Some(at) = rest.find("Color32::") {
+        rest = &rest[at + "Color32::".len()..];
+        let ident: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        assert!(
+            ident.is_empty()
+                || ident == "TRANSPARENT"
+                || !ident.chars().next().is_some_and(char::is_uppercase),
+            "named colour constant `Color32::{ident}`"
+        );
+    }
+
+    use modplayer_core::Health;
+    use modplayer_ui::theme::tokens::{DARK, DARK_HIGH_CONTRAST, LIGHT, LIGHT_HIGH_CONTRAST};
+    for roles in [&LIGHT, &DARK, &LIGHT_HIGH_CONTRAST, &DARK_HIGH_CONTRAST] {
+        assert_eq!(
+            plugins_view::health_color(roles, Health::Ok),
+            roles.positive
+        );
+        assert_eq!(
+            plugins_view::health_color(roles, Health::Warning),
+            roles.warning
+        );
+        assert_eq!(
+            plugins_view::health_color(roles, Health::Suspended),
+            roles.danger
+        );
+    }
+}
+
+// -----------------------------------------------------------------------
+// US2 (027-plugins-list-as-table): permissions as count + disclosure.
+
+fn render_with_state(
+    ctx: &Context,
+    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+    state: &mut plugins_view::PluginsViewState,
+) -> Vec<AccessNode> {
+    let mut memory = modplayer_ui::section_memory::SectionMemory::default();
+    render_nodes_on(ctx, |ui| {
+        plugins_view::show(ui, controller, state, &mut memory);
+    })
+}
+
+fn disclosure_name(key: &str, count: usize, plugin: &str) -> String {
+    tr_args(
+        key,
+        &[("count", count.to_string()), ("plugin", plugin.to_string())],
+    )
+}
+
+/// T10: a plugin with permissions shows `"{count} ▸"` as a button named by
+/// `plugins-permissions-show`; clicking it flips to `"{count} ▾"` /
+/// `plugins-permissions-hide`, and clicking again collapses it.
+#[test]
+fn permissions_count_and_disclosure() {
+    let (mut controller, _dir, _psd, _tsd) = fixture_controller("perm-disclosure");
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+    let mut state = plugins_view::PluginsViewState::default();
+
+    let nodes = render_with_state(&ctx, &mut controller, &mut state);
+    let show = disclosure_name("plugins-permissions-show", 2, "Flood fixture");
+    let button = find_one(&nodes, Role::Button, &show);
+    let bounds = button.bounds.expect("disclosure button has bounds");
+
+    click_at_with_state(&ctx, &mut controller, &mut state, bounds.center());
+    let id = fixture_id(&mut controller, "org.modplayer.fixture.flood");
+    assert!(state.permissions_open.contains(&id), "click must expand");
+
+    let nodes = render_with_state(&ctx, &mut controller, &mut state);
+    let hide = disclosure_name("plugins-permissions-hide", 2, "Flood fixture");
+    let bounds = find_one(&nodes, Role::Button, &hide)
+        .bounds
+        .expect("hide button has bounds");
+
+    click_at_with_state(&ctx, &mut controller, &mut state, bounds.center());
+    assert!(!state.permissions_open.contains(&id), "click must collapse");
+}
+
+/// T14, SC-005: an expanded row lists one explanation per permission, in
+/// catalog order, each fully present, below the cells line and inside the
+/// window.
+#[test]
+fn permissions_expand_one_per_line() {
+    let (mut controller, _dir, _psd, _tsd) = fixture_controller("perm-expand");
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+    let mut state = plugins_view::PluginsViewState::default();
+    let id = fixture_id(&mut controller, "org.modplayer.fixture.flood");
+
+    let closed = render_with_state(&ctx, &mut controller, &mut state);
+    assert!(
+        find_all(&closed, Role::Label, &tr("permission-transport-control")).is_empty(),
+        "collapsed rows show no explanations"
+    );
+
+    state.permissions_open.insert(id);
+    let nodes = render_with_state(&ctx, &mut controller, &mut state);
+    let observe = find_one(&nodes, Role::Label, &tr("permission-playback-observe"));
+    let transport = find_one(&nodes, Role::Label, &tr("permission-transport-control"));
+    let (observe, transport) = (
+        observe.bounds.expect("bounds"),
+        transport.bounds.expect("bounds"),
+    );
+    assert!(
+        observe.min.y < transport.min.y,
+        "catalog order: playback.observe before transport.control"
+    );
+    assert!(
+        observe.max.y <= transport.min.y + 0.5,
+        "one explanation per line, no overlap"
+    );
+    for rect in [observe, transport] {
+        assert!(
+            rect.max.x <= 1200.0,
+            "explanation must stay inside the window: {rect:?}"
+        );
+    }
+    // Inside the row: below the row's own name cell.
+    let name = nodes
+        .iter()
+        .find(|n| {
+            n.role == Role::Label
+                && n.accessible_name()
+                    .is_some_and(|t| t.starts_with("Flood fixture  "))
+        })
+        .and_then(|n| n.bounds)
+        .expect("flood name cell");
+    assert!(observe.min.y >= name.max.y - 0.5, "below the cells line");
+}
+
+/// A plugin with no permissions shows the label `0` and no disclosure.
+#[test]
+fn zero_permissions_no_disclosure() {
+    let (mut controller, _dir, _psd, _tsd) = fixture_controller("perm-zero");
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+    let rows = controller.plugins_view().rows;
+    let zero = rows
+        .iter()
+        .find(|r| r.invalid_reason.is_none() && r.permissions.is_empty());
+    let Some(zero) = zero else {
+        // No permission-less valid plugin discovered: nothing to assert.
+        return;
+    };
+    let nodes = render_plugins(&ctx, &mut controller);
+    assert!(
+        find_all(
+            &nodes,
+            Role::Button,
+            &disclosure_name("plugins-permissions-show", 0, &zero.name)
+        )
+        .is_empty(),
+        "0 permissions must not render a disclosure"
+    );
+    assert!(!find_all(&nodes, Role::Label, "0").is_empty());
+}
+
+/// T18: expansion state is keyed by `PluginId`; it survives repaints and a
+/// health/lifecycle change, and is pruned for vanished ids.
+#[test]
+fn expansion_survives_repaint_and_health_change() {
+    let (mut controller, _dir, _psd, _tsd) = fixture_controller("perm-survive");
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+    let mut state = plugins_view::PluginsViewState::default();
+    let id = fixture_id(&mut controller, "org.modplayer.fixture.flood");
+    state.permissions_open.insert(id);
+
+    for _ in 0..3 {
+        render_with_state(&ctx, &mut controller, &mut state);
+    }
+    assert!(state.permissions_open.contains(&id), "survives repaint");
+
+    controller.plugin_enable(id);
+    controller.tick();
+    render_with_state(&ctx, &mut controller, &mut state);
+    assert!(
+        state.permissions_open.contains(&id),
+        "survives a lifecycle/health change"
+    );
+
+    state.prune(&[]);
+    assert!(state.permissions_open.is_empty(), "vanished ids are pruned");
+}
+
+// -- US3: health words, suspension reason and Restart (027, T9/T13) -------
+
+/// Spawn the hang fixture under a 1 ms share and drive it to `Suspended`.
+fn suspend_hang_fixture(
+    controller: &mut PlaybackController<FakeBackend, ScriptedHost>,
+) -> PluginId {
+    let id = fixture_id(controller, "org.modplayer.fixture.hang");
+    if let Some(record) = controller.plugins_mut().record_mut(id) {
+        record.budgets = Budgets {
+            share: Duration::from_millis(1),
+            ..Budgets::DEFAULT
+        };
+    }
+    let shared = Arc::clone(controller.shared());
+    controller.plugins_mut().spawn(id, &shared);
+    assert!(pump_until(controller, Duration::from_secs(2), |c| {
+        is_active(c, id)
+    }));
+    let now = controller.now();
+    controller.plugins_mut().fan_out(
+        &HostEvent::PlayStateChanged {
+            state: PlayState::Playing,
+        },
+        now,
+    );
+    assert!(
+        pump_until(controller, Duration::from_secs(2), |c| matches!(
+            c.plugins_mut().record(id).map(|r| &r.lifecycle),
+            Some(Lifecycle::Suspended { .. })
+        )),
+        "the hang fixture must suspend under a 1ms share"
+    );
+    id
+}
+
+const CAUSE_KEYS: [&str; 4] = [
+    "plugin-suspended-cause-hang",
+    "plugin-suspended-cause-cpu-share",
+    "plugin-suspended-cause-memory",
+    "plugin-suspended-cause-did-not-start",
+];
+
+#[test]
+fn health_words_healthy_degraded_suspended() {
+    let (mut controller, _dir, _psd, _tsd) = fixture_controller("health-words");
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+
+    // Nothing active yet: every valid row reads "healthy", none degraded
+    // or suspended.
+    let nodes = render_plugins(&ctx, &mut controller);
+    assert_eq!(tr("plugins-health-ok"), "healthy");
+    assert_eq!(tr("plugins-health-warning"), "degraded");
+    assert_eq!(tr("plugins-health-suspended"), "suspended");
+    assert!(!find_all(&nodes, Role::Label, "healthy").is_empty());
+    assert!(find_all(&nodes, Role::Label, "suspended").is_empty());
+    assert!(find_all(&nodes, Role::Label, "degraded").is_empty());
+
+    suspend_hang_fixture(&mut controller);
+    let nodes = render_plugins(&ctx, &mut controller);
+    assert_eq!(find_all(&nodes, Role::Label, "suspended").len(), 1);
+}
+
+/// T9: the Health dot is painted, never a `●` text glyph — the app's
+/// fonts have no `●`, so the 027 manual walk (M1) saw a tofu box in
+/// every Health cell. With the app's own fonts installed, every valid row
+/// gets a filled circle in its health colour and no text shape holds `●`.
+#[test]
+fn health_dot_is_painted_not_a_font_glyph() {
+    let (mut controller, _dir, _psd, _tsd) = fixture_controller("health-dot");
+    let ctx = Context::default();
+    modplayer_ui::theme::apply_tokens(&ctx);
+    let mut state = plugins_view::PluginsViewState::default();
+    let mut memory = modplayer_ui::section_memory::SectionMemory::default();
+    let input = RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(960.0, 2000.0))),
+        ..Default::default()
+    };
+    let mut output = ctx.run_ui(input, |ui| {
+        plugins_view::show(ui, &mut controller, &mut state, &mut memory);
+    });
+    let shapes = std::mem::take(&mut output.shapes);
+    output.drop_without_applying_deltas();
+    let positive = modplayer_ui::theme::roles(&ctx.global_style().visuals).positive;
+    let healthy_dots = shapes
+        .iter()
+        .filter(|c| matches!(&c.shape, egui::Shape::Circle(circle) if circle.fill == positive))
+        .count();
+    let healthy_rows = controller
+        .plugins_view()
+        .rows
+        .iter()
+        .filter(|r| r.health == Some(modplayer_core::Health::Ok))
+        .count();
+    assert!(healthy_rows > 0);
+    assert_eq!(
+        healthy_dots, healthy_rows,
+        "one painted dot per healthy row"
+    );
+    let glyph_text = shapes.iter().any(|c| match &c.shape {
+        egui::Shape::Text(text) => text.galley.job.text.contains('●'),
+        _ => false,
+    });
+    assert!(!glyph_text, "`●` has no glyph in the app fonts (tofu)");
+}
+
+#[test]
+fn suspended_row_shows_reason_and_restart_restarts() {
+    let (mut controller, _dir, _psd, _tsd) = fixture_controller("suspended-restart");
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+
+    // No Restart anywhere while nothing is suspended.
+    let nodes = render_plugins(&ctx, &mut controller);
+    assert!(
+        nodes
+            .iter()
+            .all(|n| n.role != Role::Button || n.accessible_name() != Some("Restart")),
+        "no row may offer Restart before any suspension: {nodes:?}"
+    );
+
+    let id = suspend_hang_fixture(&mut controller);
+    let nodes = render_plugins(&ctx, &mut controller);
+
+    // The reason sits in the row, one of the four cause sentences.
+    let reasons: Vec<String> = CAUSE_KEYS.iter().map(|k| tr(k)).collect();
+    let reason_nodes = nodes
+        .iter()
+        .filter(|n| {
+            n.role == Role::Label
+                && n.accessible_name()
+                    .is_some_and(|name| reasons.iter().any(|r| name == r))
+        })
+        .count();
+    assert_eq!(reason_nodes, 1, "one suspension reason expected: {nodes:?}");
+
+    // Exactly one Restart, named for the plugin, and only for that row.
+    let name = controller
+        .plugins_view()
+        .rows
+        .iter()
+        .find(|r| r.id == id)
+        .map(|r| r.name.clone())
+        .expect("hang row");
+    let restart_name = tr_args("plugins-restart-a11y", &[("plugin", name)]);
+    let restart = find_one(&nodes, Role::Button, &restart_name);
+    let pos = restart.bounds.expect("Restart must have bounds").center();
+
+    click_at(&ctx, &mut controller, pos);
+    assert!(
+        !matches!(
+            controller.plugins_mut().record(id).map(|r| &r.lifecycle),
+            Some(Lifecycle::Suspended { .. })
+        ),
+        "clicking Restart must call plugin_restart and leave Suspended"
+    );
+}
+
+// -----------------------------------------------------------------------
+// US4 (027-plugins-list-as-table): resource use against budgets and
+// row-owned panel controls.
+
+/// Fluent wraps placeables in bidi isolates; strip them to compare.
+fn plain(text: &str) -> String {
+    text.replace(['\u{2068}', '\u{2069}'], "")
+}
+
+fn panel_a11y(key: &str, title: &str, plugin: &str) -> String {
+    tr_args(
+        key,
+        &[("title", title.to_string()), ("plugin", plugin.to_string())],
+    )
+}
+
+fn ui_panel_row_name(controller: &mut PlaybackController<FakeBackend, ScriptedHost>) -> String {
+    let id = fixture_id(controller, "org.modplayer.fixture.ui-panel");
+    controller
+        .plugins_view()
+        .rows
+        .iter()
+        .find(|r| r.id == id)
+        .map(|r| r.name.clone())
+        .expect("ui-panel row")
+}
+
+/// Spawn the `ui-panel` fixture and wait until its "Controls" panel is
+/// registered.
+fn spawn_ui_panel(controller: &mut PlaybackController<FakeBackend, ScriptedHost>) -> PluginId {
+    let id = fixture_id(controller, "org.modplayer.fixture.ui-panel");
+    let shared = Arc::clone(controller.shared());
+    controller.plugins_mut().spawn(id, &shared);
+    assert!(pump_until(controller, Duration::from_secs(2), |c| {
+        is_active(c, id)
+    }));
+    assert!(pump_until(controller, Duration::from_secs(2), |c| {
+        !c.plugin_panels_view().docked.is_empty()
+    }));
+    id
+}
+
+/// T11: an Active row shows `CPU {used} % / {budget} %` and
+/// `Mem {used} MB / {budget} MB` from its own budgets; every non-Active row
+/// shows the dash forms.
+#[test]
+fn resource_cell_shows_budgets_and_dashes() {
+    let (mut controller, _dir, _psd, _tsd) = fixture_controller("resource-cell");
+    spawn_ui_panel(&mut controller);
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+    let nodes = render_plugins(&ctx, &mut controller);
+
+    let cpu: Vec<&AccessNode> = nodes
+        .iter()
+        .filter(|n| {
+            n.role == Role::Label
+                && n.accessible_name()
+                    .map(plain)
+                    .is_some_and(|t| t.starts_with("CPU ") && t.contains("% / 10 %"))
+        })
+        .collect();
+    assert_eq!(
+        cpu.len(),
+        1,
+        "one Active row shows CPU vs budget: {nodes:?}"
+    );
+    let memory: Vec<&AccessNode> = nodes
+        .iter()
+        .filter(|n| {
+            n.role == Role::Label
+                && n.accessible_name()
+                    .map(plain)
+                    .is_some_and(|t| t.starts_with("Mem ") && t.contains("MB / 64 MB"))
+        })
+        .collect();
+    assert_eq!(
+        memory.len(),
+        1,
+        "one Active row shows Mem vs budget: {nodes:?}"
+    );
+
+    let rows = controller.plugins_view().rows.len();
+    let cpu_none = find_all(&nodes, Role::Label, &tr("plugins-resource-cpu-none")).len();
+    let mem_none = find_all(&nodes, Role::Label, &tr("plugins-resource-memory-none")).len();
+    // Invalid rows have no resource cell; none exist among the fixtures'
+    // healthy rows except the invalid-manifest fixture.
+    assert!(
+        cpu_none >= rows - 3,
+        "non-Active rows show the CPU dash: {nodes:?}"
+    );
+    assert_eq!(cpu_none, mem_none);
+}
+
+/// T13, T15: a plugin with exactly one panel gets Show/Hide and
+/// Enable/Disable buttons inline in its row, each named by the a11y key
+/// carrying panel title and plugin name, and no disclosure.
+#[test]
+fn single_panel_controls_inline_in_row() {
+    let (mut controller, _dir, _psd, _tsd) = fixture_controller("single-panel-inline");
+    spawn_ui_panel(&mut controller);
+    let plugin = ui_panel_row_name(&mut controller);
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+    let nodes = render_plugins(&ctx, &mut controller);
+
+    let hide = find_one(
+        &nodes,
+        Role::Button,
+        &panel_a11y("plugins-panel-hide-a11y", "Controls", &plugin),
+    );
+    let disable = find_one(
+        &nodes,
+        Role::Button,
+        &panel_a11y("plugins-panel-disable-a11y", "Controls", &plugin),
+    );
+    // Both sit inside the window and on the row that owns the plugin.
+    let window = Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 2000.0));
+    for node in [hide, disable] {
+        let bounds = node.bounds.expect("panel button has bounds");
+        assert!(window.contains_rect(bounds), "{bounds:?}");
+    }
+    let count_name = tr_args("plugins-panels-count", &[("count", "1".to_string())]);
+    assert!(
+        find_all(&nodes, Role::Button, &count_name).is_empty(),
+        "one panel needs no disclosure"
+    );
+}
+
+/// T13, T14: two panels collapse behind a `Panels (2)` disclosure; opening
+/// it lists one line per panel with its own buttons.
+#[test]
+fn multi_panel_disclosure() {
+    use modplayer_capability_gateway::ui::{UiId, WidgetKind, WidgetSpec};
+
+    let (mut controller, _dir, _psd, _tsd) = fixture_controller("multi-panel");
+    let id = spawn_ui_panel(&mut controller);
+    let second = WidgetSpec {
+        id: UiId::parse("info").expect("valid id"),
+        kind: WidgetKind::Label,
+        label: "Label".to_string(),
+        min: None,
+        max: None,
+        step: None,
+        value: None,
+        items: Vec::new(),
+        selected: None,
+        action: None,
+        text: Some("hello".to_string()),
+    };
+    controller
+        .plugins_mut()
+        .ui_mut()
+        .panels_mut()
+        .register(
+            id,
+            UiId::parse("second").expect("valid id"),
+            "Second".to_string(),
+            vec![second],
+        )
+        .expect("second panel registers");
+
+    let plugin = ui_panel_row_name(&mut controller);
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+    let mut state = plugins_view::PluginsViewState::default();
+
+    let nodes = render_with_state(&ctx, &mut controller, &mut state);
+    // Collapsed: no per-panel buttons, one disclosure.
+    assert!(
+        find_all(
+            &nodes,
+            Role::Button,
+            &panel_a11y("plugins-panel-hide-a11y", "Controls", &plugin)
+        )
+        .is_empty(),
+        "collapsed: no per-panel buttons"
+    );
+    let show = tr_args("plugins-panels-show", &[("plugin", plugin.clone())]);
+    let bounds = find_one(&nodes, Role::Button, &show)
+        .bounds
+        .expect("disclosure bounds");
+    click_at_with_state(&ctx, &mut controller, &mut state, bounds.center());
+    assert!(state.panels_open.contains(&id), "click must expand panels");
+
+    let nodes = render_with_state(&ctx, &mut controller, &mut state);
+    for title in ["Controls", "Second"] {
+        find_one(
+            &nodes,
+            Role::Button,
+            &panel_a11y("plugins-panel-hide-a11y", title, &plugin),
+        );
+        find_one(
+            &nodes,
+            Role::Button,
+            &panel_a11y("plugins-panel-disable-a11y", title, &plugin),
+        );
+    }
+    let hide = tr_args("plugins-panels-hide", &[("plugin", plugin)]);
+    let bounds = find_one(&nodes, Role::Button, &hide)
+        .bounds
+        .expect("hide disclosure bounds");
+    click_at_with_state(&ctx, &mut controller, &mut state, bounds.center());
+    assert!(
+        !state.panels_open.contains(&id),
+        "click must collapse panels"
+    );
 }
