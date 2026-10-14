@@ -1342,6 +1342,8 @@ fn no_unused_keys_in_playback_and_settings_ftl() {
         .chain(TRANSPORT_ROW_A11Y_ARG_KEYS)
         .chain(SETTINGS_028_PLAIN_KEYS)
         .chain(SETTINGS_028_ARG_KEYS.iter().map(|(k, _)| k))
+        .chain(ONBOARDING_030_KEYS)
+        .chain(ONBOARDING_030_ARG_KEYS)
         .copied()
         .collect();
 
@@ -2234,5 +2236,69 @@ fn shortcut_modules_contain_no_user_facing_literals() {
                 rest = &after[end + 1..];
             }
         }
+    }
+}
+
+/// 030-onboarding-clarity (contracts/fluent-strings.md F1): every
+/// argument-free new key resolves to a non-key value.
+const ONBOARDING_030_KEYS: &[&str] = &[
+    "privacy-back-to-welcome",
+    "privacy-back-to-about",
+    "signin-waiting-indicator",
+    "signin-browser-hint",
+    "signin-summary-title",
+    "signin-summary-continue",
+    "signin-summary-switch",
+    "device-check-back",
+    "setting-show-getting-started",
+    "setting-show-getting-started-desc",
+    "setting-show-getting-started-visible",
+];
+
+/// 030-onboarding-clarity: new keys that take arguments (F2).
+const ONBOARDING_030_ARG_KEYS: &[&str] = &[
+    "signin-waiting-elapsed-seconds",
+    "signin-waiting-elapsed-minutes",
+    "signin-summary-identity",
+];
+
+#[test]
+fn onboarding_030_keys_resolve() {
+    for key in ONBOARDING_030_KEYS {
+        let resolved = tr(key);
+        assert_ne!(&resolved, key, "Fluent key `{key}` did not resolve");
+        assert!(!resolved.trim().is_empty(), "Fluent key `{key}` is empty");
+    }
+}
+
+#[test]
+fn onboarding_030_plural_and_identity_keys() {
+    let n = |key: &str, c: &str| {
+        // Fluent wraps placeables in bidi isolation marks.
+        tr_args(key, &[("count", c.to_string())]).replace(['\u{2068}', '\u{2069}'], "")
+    };
+    assert_eq!(
+        n("signin-waiting-elapsed-seconds", "1"),
+        "Waiting for 1 second"
+    );
+    assert!(n("signin-waiting-elapsed-seconds", "2").ends_with("2 seconds"));
+    assert_eq!(
+        n("signin-waiting-elapsed-minutes", "1"),
+        "Waiting for 1 minute"
+    );
+    assert!(n("signin-waiting-elapsed-minutes", "2").ends_with("2 minutes"));
+    assert!(tr_args("signin-summary-identity", &[("name", "Alex".to_string())]).contains("Alex"));
+}
+
+/// F3 (C2): no new key is defined in the hashed `disclosure.ftl`.
+#[test]
+fn onboarding_030_keys_not_in_disclosure_ftl() {
+    let disclosure = include_str!("../../../locales/en-US/disclosure.ftl");
+    let defined = defined_keys(disclosure);
+    for key in ONBOARDING_030_KEYS.iter().chain(ONBOARDING_030_ARG_KEYS) {
+        assert!(
+            !defined.contains(key),
+            "`{key}` must not be defined in disclosure.ftl (C2)"
+        );
     }
 }

@@ -2,8 +2,9 @@
 
 //! The dismissible "Getting started" card (013-key-and-tempo-plugin,
 //! contracts/getting-started-card.md): names both bundled plugins
-//! (Section Loop, Key & Tempo) and their default shortcuts, and links to
-//! the placeholder plugin tutorial. Host-native and stateless — it holds
+//! (Section Loop, Key & Tempo) in one line each, and links to the
+//! keyboard-shortcut sheet and the placeholder plugin tutorial. It prints
+//! no key chords of its own; the shortcut sheet is the one place they live. Host-native and stateless — it holds
 //! no controller/session reference of its own and never calls
 //! `open_url` itself (design note 11: only `App` does that).
 

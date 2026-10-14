@@ -703,7 +703,8 @@ mod tests {
             1
         );
 
-        // Authorizing: "Open the browser again" + "Cancel".
+        // Authorizing: the named spinner (030 P2) + "Open the browser
+        // again" + "Cancel".
         let mut authorizing = fresh_account_service();
         authorizing.start_sign_in();
         let mut authorizing_screen = SignInScreen::default();
@@ -711,7 +712,7 @@ mod tests {
             accessible_widget_count(|ui| {
                 sign_in::show(ui, &mut authorizing, &mut authorizing_screen);
             }),
-            2
+            3
         );
 
         // Tier result: Free — "Open upgrade page" + "Continue".
@@ -735,18 +736,22 @@ mod tests {
             2
         );
 
-        // Settings > About, main sub-view: "Privacy notice" + "Disclosure".
+        // Settings > About, main sub-view: "Privacy notice" + "Disclosure" +
+        // the (disabled) "Show getting-started card" button.
         let mut about_screen = AboutScreen::default();
         assert_eq!(
-            accessible_widget_count(|ui| about::show(ui, &mut about_screen)),
-            2
+            accessible_widget_count(|ui| {
+                about::show(ui, &mut about_screen, false);
+            }),
+            3
         );
 
         // The Privacy sub-view's "Back" button — the exact same function
         // About's own Privacy branch calls.
         assert_eq!(
             accessible_widget_count(|ui| {
-                let _ = crate::privacy_notice::show(ui);
+                let _ =
+                    crate::privacy_notice::show(ui, crate::privacy_notice::PrivacyOrigin::About);
             }),
             1
         );
@@ -783,15 +788,17 @@ mod tests {
             2
         );
 
-        // Welcome, disclosure sub-view (US1, T039/T041): "Privacy notice"
-        // + "I understand, continue" + "Decline".
+        // Welcome, disclosure sub-view (US1, T039/T041): "I understand,
+        // continue" + "Decline". The privacy notice and terms are real
+        // links (`Role::Link`, 030 W2), not buttons, so they are not
+        // counted here; the link roles are pinned in `onboarding_clarity`.
         let mut welcome_controller = fresh_playback_controller();
         let mut welcome_screen = crate::welcome::WelcomeScreen::default();
         assert_eq!(
             accessible_widget_count(|ui| {
                 welcome_screen.show(ui, &mut welcome_controller);
             }),
-            3
+            2
         );
     }
 

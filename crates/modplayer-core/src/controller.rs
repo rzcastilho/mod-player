@@ -2582,6 +2582,30 @@ impl<B: OutputBackend, H: SourceHost> PlaybackController<B, H> {
         self.persist_settings(|settings| settings.getting_started_dismissed = true);
     }
 
+    /// Bring the Getting Started card back (030-onboarding-clarity, UX-10):
+    /// clears the dismissed flag and persists it. Like
+    /// [`Self::dismiss_getting_started`], the in-memory flag changes even if
+    /// the save fails (a `settings-save-failed` warning is raised).
+    ///
+    /// ```
+    /// use modplayer_audio_io::FakeBackend;
+    /// use modplayer_audio_source_synthetic::SyntheticHost;
+    /// use modplayer_core::{PlaybackController, SettingsStore};
+    ///
+    /// let dir = std::env::temp_dir().join("modplayer-restore-getting-started-doc");
+    /// let store = SettingsStore::with_path(dir.join("settings.toml"));
+    /// let mut controller =
+    ///     PlaybackController::new(FakeBackend::new(vec![]), SyntheticHost::new(44_100), store);
+    /// controller.dismiss_getting_started();
+    /// assert!(controller.getting_started_dismissed());
+    /// controller.restore_getting_started();
+    /// assert!(!controller.getting_started_dismissed());
+    /// ```
+    pub fn restore_getting_started(&mut self) {
+        self.getting_started_dismissed = false;
+        self.persist_settings(|settings| settings.getting_started_dismissed = false);
+    }
+
     /// Whether `panel` is currently open
     /// (016-list-row-and-panel-components, FR-019, contract P2): read from
     /// the cached shadow state seeded at construction, never a fresh disk
@@ -5075,6 +5099,29 @@ mod tests {
         ));
         let _ = std::fs::create_dir_all(&dir);
         SettingsStore::with_path(dir.join("settings.toml"))
+    }
+
+    /// 030 (A7, A8): restoring clears the shadow flag, persists it, and is
+    /// idempotent.
+    #[test]
+    fn restore_getting_started() {
+        let store = fresh_store();
+        let path = store.path().to_path_buf();
+        let mut controller =
+            PlaybackController::new(FakeBackend::new(vec![]), SyntheticHost::new(44_100), store);
+        controller.restore_getting_started();
+        assert!(
+            !controller.getting_started_dismissed(),
+            "idempotent when visible"
+        );
+        controller.dismiss_getting_started();
+        assert!(controller.getting_started_dismissed());
+        controller.restore_getting_started();
+        assert!(!controller.getting_started_dismissed());
+        controller.restore_getting_started();
+        assert!(!controller.getting_started_dismissed());
+        let reloaded = SettingsStore::with_path(path).load();
+        assert!(!reloaded.settings.getting_started_dismissed);
     }
 
     // -----------------------------------------------------------------

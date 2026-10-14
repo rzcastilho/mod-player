@@ -8,3 +8,6 @@ device-check-yes = Yes
 device-check-no = No, try another
 device-check-skip = Skip for now
 device-check-no-devices = No output devices were found. Connect a device and reopen this screen from Settings › Audio.
+
+# 030-onboarding-clarity (C10, C16).
+device-check-back = Back

@@ -348,7 +348,12 @@ fn show_content<B: OutputBackend, H: SourceHost>(
         }
         SettingsCategory::Account => (None, account::show(ui, account, focus)),
         SettingsCategory::About => {
-            about::show(ui, &mut screen.about);
+            let dismissed = controller.getting_started_dismissed();
+            if about::show(ui, &mut screen.about, dismissed)
+                == about::AboutOutcome::RestoreGettingStarted
+            {
+                controller.restore_getting_started();
+            }
             (None, Vec::new())
         }
         SettingsCategory::Playback => {

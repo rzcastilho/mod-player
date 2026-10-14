@@ -95,3 +95,8 @@ settings-coming-soon = Coming soon
 settings-category-coming-soon-a11y = { $category }, coming soon
 settings-unavailable-offline = Offline settings aren't available yet. They'll arrive in a later update.
 settings-unavailable-privacy-diagnostics = Privacy and diagnostics settings aren't available yet. They'll arrive in a later update.
+
+# 030-onboarding-clarity (C14): Settings › About.
+setting-show-getting-started = Show getting-started card
+setting-show-getting-started-desc = Bring back the card on the Library screen that introduces the bundled plugins and links to keyboard shortcuts.
+setting-show-getting-started-visible = The getting-started card is already showing.

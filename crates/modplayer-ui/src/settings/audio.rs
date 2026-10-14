@@ -28,7 +28,7 @@ use modplayer_engine::{
     BufferPreset, CeilingDb, DeviceId, NegotiatedBuffer, SafeVolume, SampleRate, VolumePercent,
 };
 
-use crate::device_check::DeviceCheckScreen;
+use crate::device_check::{DeviceCheckOrigin, DeviceCheckScreen};
 use crate::settings::field::{self, FieldOutput, FieldSpec, ResetState, Unit};
 use crate::theme::{self, tokens::space};
 use crate::widgets::controls::{SwitchKind, panel_card, switch};
@@ -58,6 +58,7 @@ pub fn test_output_device_button<B: OutputBackend, H: SourceHost>(
         Some(DeviceCheckScreen::new(
             controller.active_device().map(|d| d.id.clone()),
             controller.preset(),
+            DeviceCheckOrigin::Settings,
         ))
     } else {
         None
@@ -181,6 +182,7 @@ pub fn show<B: OutputBackend, H: SourceHost>(
             test_screen = Some(DeviceCheckScreen::new(
                 controller.active_device().map(|d| d.id.clone()),
                 controller.preset(),
+                DeviceCheckOrigin::Settings,
             ));
         }
     });

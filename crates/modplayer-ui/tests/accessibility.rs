@@ -3527,3 +3527,296 @@ fn shortcut_sheet_nav_item_and_link_are_named() {
             .any(|n| n.role == Role::Link && n.accessible_name() == Some(link.as_str()))
     );
 }
+
+// ---------------------------------------------------------------------
+// 030-onboarding-clarity (T044, NFR-6.1/NFR-6.2, contracts K1/K2): every
+// control the onboarding polish adds or changes has a non-empty accessible
+// name, is reachable with Tab, and activates with Space or Enter.
+// ---------------------------------------------------------------------
+
+mod onboarding_sweep {
+    use super::*;
+    use modplayer_ui::device_check::{DeviceCheckOrigin, DeviceCheckOutcome, DeviceCheckScreen};
+    use modplayer_ui::privacy_notice::{self, PrivacyOrigin};
+    use modplayer_ui::settings::about::{self, AboutOutcome, AboutScreen};
+    use modplayer_ui::sign_in::{self, SignInScreen, SummaryOutcome};
+    use modplayer_ui::welcome::WelcomeScreen;
+
+    const SIZE: (f32, f32) = (960.0, 640.0);
+
+    fn raw(events: Vec<Event>) -> RawInput {
+        RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(SIZE.0, SIZE.1))),
+            time: Some(0.0),
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn key(key: Key, pressed: bool) -> Event {
+        Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }
+    }
+
+    /// One frame: the nodes plus the accessible name of the focused node.
+    fn frame(
+        ctx: &Context,
+        input: RawInput,
+        render: &mut impl FnMut(&mut egui::Ui) -> bool,
+    ) -> (Vec<AccessNode>, Option<String>, bool) {
+        let mut signal = false;
+        let mut output = ctx.run_ui(input, |ui| signal = render(ui));
+        let update = output
+            .platform_output
+            .accesskit_update
+            .take()
+            .expect("accesskit_update should be populated once enabled");
+        output.drop_without_applying_deltas();
+        let focus_id = update.focus;
+        let mut focus = None;
+        let nodes = update
+            .nodes
+            .iter()
+            .map(|(id, node)| {
+                if *id == focus_id {
+                    focus = node.label().or_else(|| node.value()).map(str::to_string);
+                }
+                AccessNode {
+                    role: node.role(),
+                    label: node.label().map(str::to_string),
+                    value: node.value().map(str::to_string),
+                    description: node.description().map(str::to_string),
+                    toggled: node.toggled(),
+                    selected: node.is_selected(),
+                    disabled: node.is_disabled(),
+                    labelled_by_something: !node.labelled_by().is_empty(),
+                    bounds: node.bounds().map(|b| {
+                        Rect::from_min_max(
+                            Pos2::new(b.x0 as f32, b.y0 as f32),
+                            Pos2::new(b.x1 as f32, b.y1 as f32),
+                        )
+                    }),
+                }
+            })
+            .collect();
+        (nodes, focus, signal)
+    }
+
+    fn ctx() -> Context {
+        let ctx = fresh_ctx();
+        ctx.enable_accesskit();
+        ctx
+    }
+
+    /// The control `name` exists once with `role` and a non-empty name, Tab
+    /// reaches it, and both Enter and Space activate it. `make` builds a
+    /// fresh screen per key; `done` decides, from the frame after the key
+    /// and whether the render closure signalled, that it activated.
+    fn sweep<F: FnMut(&mut egui::Ui) -> bool>(
+        role: Role,
+        name: &str,
+        mut make: impl FnMut() -> F,
+        done: impl Fn(&[AccessNode], bool) -> bool,
+    ) {
+        assert!(!name.trim().is_empty(), "accessible name is non-empty");
+        for activator in [Key::Enter, Key::Space] {
+            let ctx = ctx();
+            let mut render = make();
+            let (nodes, _, _) = frame(&ctx, raw(vec![]), &mut render);
+            assert_eq!(
+                find_all(&nodes, role, name).len(),
+                1,
+                "exactly one {role:?} named `{name}`"
+            );
+            let mut reached = false;
+            for _ in 0..16 {
+                let _ = frame(&ctx, raw(vec![key(Key::Tab, true)]), &mut render);
+                let (_, focus, _) = frame(&ctx, raw(vec![]), &mut render);
+                if focus.as_deref() == Some(name) {
+                    reached = true;
+                    break;
+                }
+            }
+            assert!(reached, "Tab reaches `{name}`");
+            let (_, _, first) = frame(
+                &ctx,
+                raw(vec![key(activator, true), key(activator, false)]),
+                &mut render,
+            );
+            let (nodes, _, second) = frame(&ctx, raw(vec![]), &mut render);
+            assert!(
+                done(&nodes, first || second),
+                "{activator:?} activates `{name}`"
+            );
+        }
+    }
+
+    fn any_signal(_: &[AccessNode], signal: bool) -> bool {
+        signal
+    }
+
+    #[test]
+    fn welcome_privacy_link_is_named_reachable_and_activates() {
+        let back = tr("privacy-back-to-welcome");
+        sweep(
+            Role::Link,
+            &tr("disclosure-privacy-link"),
+            || {
+                let (store, dir) = fresh_store("a11y-welcome");
+                let mut controller =
+                    PlaybackController::new(FakeBackend::new(vec![]), ScriptedHost::new(), store);
+                let mut screen = WelcomeScreen::default();
+                move |ui: &mut egui::Ui| {
+                    let _keep = &dir;
+                    let _ = screen.show(ui, &mut controller);
+                    false
+                }
+            },
+            |nodes, _| !find_all(nodes, Role::Button, &back).is_empty(),
+        );
+    }
+
+    #[test]
+    fn privacy_back_labels_are_named_reachable_and_activate() {
+        for (origin, key) in [
+            (PrivacyOrigin::Welcome, "privacy-back-to-welcome"),
+            (PrivacyOrigin::About, "privacy-back-to-about"),
+        ] {
+            sweep(
+                Role::Button,
+                &tr(key),
+                || move |ui: &mut egui::Ui| privacy_notice::show(ui, origin),
+                any_signal,
+            );
+        }
+    }
+
+    #[test]
+    fn device_check_back_is_named_reachable_and_activates() {
+        for origin in [DeviceCheckOrigin::LaunchFlow, DeviceCheckOrigin::Settings] {
+            sweep(
+                Role::Button,
+                &tr("device-check-back"),
+                || {
+                    let (store, dir) = fresh_store("a11y-device-check");
+                    let mut controller = PlaybackController::new(
+                        FakeBackend::new(vec![fake_device()]),
+                        ScriptedHost::new(),
+                        store,
+                    );
+                    let mut screen = DeviceCheckScreen::new(
+                        None,
+                        modplayer_engine::BufferPreset::Balanced,
+                        origin,
+                    );
+                    move |ui: &mut egui::Ui| {
+                        let _keep = &dir;
+                        screen.show(ui, &mut controller) == DeviceCheckOutcome::Back
+                    }
+                },
+                any_signal,
+            );
+        }
+    }
+
+    #[test]
+    fn summary_continue_is_named_reachable_and_activates() {
+        sweep(
+            Role::Button,
+            &tr("signin-summary-continue"),
+            || {
+                let mut account = common::active_account("a11y-continue");
+                move |ui: &mut egui::Ui| {
+                    sign_in::show_summary(ui, &mut account) == SummaryOutcome::Continue
+                }
+            },
+            any_signal,
+        );
+    }
+
+    #[test]
+    fn summary_switch_is_named_reachable_and_opens_the_confirmation() {
+        let title = tr("signout-confirm-title");
+        sweep(
+            Role::Button,
+            &tr("signin-summary-switch"),
+            || {
+                let mut account = common::active_account("a11y-switch");
+                move |ui: &mut egui::Ui| {
+                    let _ = sign_in::show_summary(ui, &mut account);
+                    false
+                }
+            },
+            |nodes, _| {
+                nodes.iter().any(|n| {
+                    n.accessible_name()
+                        .is_some_and(|name| name.contains(title.as_str()))
+                })
+            },
+        );
+    }
+
+    #[test]
+    fn about_restore_button_is_named_reachable_and_activates() {
+        sweep(
+            Role::Button,
+            &tr("setting-show-getting-started"),
+            || {
+                let mut screen = AboutScreen::default();
+                move |ui: &mut egui::Ui| {
+                    about::show(ui, &mut screen, true) == AboutOutcome::RestoreGettingStarted
+                }
+            },
+            any_signal,
+        );
+    }
+
+    #[test]
+    fn pending_spinner_and_status_message_have_accessible_names() {
+        let ctx = ctx();
+
+        // Pending sign-in: the spinner is a named progress indicator.
+        let mut account = common::signed_out_account("a11y-pending");
+        let _ = account.start_sign_in();
+        let mut screen = SignInScreen::default();
+        let mut render = |ui: &mut egui::Ui| {
+            let _ = sign_in::show(ui, &mut account, &mut screen);
+            false
+        };
+        let (nodes, _, _) = frame(&ctx, raw(vec![]), &mut render);
+        let spinner = find_one(
+            &nodes,
+            Role::ProgressIndicator,
+            &tr("signin-waiting-indicator"),
+        );
+        assert!(
+            spinner
+                .accessible_name()
+                .is_some_and(|n| !n.trim().is_empty())
+        );
+
+        // Cancelled: the reason is one named, polite status node.
+        let ctx = self::ctx();
+        let mut account = common::signed_out_account("a11y-status");
+        let _ = account.start_sign_in();
+        account.cancel_sign_in();
+        let mut screen = SignInScreen::default();
+        let mut render = |ui: &mut egui::Ui| {
+            let _ = sign_in::show(ui, &mut account, &mut screen);
+            false
+        };
+        let (nodes, _, _) = frame(&ctx, raw(vec![]), &mut render);
+        let statuses: Vec<_> = nodes.iter().filter(|n| n.role == Role::Status).collect();
+        assert_eq!(statuses.len(), 1, "one status node");
+        assert!(
+            statuses[0]
+                .accessible_name()
+                .is_some_and(|n| !n.trim().is_empty())
+        );
+    }
+}

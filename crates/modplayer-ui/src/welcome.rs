@@ -10,13 +10,14 @@
 //! replaces the same screen's content rather than opening a new one
 //! (contracts/ui-surface.md).
 
-use egui::{RichText, Ui, ViewportCommand};
+use egui::accesskit::Role;
+use egui::{Frame, Link, Response, RichText, Ui, ViewportCommand};
 use modplayer_account::{DISCLOSURE_BUNDLE_VERSION, TERMS_URL};
 use modplayer_audio_io::OutputBackend;
 use modplayer_audio_source::SourceHost;
 use modplayer_core::{DisclosureAcknowledgement, PlaybackController, Severity, tr};
 
-use crate::privacy_notice;
+use crate::privacy_notice::{self, PrivacyOrigin};
 use crate::theme;
 use crate::theme::controls::Variant;
 use crate::widgets::controls::button;
@@ -71,7 +72,7 @@ impl WelcomeScreen {
                 None
             }
             View::Privacy => {
-                if privacy_notice::show(ui) {
+                if privacy_notice::show(ui, PrivacyOrigin::Welcome) {
                     self.view = View::Disclosure;
                 }
                 None
@@ -88,19 +89,41 @@ impl WelcomeScreen {
         // heading is a `display`-role surface (data-model.md §6), a size
         // up from what `ui.heading()`'s `title` role would give it.
         ui.label(RichText::new(tr("welcome-title")).text_style(theme::text::DISPLAY.clone()));
+        let roles = theme::tokens::roles(ui.visuals());
+        let measure = theme::body_measure(ui.ctx());
+        // FR-006, U2: every prose block is capped at the 72-character
+        // measure rather than spanning the window.
         ui.scope(|ui| {
-            // FR-006, U2: the disclosure paragraph is prose, capped at the
-            // 72-character measure rather than spanning the window.
-            ui.set_max_width(ui.available_width().min(theme::body_measure(ui.ctx())));
+            ui.set_max_width(ui.available_width().min(measure));
             ui.label(tr("welcome-description"));
-            ui.label(tr("disclosure-unofficial"));
-            ui.label(tr("disclosure-premium-required"));
-            ui.label(tr("disclosure-terms-apply"));
         });
-        ui.hyperlink_to(tr("disclosure-terms-link"), TERMS_URL);
-        if ui.button(tr("disclosure-privacy-link")).clicked() {
-            self.view = View::Privacy;
-        }
+        // 030 C2: the legal / Premium lines form one compact secondary-text
+        // block, with the real links beneath them inside the same frame.
+        ui.scope(|ui| {
+            ui.set_max_width(ui.available_width().min(measure));
+            Frame::group(ui.style()).show(ui, |ui| {
+                for key in [
+                    "disclosure-unofficial",
+                    "disclosure-premium-required",
+                    "disclosure-terms-apply",
+                ] {
+                    ui.label(
+                        RichText::new(tr(key))
+                            .text_style(theme::text::SECONDARY)
+                            .color(roles.text_secondary),
+                    );
+                }
+                ui.horizontal_wrapped(|ui| {
+                    let terms = ui.hyperlink_to(tr("disclosure-terms-link"), TERMS_URL);
+                    as_link(ui, &terms);
+                    let privacy = ui.add(Link::new(tr("disclosure-privacy-link")));
+                    as_link(ui, &privacy);
+                    if privacy.clicked() {
+                        self.view = View::Privacy;
+                    }
+                });
+            });
+        });
 
         let mut outcome = None;
         ui.horizontal(|ui| {
@@ -111,12 +134,20 @@ impl WelcomeScreen {
                 acknowledge(controller);
                 outcome = Some(WelcomeOutcome::Acknowledged);
             }
-            if ui.button(tr("welcome-decline")).clicked() {
+            if button(ui, Variant::Default, tr("welcome-decline")).clicked() {
                 self.view = View::Decline;
             }
         });
         outcome
     }
+}
+
+/// Announce `response` to assistive technology as a link (W2): egui's own
+/// link widgets report a plain label role here.
+fn as_link(ui: &Ui, response: &Response) {
+    ui.ctx().accesskit_node_builder(response.id, |b| {
+        b.set_role(Role::Link);
+    });
 }
 
 fn show_decline(ui: &mut Ui) {

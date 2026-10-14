@@ -1020,3 +1020,65 @@ fn shortcut_sheet_borders_follow_the_divider_in_hc() {
         assert!(ratio(divider_color_for(roles), roles.surface_base) >= 3.0);
     }
 }
+
+// ---------------------------------------------------------------------
+// 030 onboarding clarity (NFR-6.2, T045): the shared status message
+// ---------------------------------------------------------------------
+
+/// 030 NFR-6.2: in both high-contrast appearances the status message's
+/// warning bar, its text and its frame stroke stay legible on the page:
+/// body text meets the enhanced 7:1 floor, and the bar and the divider
+/// frame clear the 3:1 non-text floor.
+#[test]
+fn status_message_colours_stay_legible_in_both_high_contrast_themes() {
+    use modplayer_ui::theme::contrast::ratio;
+    for roles in [&LIGHT_HIGH_CONTRAST, &DARK_HIGH_CONTRAST] {
+        let surface = roles.surface_base;
+        assert!(ratio(roles.text_primary, surface) >= 7.0, "status text");
+        assert!(ratio(roles.warning, surface) >= 3.0, "status warning bar");
+        assert!(
+            ratio(divider_color_for(roles), surface) >= 3.0,
+            "status frame stroke"
+        );
+    }
+}
+
+/// 030 NFR-6.2: rendered under the high-contrast style, the status message
+/// still exposes exactly one `Role::Status` node and paints its bar in the
+/// active table's `warning` colour (no hard-coded literal).
+#[test]
+fn status_message_paints_the_active_warning_role_in_high_contrast() {
+    use egui::Shape;
+    fn collect(shape: &Shape, out: &mut Vec<egui::Color32>) {
+        match shape {
+            Shape::Vec(inner) => inner.iter().for_each(|s| collect(s, out)),
+            Shape::Rect(r) => out.push(r.fill),
+            _ => {}
+        }
+    }
+    let ctx = Context::default();
+    apply_tokens_for(&ctx, true);
+    ctx.enable_accesskit();
+    let mut output = ctx.run_ui(default_input(), |ui| {
+        let _ = modplayer_ui::widgets::status::status_message(ui, "Sign-in was cancelled.");
+    });
+    let update = output
+        .platform_output
+        .accesskit_update
+        .take()
+        .expect("accesskit_update once enabled");
+    let mut fills = Vec::new();
+    for clipped in &output.shapes {
+        collect(&clipped.shape, &mut fills);
+    }
+    output.drop_without_applying_deltas();
+    let statuses = update
+        .nodes
+        .iter()
+        .filter(|(_, n)| n.role() == Role::Status)
+        .count();
+    assert_eq!(statuses, 1, "one status node");
+    let roles = modplayer_ui::theme::roles(&ctx.global_style().visuals);
+    assert!(roles.high_contrast, "high-contrast table installed");
+    assert!(fills.contains(&roles.warning), "bar uses the warning role");
+}

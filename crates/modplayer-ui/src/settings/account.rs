@@ -133,7 +133,7 @@ fn modal_focus_pending_id() -> Id {
     Id::new("settings-account-signout-modal-focus-pending")
 }
 
-fn open_sign_out_modal(ui: &mut Ui) {
+pub(crate) fn open_sign_out_modal(ui: &mut Ui) {
     ui.memory_mut(|memory| {
         memory.data.insert_temp(modal_open_id(), true);
         memory.data.insert_temp(modal_focus_pending_id(), true);
@@ -168,7 +168,7 @@ pub(crate) fn signout_dialog_width(viewport_w: f32) -> f32 {
 /// destructive "Sign out" and a default-focus "Cancel". Dismissing via
 /// Escape or a backdrop click (`ModalResponse::should_close`) behaves like
 /// Cancel — sign-out only ever happens on an explicit confirm click.
-fn show_sign_out_modal(ui: &mut Ui, account: &mut AccountService) -> Vec<AccountEvent> {
+pub(crate) fn show_sign_out_modal(ui: &mut Ui, account: &mut AccountService) -> Vec<AccountEvent> {
     let is_open = ui.memory(|memory| {
         memory
             .data
@@ -267,7 +267,7 @@ fn tier_key(tier: Tier) -> &'static str {
 
 /// The identity line: the display name, or "Name unavailable" when it is
 /// empty or only whitespace, so the card never shows a blank line (A3).
-fn identity_text(display_name: &str) -> String {
+pub(crate) fn identity_text(display_name: &str) -> String {
     if display_name.trim().is_empty() {
         tr("account-identity-unavailable")
     } else {

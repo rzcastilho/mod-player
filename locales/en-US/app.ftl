@@ -70,3 +70,7 @@ gate-step-sign-in = Sign in
 gate-step-audio-output-check = Audio output check
 # $current, $total: integers; $label: one of the three step labels above
 gate-step-progress = Step { $current } of { $total }: { $label }
+
+# 030-onboarding-clarity (C5): the privacy notice's origin-specific back control.
+privacy-back-to-welcome = Back to welcome
+privacy-back-to-about = Back to About

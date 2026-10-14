@@ -573,6 +573,11 @@ fn primary_sites_match_the_one_per_view_rule() {
         ("effects_view.rs", "effects-add"),
         // 025: the collection header's Play — one Primary per detail view.
         ("detail_view.rs", "detail-play"),
+        // 030: the pending sign-in view's single Primary action.
+        ("sign_in.rs", "signin-open-again"),
+        // 030: the sign-in summary's single Primary action (a separate view
+        // from the pending sign-in screen above, so still one per view).
+        ("sign_in.rs", "signin-summary-continue"),
     ];
     assert_eq!(
         primary_sites.len(),

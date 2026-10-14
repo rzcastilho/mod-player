@@ -33,7 +33,7 @@ use modplayer_core::{
 use crate::actions;
 use crate::artwork::ArtworkCache;
 use crate::detail_view::{self, DetailOutcome, DetailTarget};
-use crate::device_check::DeviceCheckScreen;
+use crate::device_check::{DeviceCheckOrigin, DeviceCheckOutcome, DeviceCheckScreen};
 use crate::getting_started::{self, GettingStartedOutcome};
 use crate::layout::{self, WindowSizeTracker};
 use crate::library_view::{self, LibraryOutcome};
@@ -76,11 +76,16 @@ pub struct App<B: OutputBackend, H: SourceHost> {
     shell: Shell,
     settings: SettingsScreen,
     /// The Device Check overlay, when open — either the launch gate's
-    /// (`should_show_device_check()` at launch/after sign-in) or a
+    /// (built on the gate's first frame, dropped when the gate leaves
+    /// `DeviceCheck`, research R16) or a
     /// Settings-triggered "Test output device" preview (independent of the
     /// launch gate: `settings::show` hands one back regardless of
     /// confirmation state).
     device_check: Option<DeviceCheckScreen>,
+    /// 030 C16: Back from the first-launch device check shows the sign-in
+    /// summary instead. UI-only, never persisted; cleared whenever the
+    /// launch step is no longer `DeviceCheck`.
+    sign_in_summary: bool,
     /// The in-flight `request_playback_state()` for the transfer banner's
     /// "Playing on <device>" name (US3 T077, FR-016/019, research R3),
     /// `None` when nothing is outstanding. Re-requested every frame the
@@ -134,6 +139,25 @@ pub struct App<B: OutputBackend, H: SourceHost> {
     shortcut_sheet: ShortcutSheetState,
 }
 
+/// Whether an open Device Check screen from `origin` may stay open on a
+/// frame whose launch step is `step` (030 research R16). A launch-flow
+/// screen belongs to the `DeviceCheck` gate and is dropped as soon as the
+/// gate is something else, so the main shell never draws it as an overlay
+/// whose Back would skip the C16 summary. A Settings preview is independent
+/// of the gate.
+///
+/// ```
+/// use modplayer_account::LaunchStep;
+/// use modplayer_ui::app::retains_device_check;
+/// use modplayer_ui::device_check::DeviceCheckOrigin;
+/// assert!(retains_device_check(LaunchStep::DeviceCheck, DeviceCheckOrigin::LaunchFlow));
+/// assert!(!retains_device_check(LaunchStep::Main, DeviceCheckOrigin::LaunchFlow));
+/// assert!(retains_device_check(LaunchStep::Main, DeviceCheckOrigin::Settings));
+/// ```
+pub fn retains_device_check(step: LaunchStep, origin: DeviceCheckOrigin) -> bool {
+    origin == DeviceCheckOrigin::Settings || step == LaunchStep::DeviceCheck
+}
+
 impl<B: OutputBackend, H: SourceHost> App<B, H> {
     /// Construct the app around an already-`launch()`ed `controller` and
     /// `account`. Applies the persisted theme to `cc.egui_ctx` before
@@ -153,12 +177,6 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
             .disclosure
             .map(|ack| ack.acknowledged_version)
             .unwrap_or(0);
-        let device_check = controller.should_show_device_check().then(|| {
-            DeviceCheckScreen::new(
-                controller.active_device().map(|d| d.id.clone()),
-                controller.preset(),
-            )
-        });
         let settings = SettingsScreen::new(&controller);
 
         // FR-017 (US4, T100): a session found at launch whose secure store
@@ -202,7 +220,11 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
             sign_in: SignInScreen::default(),
             shell: Shell::default(),
             settings,
-            device_check,
+            // The launch gate builds its own screen on its first frame
+            // (`show_launch_gate_device_check`); nothing is built up front,
+            // so a non-gated launch never sees it (research R16).
+            device_check: None,
+            sign_in_summary: false,
             pending_device_name_request: None,
             artwork: ArtworkCache::new(),
             library_view: library_view::LibraryViewState::default(),
@@ -347,6 +369,16 @@ impl<B: OutputBackend, H: SourceHost> eframe::App for App<B, H> {
         // neither is added at all otherwise, so egui never reserves its
         // space (FR-004).
         let step = self.launch_step();
+        if step != LaunchStep::DeviceCheck {
+            self.sign_in_summary = false;
+        }
+        if self
+            .device_check
+            .as_ref()
+            .is_some_and(|screen| !retains_device_check(step, screen.origin()))
+        {
+            self.device_check = None;
+        }
         let chrome = shell::Chrome::for_frame(step, self.device_check.is_some());
         shell::show_chrome(ui, chrome, &mut self.shell);
         // 029 (S2): the nav item opens the sheet this frame; the section
@@ -672,14 +704,34 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
     /// `App::new`/a prior frame built, or builds a fresh one, mirroring
     /// 001's `launch()`-time construction.
     fn show_launch_gate_device_check(&mut self, ui: &mut Ui) {
+        if self.sign_in_summary {
+            match sign_in::show_summary(ui, &mut self.account) {
+                sign_in::SummaryOutcome::None => {}
+                sign_in::SummaryOutcome::Continue => self.sign_in_summary = false,
+                sign_in::SummaryOutcome::Events(events) => {
+                    let ctx = ui.ctx().clone();
+                    for event in events {
+                        self.handle_account_event(&ctx, event);
+                    }
+                }
+            }
+            return;
+        }
         let mut screen = self.device_check.take().unwrap_or_else(|| {
             DeviceCheckScreen::new(
                 self.controller.active_device().map(|d| d.id.clone()),
                 self.controller.preset(),
+                DeviceCheckOrigin::LaunchFlow,
             )
         });
-        if !screen.show(ui, &mut self.controller) {
-            self.device_check = Some(screen);
+        match screen.show(ui, &mut self.controller) {
+            DeviceCheckOutcome::Open => self.device_check = Some(screen),
+            DeviceCheckOutcome::Closed => {}
+            DeviceCheckOutcome::Back => {
+                // Keep the screen so Continue returns to the same selection.
+                self.device_check = Some(screen);
+                self.sign_in_summary = true;
+            }
         }
     }
 
@@ -695,7 +747,7 @@ impl<B: OutputBackend, H: SourceHost> App<B, H> {
     /// straight to `SectionMemory::end_frame`.
     fn show_main(&mut self, ui: &mut Ui) -> Option<section_memory::ViewKey> {
         if let Some(mut screen) = self.device_check.take() {
-            if !screen.show(ui, &mut self.controller) {
+            if screen.show(ui, &mut self.controller) == DeviceCheckOutcome::Open {
                 self.device_check = Some(screen);
             }
             return None;

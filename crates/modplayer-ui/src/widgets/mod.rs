@@ -14,4 +14,5 @@ pub mod initials;
 pub mod knob;
 pub mod peak_meter;
 pub mod skeleton;
+pub mod status;
 pub mod volume;

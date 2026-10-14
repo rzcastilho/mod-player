@@ -46,7 +46,7 @@ pub mod welcome;
 pub mod widgets;
 
 pub use app::App;
-pub use device_check::DeviceCheckScreen;
+pub use device_check::{DeviceCheckOrigin, DeviceCheckOutcome, DeviceCheckScreen};
 pub use shell::{Section, Shell};
 pub use sign_in::SignInScreen;
 pub use welcome::WelcomeScreen;
