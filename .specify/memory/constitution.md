@@ -1,6 +1,41 @@
 <!--
 Sync Impact Report
 ==================
+Version change: 1.1.1 → 1.2.0
+Rationale: MINOR — Governance › Manual Scenario Sign-Off materially
+expanded: manual scenarios now run on the host OS the feature is
+developed on (macOS, Linux, or Windows), with a host-platform rule
+(platform-neutral scenario wording, `[OS]` tags for OS-only scenarios,
+`not run — platform N/A` instead of pass, host recorded with every
+result) and full Linux (xdotool/ImageMagick/secret-tool, X11 or
+XWayland/Xvfb) and Windows (PowerShell + user32 SendInput/PrintWindow,
+Credential Manager) recipes beside the existing macOS one. No principle
+added, removed, or redefined.
+
+Modified principles: none (Principles VIII and X unchanged; the
+subsection operationalises them on all three platforms).
+
+Added sections (1.2.0): none — Manual Scenario Sign-Off restructured
+into host-platform rule, common steps, and per-OS recipes.
+
+Templates requiring updates (1.2.0):
+- .specify/templates/tasks-template.md: ✅ updated — the quickstart
+  validation task now states it runs on the dev host OS and records host
+  + evidence.
+- .specify/templates/plan-template.md / spec-template.md /
+  checklist-template.md: ✅ no change needed — generic.
+- Existing specs/*/quickstart.md: ⚠ not rewritten — historical
+  (macOS-run) records; new features follow the platform-neutral rule.
+
+Follow-up TODOs remaining:
+- TODO(MSRV): Principle VII still says `TODO(MSRV)` though
+  rust-toolchain.toml pins 1.95.0 — resolve in a PATCH amendment.
+- Linux/Windows token-lookup attribute/target names derive from the
+  `keyring` 4.2 store defaults and are unverified on a live host; the
+  first agent to run each recipe confirms and corrects them.
+
+Previous report (1.1.1)
+------------------------
 Version change: 1.1.0 → 1.1.1
 Rationale: PATCH — Principle II's `TODO(WASM_RUNTIME_DECISION)` is
 resolved: the plugin scripting runtime is Luau via `mlua` 0.12, recorded
@@ -308,38 +343,133 @@ maintainer as a to-do. Established in 001–003, reaffirmed 2026-09-17
 recorded in `tasks.md` on the scenario task and, where the behaviour
 differs from the spec, in `quickstart.md`/`research.md`.
 
-Recipe (macOS host; the only manual-run platform to date):
+**Host-platform rule.** Manual scenarios run on the OS where the feature
+is being developed — macOS, Linux, or Windows — using that platform's
+recipe below. Consequently:
+
+- Scenarios in `quickstart.md` MUST be written platform-neutrally: name
+  the *primary modifier* (`Cmd` on macOS, `Ctrl` on Linux/Windows), the
+  *OS secure store* (Keychain / Secret Service / Credential Manager) and
+  paths via `MODPLAYER_CONFIG_DIR` rather than one OS's literals. Where a
+  step genuinely differs per OS, the scenario lists each variant.
+- A scenario that only makes sense on one OS (e.g. a Keychain-specific
+  prompt) is tagged `[macOS]` / `[Linux]` / `[Windows]`. On any other
+  host it is recorded as `not run — platform N/A`, never as a pass.
+- Every recorded result names the host it ran on (OS + version, and on
+  Linux the display server), e.g. `M3 pass — Linux (Fedora 41, X11)`.
+- No platform's recipe may be substituted with test doubles: the real
+  build, real secure store, real network, real audio device.
+
+Common to all platforms:
 
 - **Toolchain**: the shell may carry `RUSTUP_TOOLCHAIN` overriding
-  `rust-toolchain.toml`; run with `RUSTUP_TOOLCHAIN=1.95.0` (or
-  `env -u RUSTUP_TOOLCHAIN`) or the workspace fails its MSRV check.
-- **Launch**: `cargo build -p modplayer && ./target/debug/modplayer` in
-  the background; debug-only toggles (`MODPLAYER_CATALOG_FORCE_429`,
+  `rust-toolchain.toml`; pin it to the file's channel (currently
+  `1.95.0`) or unset it, or the workspace fails its MSRV check.
+- **Launch**: `cargo build -p modplayer`, then run
+  `target/debug/modplayer` (`modplayer.exe` on Windows) in the
+  background. Debug-only toggles (`MODPLAYER_CATALOG_FORCE_429`,
   `MODPLAYER_ARTWORK_FORCE_FAIL`, `MODPLAYER_LIBRARY_FIXTURE=large`,
-  `MODPLAYER_CONFIG_DIR=$(mktemp -d)` for a fresh first launch) require a
+  `MODPLAYER_CONFIG_DIR=<fresh empty dir>` for a first launch) require a
   relaunch with the variable set.
+- **Window**: owner/process `modplayer`, title `ModPlayer`. Drive it at
+  window-relative coordinates in physical pixels (account for display
+  scale factor).
+- **Evidence**: capture the window to PNG, read the image back, and
+  judge the scenario from it plus the app log.
+- **Helper scripts live inside the worktree** (`target/manual-walk/`,
+  gitignored): the scope-guard hook denies writes and shell redirects to
+  the scratchpad, `/tmp` and the memory directory.
+- **Live token for `#[ignore = "manual"]` probes**: the app's own
+  `session-credential` entry (service `ModPlayer`, written by
+  `keyring` 4.2) holds JSON; extract `.access_token` (≈ 1 h validity;
+  relaunch the app to refresh). Never print it; filter
+  `bearer|access_token` from all captured output.
+
+Recipe — **macOS**:
+
+- **Toolchain**: `RUSTUP_TOOLCHAIN=1.95.0 cargo …` or
+  `env -u RUSTUP_TOOLCHAIN cargo …`; fresh config dir via
+  `MODPLAYER_CONFIG_DIR=$(mktemp -d)`.
 - **Locate window**: Python `Quartz.CGWindowListCopyWindowInfo`, owner
   `modplayer`, name `ModPlayer` → window id + bounds.
 - **Drive**: Python Quartz `CGEventPost` — mouse events at
   window-relative coordinates, `CGEventCreateKeyboardEvent` +
   `CGEventSetFlags` for shortcuts (`Cmd+1/2`, Enter, arrows),
-  `CGEventKeyboardSetUnicodeString` for typing. No test doubles: real
-  Keychain, real network.
-- **Capture evidence**: `screencapture -x -o -l <windowid> <png>`; read
-  the image back and judge the scenario from it plus the app log.
-- **Helper scripts live inside the worktree** (`target/manual-walk/`,
-  gitignored): the scope-guard hook denies writes and shell redirects to
-  the scratchpad, `/tmp` and the memory directory.
-- **Live token for `#[ignore = "manual"]` probes**: the app's own
-  credential — `security find-generic-password -s ModPlayer
-  -a session-credential -w | jq -r .access_token` (≈ 1 h validity;
-  relaunch the app to refresh). Never print it; filter
-  `bearer|access_token` from captured output.
+  `CGEventKeyboardSetUnicodeString` for typing. The terminal running
+  the agent needs Accessibility and Screen Recording permission.
+- **Capture**: `screencapture -x -o -l <windowid> <png>`.
+- **Token**: `security find-generic-password -s ModPlayer
+  -a session-credential -w | jq -r .access_token`.
+
+Recipe — **Linux**:
+
+- **Prerequisites**: a desktop session with a running, unlocked Secret
+  Service provider (GNOME Keyring or KWallet) on the session D-Bus, an
+  audio server (PipeWire/PulseAudio/ALSA), and the build deps for
+  `eframe`/`cpal` (`libasound2-dev`/`alsa-lib-devel`,
+  `libxkbcommon`, X11/Wayland dev libs). Tools: `xdotool`, ImageMagick
+  (`import`), `jq`, `secret-tool` (libsecret).
+- **Toolchain**: `RUSTUP_TOOLCHAIN=1.95.0 cargo …` or
+  `env -u RUSTUP_TOOLCHAIN cargo …`; fresh config dir via
+  `MODPLAYER_CONFIG_DIR=$(mktemp -d)`.
+- **Display server**: synthetic input and per-window capture require
+  X11. On a Wayland session, launch the app under XWayland with
+  `env -u WAYLAND_DISPLAY ./target/debug/modplayer` so `xdotool`
+  can see it; record `X11 (XWayland)` as the display server. Without a
+  desktop, run under `Xvfb :99` with `DISPLAY=:99` inside
+  `dbus-run-session`, starting and unlocking `gnome-keyring-daemon`
+  first.
+- **Locate window**: `xdotool search --sync --name '^ModPlayer$'` →
+  window id; `xdotool getwindowgeometry --shell <id>` → bounds.
+- **Drive**: `xdotool windowactivate --sync <id>`, then
+  `xdotool mousemove --window <id> <x> <y> click 1` for clicks,
+  `xdotool key --window <id> ctrl+1 Return Down` for shortcuts and keys,
+  `xdotool type --window <id> --delay 20 '<text>'` for typing.
+- **Capture**: `import -window <id> <png>` (or
+  `xwd -id <id> | convert xwd:- <png>`).
+- **Token**: `secret-tool lookup service ModPlayer username
+  session-credential | jq -r .access_token`. If the lookup is empty,
+  run `secret-tool search --all service ModPlayer` once to confirm the
+  attribute names the store wrote, and correct this recipe.
+
+Recipe — **Windows** (PowerShell 7+):
+
+- **Prerequisites**: MSVC build tools; an interactive, unlocked desktop
+  session (synthetic input and capture do not work in a locked or
+  service session); the app window must be foreground and unoccluded
+  while driven.
+- **Toolchain**: `$env:RUSTUP_TOOLCHAIN = '1.95.0'` or
+  `Remove-Item Env:RUSTUP_TOOLCHAIN`; fresh config dir via
+  `$env:MODPLAYER_CONFIG_DIR = (New-Item -ItemType Directory
+  (Join-Path $env:TEMP ([guid]::NewGuid()))).FullName`.
+- **Launch**: `Start-Process .\target\debug\modplayer.exe -PassThru`
+  (keep the process object to stop it later).
+- **Locate window**: `(Get-Process modplayer).MainWindowHandle` →
+  `HWND`; `GetWindowRect` via an `Add-Type` P/Invoke helper to `user32`.
+  Call `SetProcessDpiAwarenessContext(-4)` (per-monitor v2) first so
+  coordinates are physical pixels.
+- **Drive**: same `user32` helper — `SetForegroundWindow(hwnd)`,
+  `SetCursorPos` + `SendInput` (mouse down/up) for clicks, `SendInput`
+  virtual-key events for shortcuts (`Ctrl+1/2`, Enter, arrows) and
+  `KEYEVENTF_UNICODE` events for typing.
+- **Capture**: `PrintWindow(hwnd, hdc, 2)` (`PW_RENDERFULLCONTENT`, needed
+  for the GPU-rendered surface) into a `System.Drawing.Bitmap` sized to
+  the window rect, saved as PNG; fall back to
+  `Graphics.CopyFromScreen` over the rect if the result is black.
+- **Token**: Windows Credential Manager generic credential with target
+  `session-credential.ModPlayer` (`keyring`'s default `<user>.<service>`
+  target); read it with `CredReadW` via the P/Invoke helper, decode the
+  blob as UTF-8 and parse `.access_token` with `ConvertFrom-Json`. If not
+  found, list with `cmdkey /list | Select-String ModPlayer` and correct
+  this recipe.
 
 **Rationale**: the manual scenarios are the only verification that
 touches the real service, the real secure store and real audio hardware
 (Principle VIII); leaving them unexecuted turns the sign-off into a
 formality and has, in 003, hidden six live-only defects until the agent
-actually drove the app.
+actually drove the app. Running them on whatever host the feature is
+built on — rather than only on macOS — is what makes Principle X's
+"identical across macOS, Windows, and Linux" claim observable instead of
+assumed.
 
-**Version**: 1.1.1 | **Ratified**: 2026-09-14 | **Last Amended**: 2026-09-19
+**Version**: 1.2.0 | **Ratified**: 2026-09-14 | **Last Amended**: 2026-10-13

@@ -156,7 +156,8 @@ Examples of foundational tasks (adjust based on your project):
 - [ ] TXXX Performance optimization across all stories
 - [ ] TXXX [P] Additional unit tests (if requested) in tests/unit/
 - [ ] TXXX Security hardening
-- [ ] TXXX Run quickstart.md validation
+- [ ] TXXX Run quickstart.md validation — agent executes the manual scenarios on the host OS
+  (macOS/Linux/Windows recipe per constitution › Manual Scenario Sign-Off) and records host + evidence per scenario
 
 ---
 
